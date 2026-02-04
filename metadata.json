@@ -1,0 +1,5 @@
+{
+  "name": "ABTGS - Broadcast Transcript System",
+  "description": "Automated Broadcast Transcript Generation System. A professional tool for TV production to automate logging and transcription with AI, featuring frame-accurate timecodes and speaker diarization verification.",
+  "requestFramePermissions": []
+}

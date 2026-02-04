@@ -1,0 +1,23 @@
+# Environment Variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+*.log
+
+# Node.js
+node_modules/
+dist/
+build/
+.DS_Store
+
+# Application specific temp files
+temp_*
+*.opus
+transcript_*.docx
+video_source.mp4
