@@ -1,4 +1,4 @@
-export type ProcessingStatus = 'IDLE' | 'PROCESSING' | 'VERIFICATION' | 'COMPLETED';
+export type ProcessingStatus = 'IDLE' | 'PROCESSING' | 'VERIFICATION' | 'COMPLETED' | 'BATCH_UPLOADING' | 'BATCH_PROCESSING' | 'BATCH_DONE';
 
 export interface ProcessingStep {
   label: string;
@@ -42,4 +42,23 @@ export interface MappingDecision {
     name: string;
     abbreviation: string;
   }
+}
+
+// --- Batch types ---
+
+export interface BatchFileInfo {
+  id: string;
+  filename: string;
+  status: string;
+  status_label: string;
+  error?: string;
+  progress_percent?: number;
+}
+
+export interface BatchStatus {
+  total: number;
+  completed: number;
+  errors: number;
+  in_progress: number;
+  files: BatchFileInfo[];
 }

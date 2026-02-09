@@ -1,5 +1,7 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { UploadForm } from './components/UploadForm';
+import { BatchUploadForm } from './components/BatchUploadForm';
+import { BatchProgress } from './components/BatchProgress';
 import { ProcessingStatus } from './components/ProcessingStatus';
 import { VerificationDashboard } from './components/VerificationDashboard';
 import { ToastContainer, ToastMessage } from './components/Toast';
@@ -9,9 +11,11 @@ import { CheckCircle2 } from 'lucide-react';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<StatusType>('IDLE');
+  const [mode, setMode] = useState<'single' | 'batch'>('batch');
   const [progressStep, setProgressStep] = useState<string>('');
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [projectData, setProjectData] = useState<ProjectData | null>(null);
+  const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -67,6 +71,17 @@ const App: React.FC = () => {
     addToast('success', 'Монтажный лист успешно сформирован');
   };
 
+  const handleStartBatch = (files: File[]) => {
+    setBatchFiles(files);
+    setStatus('BATCH_PROCESSING');
+  };
+
+  const resetToIdle = () => {
+    setStatus('IDLE');
+    setProjectData(null);
+    setBatchFiles([]);
+  };
+
   return (
     <div className="h-screen bg-gray-50 flex flex-col">
       <ToastContainer messages={toasts} onDismiss={dismissToast} />
@@ -80,12 +95,29 @@ const App: React.FC = () => {
           <span className="text-gray-400 mx-2 hidden sm:inline">/</span>
           <span className="text-sm text-gray-500 hidden sm:inline">Генерация монтажных листов</span>
         </div>
-        <div className="text-xs text-gray-400 font-mono">v1.1.0</div>
+        <div className="text-xs text-gray-400 font-mono">v1.2.0</div>
       </header>
 
       <main className="flex-1 overflow-hidden relative">
-        {status === 'IDLE' && (
-          <UploadForm onUpload={handleUpload} />
+        {status === 'IDLE' && mode === 'batch' && (
+          <BatchUploadForm
+            onStartBatch={handleStartBatch}
+            onSwitchToSingle={() => setMode('single')}
+          />
+        )}
+
+        {status === 'IDLE' && mode === 'single' && (
+          <div>
+            <UploadForm onUpload={handleUpload} />
+            <div className="text-center -mt-2 pb-4">
+              <button
+                onClick={() => setMode('batch')}
+                className="text-sm text-gray-500 hover:text-gray-700"
+              >
+                Пакетная обработка нескольких файлов
+              </button>
+            </div>
+          </div>
         )}
 
         {status === 'PROCESSING' && (
@@ -104,6 +136,14 @@ const App: React.FC = () => {
           />
         )}
 
+        {status === 'BATCH_PROCESSING' && batchFiles.length > 0 && (
+          <BatchProgress
+            files={batchFiles}
+            onDone={resetToIdle}
+            onError={(msg) => addToast('error', msg)}
+          />
+        )}
+
         {status === 'COMPLETED' && (
           <div className="flex flex-col items-center justify-center h-full animate-fade-in-up px-4">
             <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mb-6">
@@ -112,10 +152,7 @@ const App: React.FC = () => {
             <h2 className="text-2xl font-bold text-gray-900">Готово!</h2>
             <p className="text-gray-500 mt-2 mb-8 text-center">Монтажный лист успешно сформирован и скачан.</p>
             <button
-              onClick={() => {
-                setStatus('IDLE');
-                setProjectData(null);
-              }}
+              onClick={resetToIdle}
               className="px-6 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
             >
               Обработать следующий файл
