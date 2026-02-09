@@ -6,16 +6,21 @@ interface Props {
 }
 
 export const UploadForm: React.FC<Props> = ({ onUpload }) => {
-  const [link, setLink] = useState('https://yadi.sk/d/example_link');
+  const [link, setLink] = useState('');
   const [error, setError] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!link.includes('yadi.sk') && !link.includes('disk.yandex')) {
+    const trimmed = link.trim();
+    if (!trimmed) {
+      setError('Вставьте ссылку на файл');
+      return;
+    }
+    if (!trimmed.includes('yadi.sk') && !trimmed.includes('disk.yandex')) {
       setError('Пожалуйста, введите корректную публичную ссылку на Яндекс.Диск');
       return;
     }
-    onUpload(link);
+    onUpload(trimmed);
   };
 
   return (
@@ -68,7 +73,7 @@ export const UploadForm: React.FC<Props> = ({ onUpload }) => {
         <div className="mt-6 border-t border-gray-100 pt-6">
           <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Технические требования</h4>
           <ul className="text-xs text-gray-500 space-y-1 list-disc pl-4">
-            <li>Поддерживаемые форматы: .mp3, .wav, .mov, .mxf</li>
+            <li>Поддерживаемые форматы: .mp3, .wav, .mov, .mxf, .mp4, .wmv, .avi, .mkv, .ogg, .flac</li>
             <li>Максимальный размер файла: 1 ГБ</li>
             <li>Расчет таймкода: SMPTE 25 FPS (PAL)</li>
           </ul>
