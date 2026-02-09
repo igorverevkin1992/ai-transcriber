@@ -7,3 +7,7 @@ ffmpeg-python
 python-docx
 pydantic
 python-dotenv
+slowapi
+pytest
+httpx
+ruff

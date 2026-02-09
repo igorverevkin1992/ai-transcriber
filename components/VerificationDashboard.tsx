@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ProjectData, SpeakerInfo, Candidate } from '../types';
+import { ProjectData, SpeakerInfo, TranscriptSegment } from '../types';
 import { SpeakerMatrix } from './SpeakerMatrix';
 import { TranscriptPreview } from './TranscriptPreview';
 import { api } from '../services/api';
@@ -7,24 +7,24 @@ import { api } from '../services/api';
 interface Props {
   data: ProjectData;
   onFinish: () => void;
+  onError: (message: string) => void;
 }
 
-export const VerificationDashboard: React.FC<Props> = ({ data, onFinish }) => {
+export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError }) => {
   const [speakers, setSpeakers] = useState<SpeakerInfo[]>(data.detected_speakers);
+  const [segments, setSegments] = useState<TranscriptSegment[]>(data.preview_transcript);
   const [isDownloading, setIsDownloading] = useState(false);
 
-  // Handle swapping speakers (Tag ID remains, metadata swaps)
   const handleSwap = (tagId1: string, tagId2: string) => {
     const s1Index = speakers.findIndex(s => s.tag_id === tagId1);
     const s2Index = speakers.findIndex(s => s.tag_id === tagId2);
-    
+
     if (s1Index === -1 || s2Index === -1) return;
 
     const newSpeakers = [...speakers];
     const s1 = newSpeakers[s1Index];
     const s2 = newSpeakers[s2Index];
 
-    // Swap candidate IDs and custom attributes
     const tempCand = s1.candidate_id;
     const tempName = s1.custom_name;
     const tempAbbr = s1.custom_abbr;
@@ -45,8 +45,8 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish }) => {
       if (s.tag_id !== tagId) return s;
       return {
         ...s,
-        candidate_id: null, // If manual editing, detach from candidate
-        [field === 'name' ? 'custom_name' : 'custom_abbr']: value
+        candidate_id: null,
+        [field === 'name' ? 'custom_name' : 'custom_abbr']: value,
       };
     }));
   };
@@ -55,7 +55,7 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish }) => {
     if (candidateId === 'custom') {
       setSpeakers(prev => prev.map(s => {
         if (s.tag_id !== tagId) return s;
-        return { ...s, candidate_id: null, custom_name: "Новый спикер", custom_abbr: "НОВ" };
+        return { ...s, candidate_id: null, custom_name: 'Новый спикер', custom_abbr: 'НОВ' };
       }));
     } else {
       setSpeakers(prev => prev.map(s => {
@@ -65,31 +65,33 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish }) => {
           ...s,
           candidate_id: candidateId,
           custom_name: candidate?.name,
-          custom_abbr: candidate?.abbr
+          custom_abbr: candidate?.abbr,
         };
       }));
     }
   };
 
+  const handleEditSegment = (index: number, newText: string) => {
+    setSegments(prev => prev.map((seg, i) => (i === index ? { ...seg, text: newText } : seg)));
+  };
+
   const handleDownload = async () => {
     setIsDownloading(true);
     try {
-      // Prepare mapping object for backend
       const mapping = speakers.reduce((acc, s) => {
         acc[s.tag_id] = {
-          name: s.candidate_id 
-            ? data.candidates.find(c => c.id === s.candidate_id)?.name 
-            : s.custom_name,
-          abbreviation: s.candidate_id
+          name: (s.candidate_id
+            ? data.candidates.find(c => c.id === s.candidate_id)?.name
+            : s.custom_name) || `Спикер ${s.tag_id}`,
+          abbreviation: (s.candidate_id
             ? data.candidates.find(c => c.id === s.candidate_id)?.abbr
-            : s.custom_abbr
+            : s.custom_abbr) || '',
         };
         return acc;
       }, {} as any);
 
       const blob = await api.confirmMapping(data.id, mapping);
-      
-      // Trigger download
+
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -98,35 +100,35 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish }) => {
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-      
+
       onFinish();
-    } catch (e) {
-      console.error(e);
-      alert("Ошибка генерации документа");
+    } catch (e: any) {
+      onError(e?.message || 'Ошибка генерации документа');
     } finally {
       setIsDownloading(false);
     }
   };
 
   return (
-    <div className="grid grid-cols-12 gap-6 h-full p-6">
-      <div className="col-span-4 h-full">
-        <SpeakerMatrix 
-          speakers={speakers} 
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6 h-full p-4 lg:p-6 overflow-auto lg:overflow-hidden">
+      <div className="lg:col-span-4 lg:h-full">
+        <SpeakerMatrix
+          speakers={speakers}
           candidates={data.candidates}
           onSwap={handleSwap}
           onUpdateSpeaker={handleUpdateSpeaker}
           onCandidateSelect={handleCandidateSelect}
         />
       </div>
-      <div className="col-span-8 h-full">
+      <div className="lg:col-span-8 lg:h-full">
         <TranscriptPreview
-          segments={data.preview_transcript}
+          segments={segments}
           speakers={speakers}
           candidates={data.candidates}
           filename={data.original_filename}
           onDownload={handleDownload}
           isDownloading={isDownloading}
+          onEditSegment={handleEditSegment}
         />
       </div>
     </div>

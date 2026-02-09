@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+temp_files/
+.env
+.env.local
+.env.production
+__pycache__/
+*.py[cod]
+.git/
+.github/
+.pytest_cache/
+tests/
+*.log
+.DS_Store
