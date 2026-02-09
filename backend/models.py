@@ -82,3 +82,22 @@ class HealthResponse(BaseModel):
     status: str
     service: str
     message: str
+
+
+# --- Batch models ---
+
+class BatchFileStatus(BaseModel):
+    id: str
+    filename: str
+    status: str
+    status_label: str
+    error: Optional[str] = None
+    progress_percent: Optional[int] = None
+
+
+class BatchStatusResponse(BaseModel):
+    total: int
+    completed: int
+    errors: int
+    in_progress: int
+    files: List[BatchFileStatus]

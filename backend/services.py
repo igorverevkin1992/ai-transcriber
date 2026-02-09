@@ -265,3 +265,71 @@ def process_video_task(project_id: str, disk_url: str):
             except OSError:
                 pass
         delete_from_s3(object_name)
+
+
+def process_uploaded_file_task(project_id: str, local_video_path, original_filename: str):
+    """Фоновая задача для локально загруженного файла: конвертация -> S3 -> распознавание."""
+    local_audio_path = TEMP_DIR / f"{project_id}.opus"
+    object_name = f"{project_id}.opus"
+    # Преобразуем в Path если передана строка
+    from pathlib import Path
+    local_video_path = Path(local_video_path)
+
+    try:
+        projects_db[project_id]["original_filename"] = original_filename
+
+        # 1. КОНВЕРТАЦИЯ
+        projects_db[project_id]["status"] = ProjectStatusEnum.CONVERTING
+        projects_db[project_id]["progress_percent"] = None
+        _convert_to_opus(project_id, local_video_path, local_audio_path)
+
+        # 2. ЗАГРУЗКА В S3
+        projects_db[project_id]["status"] = ProjectStatusEnum.UPLOADING
+        logger.info("[%s] Загрузка в S3...", project_id[:8])
+        file_uri = upload_to_s3(str(local_audio_path), object_name)
+        logger.info("[%s] Файл загружен в S3.", project_id[:8])
+
+        # 3. РАСПОЗНАВАНИЕ
+        projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
+        logger.info("[%s] Отправка на распознавание...", project_id[:8])
+        op_data = _transcribe_with_speechkit(project_id, file_uri)
+
+        # 4. ОБРАБОТКА РЕЗУЛЬТАТА
+        _process_recognition_result(project_id, op_data, original_filename, local_video_path)
+        projects_db[project_id]["status"] = ProjectStatusEnum.COMPLETED
+        logger.info("[%s] Файл обработан: %s", project_id[:8], original_filename)
+
+    except Exception as e:
+        logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
+        projects_db[project_id]["status"] = ProjectStatusEnum.ERROR
+        projects_db[project_id]["error"] = str(e)
+
+    finally:
+        for path in (local_video_path, local_audio_path):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+        delete_from_s3(object_name)
+
+
+def auto_export_project(project_id: str, output_path: str) -> str | None:
+    """Автоматически экспортирует проект в DOCX используя имена спикеров из метаданных файла.
+    Возвращает имя файла для скачивания или None при ошибке."""
+    from backend.docx_export import generate_docx
+
+    proj = projects_db.get(project_id)
+    if not proj or "result" not in proj:
+        return None
+
+    speakers = proj["result"].get("speakers", {})
+    final_map = {}
+    abbr_map = {}
+
+    for speaker_id, info in speakers.items():
+        name = info.get("suggested_name", f"Спикер {speaker_id}")
+        final_map[speaker_id] = name
+        abbr_map[speaker_id] = name[:3].upper() if name else f"С{speaker_id}"
+
+    return generate_docx(proj, final_map, abbr_map, output_path)

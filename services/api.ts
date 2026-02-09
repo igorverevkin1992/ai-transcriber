@@ -1,5 +1,5 @@
 import { API_BASE_URL } from '../config';
-import { ProjectData, MappingDecision } from '../types';
+import { ProjectData, MappingDecision, BatchStatus } from '../types';
 
 export const api = {
   uploadFile: async (link: string): Promise<string> => {
@@ -120,6 +120,41 @@ export const api = {
     });
 
     if (!response.ok) throw new Error('Не удалось сгенерировать документ');
+    return await response.blob();
+  },
+
+  // --- Batch methods ---
+
+  batchUploadFile: async (file: File): Promise<string> => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch(`${API_BASE_URL}/batch/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.detail || `Ошибка загрузки файла: ${file.name}`);
+    }
+
+    const data = await response.json();
+    return data.id;
+  },
+
+  batchStatus: async (projectIds: string[]): Promise<BatchStatus> => {
+    const response = await fetch(`${API_BASE_URL}/batch/status?ids=${projectIds.join(',')}`);
+    if (!response.ok) throw new Error('Ошибка получения статуса пакета');
+    return await response.json();
+  },
+
+  batchDownload: async (projectIds: string[]): Promise<Blob> => {
+    const response = await fetch(`${API_BASE_URL}/batch/download?ids=${projectIds.join(',')}`);
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.detail || 'Ошибка скачивания архива');
+    }
     return await response.blob();
   },
 };
