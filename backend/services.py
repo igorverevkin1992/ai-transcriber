@@ -7,6 +7,7 @@ import requests
 from backend.config import (
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
+    OUTPUT_DIR,
     TEMP_DIR,
     YANDEX_API_KEY,
     logger,
@@ -298,6 +299,23 @@ def process_uploaded_file_task(project_id: str, local_video_path, original_filen
         _process_recognition_result(project_id, op_data, original_filename, local_video_path)
         projects_db[project_id]["status"] = ProjectStatusEnum.COMPLETED
         logger.info("[%s] Файл обработан: %s", project_id[:8], original_filename)
+
+        # 5. АВТОСОХРАНЕНИЕ DOCX НА ДИСК
+        try:
+            docx_path = str(OUTPUT_DIR / f"autosave_{project_id}.docx")
+            saved_name = auto_export_project(project_id, docx_path)
+            if saved_name:
+                # Переименовываем в человекочитаемое имя
+                final_path = OUTPUT_DIR / saved_name
+                # Если файл с таким именем уже есть, добавляем ID
+                if final_path.exists():
+                    from backend.utils import strip_extension
+                    final_path = OUTPUT_DIR / f"{strip_extension(saved_name)}_{project_id[:8]}.docx"
+                import shutil
+                shutil.move(docx_path, str(final_path))
+                logger.info("[%s] DOCX сохранён: %s", project_id[:8], final_path.name)
+        except Exception as e:
+            logger.warning("[%s] Не удалось автосохранить DOCX: %s", project_id[:8], e)
 
     except Exception as e:
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)

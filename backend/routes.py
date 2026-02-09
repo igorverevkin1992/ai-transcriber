@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from backend.config import ALLOWED_EXTENSIONS, TEMP_DIR, logger
+from backend.config import ALLOWED_EXTENSIONS, OUTPUT_DIR, TEMP_DIR, logger
 from backend.docx_export import generate_docx
 from backend.models import (
     STATUS_LABELS_RU,
@@ -222,6 +222,28 @@ async def batch_download(ids: str = Query(..., description="ID проектов 
 
     zip_buffer.seek(0)
     logger.info("Пакетный экспорт: %d файлов в ZIP", exported_count)
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
+    )
+
+
+@router.get("/batch/download-saved")
+async def download_saved():
+    """Скачивает все автосохранённые DOCX из папки completed_docx/ как ZIP."""
+    docx_files = list(OUTPUT_DIR.glob("*.docx"))
+    if not docx_files:
+        raise HTTPException(status_code=400, detail="Нет сохранённых файлов в completed_docx/")
+
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in docx_files:
+            zf.write(str(f), f.name)
+
+    zip_buffer.seek(0)
+    logger.info("Скачивание сохранённых файлов: %d DOCX", len(docx_files))
 
     return StreamingResponse(
         zip_buffer,
