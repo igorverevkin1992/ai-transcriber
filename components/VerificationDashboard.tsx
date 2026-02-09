@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { ProjectData, SpeakerInfo, Candidate } from '../types';
 import { SpeakerMatrix } from './SpeakerMatrix';
 import { TranscriptPreview } from './TranscriptPreview';
@@ -93,7 +93,7 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish }) => {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = data.original_filename.replace('.mp3', '.docx');
+      a.download = data.original_filename.replace(/\.[^.]+$/, '.docx');
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -120,10 +120,11 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish }) => {
         />
       </div>
       <div className="col-span-8 h-full">
-        <TranscriptPreview 
+        <TranscriptPreview
           segments={data.preview_transcript}
           speakers={speakers}
           candidates={data.candidates}
+          filename={data.original_filename}
           onDownload={handleDownload}
           isDownloading={isDownloading}
         />

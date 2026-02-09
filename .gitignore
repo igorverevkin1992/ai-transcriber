@@ -18,6 +18,7 @@ build/
 
 # Application specific temp files
 temp_*
+temp_files/
 *.opus
 transcript_*.docx
 video_source.mp4

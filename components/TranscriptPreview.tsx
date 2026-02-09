@@ -6,14 +6,16 @@ interface Props {
   segments: TranscriptSegment[];
   speakers: SpeakerInfo[];
   candidates: Candidate[];
+  filename: string;
   onDownload: () => void;
   isDownloading: boolean;
 }
 
-export const TranscriptPreview: React.FC<Props> = ({ 
-  segments, 
-  speakers, 
+export const TranscriptPreview: React.FC<Props> = ({
+  segments,
+  speakers,
   candidates,
+  filename,
   onDownload,
   isDownloading
 }) => {
@@ -55,7 +57,7 @@ export const TranscriptPreview: React.FC<Props> = ({
         <div className="max-w-3xl mx-auto bg-white shadow-lg min-h-[800px] p-12 font-times text-black">
           {/* Header Simulation */}
           <div className="mb-8 text-center uppercase font-bold text-lg">
-            ИНТЕРВЬЮ_ДОВЛАТОВА_ПАВЕЛ_05.11.2025_F8.DOCX
+            ИСХОДНИК: {filename}
           </div>
 
           <div className="mb-8 space-y-1">
