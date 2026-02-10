@@ -215,19 +215,83 @@ def _transcribe_with_speechkit(project_id: str, audio_path) -> list[dict]:
 # ==================== Whisper (local, free) ====================
 
 
+def _get_whisper_cache_dir() -> Path:
+    """Возвращает директорию кэша Whisper (~/.cache/whisper)."""
+    import os
+    default = os.path.join(os.path.expanduser("~"), ".cache")
+    return Path(os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper"))
+
+
+def _clear_corrupted_whisper_cache(model_name: str):
+    """Удаляет потенциально повреждённый файл модели из кэша Whisper."""
+    cache_dir = _get_whisper_cache_dir()
+    # Whisper сохраняет модели как <model_name>.pt
+    model_file = cache_dir / f"{model_name}.pt"
+    if model_file.exists():
+        logger.warning("Удаляю повреждённый файл модели: %s", model_file)
+        try:
+            model_file.unlink()
+        except OSError as e:
+            logger.error("Не удалось удалить %s: %s", model_file, e)
+
+
+WHISPER_MAX_RETRIES = 3
+WHISPER_RETRY_DELAYS = [5, 15, 30]  # секунды между попытками
+
+
 def _get_whisper_model(model_name: str = "medium"):
-    """Загружает и кэширует модель Whisper."""
+    """Загружает и кэширует модель Whisper с ретраями и очисткой кэша.
+
+    При ошибке скачивания (обрыв сети, повреждённый файл) автоматически
+    удаляет битый кэш и повторяет попытку до WHISPER_MAX_RETRIES раз.
+    """
     global _whisper_model, _whisper_model_name
     if not WHISPER_AVAILABLE:
         raise RuntimeError(
             "Whisper не установлен. Выполните: pip install openai-whisper"
         )
-    if _whisper_model is None or _whisper_model_name != model_name:
-        logger.info("Загрузка модели Whisper '%s'...", model_name)
-        _whisper_model = whisper_module.load_model(model_name)
-        _whisper_model_name = model_name
-        logger.info("Модель Whisper '%s' загружена.", model_name)
-    return _whisper_model
+    if _whisper_model is not None and _whisper_model_name == model_name:
+        return _whisper_model
+
+    last_error = None
+    for attempt in range(1, WHISPER_MAX_RETRIES + 1):
+        try:
+            logger.info(
+                "Загрузка модели Whisper '%s' (попытка %d/%d)...",
+                model_name, attempt, WHISPER_MAX_RETRIES,
+            )
+            _whisper_model = whisper_module.load_model(model_name)
+            _whisper_model_name = model_name
+            logger.info("Модель Whisper '%s' загружена успешно.", model_name)
+            return _whisper_model
+
+        except RuntimeError as e:
+            # SHA256 checksum mismatch или другая ошибка загрузки
+            last_error = e
+            logger.warning(
+                "Ошибка загрузки Whisper '%s' (попытка %d/%d): %s",
+                model_name, attempt, WHISPER_MAX_RETRIES, e,
+            )
+            _clear_corrupted_whisper_cache(model_name)
+
+        except (OSError, ConnectionError, Exception) as e:
+            # Обрыв соединения, таймаут, и т.д.
+            last_error = e
+            logger.warning(
+                "Сетевая ошибка при загрузке Whisper '%s' (попытка %d/%d): %s",
+                model_name, attempt, WHISPER_MAX_RETRIES, e,
+            )
+            _clear_corrupted_whisper_cache(model_name)
+
+        if attempt < WHISPER_MAX_RETRIES:
+            delay = WHISPER_RETRY_DELAYS[attempt - 1]
+            logger.info("Повтор через %d сек...", delay)
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f"Не удалось загрузить модель Whisper '{model_name}' "
+        f"после {WHISPER_MAX_RETRIES} попыток: {last_error}"
+    )
 
 
 def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medium") -> list[dict]:

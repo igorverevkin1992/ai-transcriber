@@ -151,6 +151,21 @@ export const api = {
     return await response.json();
   },
 
+  preloadWhisperModel: async (model: string = 'medium'): Promise<void> => {
+    const formData = new FormData();
+    formData.append('model', model);
+
+    const response = await fetch(`${API_BASE_URL}/whisper/preload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.detail || 'Не удалось загрузить модель Whisper');
+    }
+  },
+
   batchDownload: async (projectIds: string[]): Promise<Blob> => {
     const response = await fetch(`${API_BASE_URL}/batch/download?ids=${projectIds.join(',')}`);
     if (!response.ok) {

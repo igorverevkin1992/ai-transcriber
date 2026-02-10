@@ -24,6 +24,8 @@ from backend.models import (
     ProjectStatusResponse,
 )
 from backend.services import (
+    WHISPER_AVAILABLE,
+    _get_whisper_model,
     auto_export_project,
     process_uploaded_file_task,
     process_video_task,
@@ -263,3 +265,35 @@ async def download_saved():
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
     )
+
+
+# ==================== WHISPER MODEL MANAGEMENT ====================
+
+
+@router.post("/whisper/preload")
+async def preload_whisper_model(
+    model: str = Form("medium"),
+):
+    """Предварительно скачивает и загружает модель Whisper.
+
+    Вызовите перед началом пакетной обработки, чтобы убедиться что модель
+    скачана и готова к работе. Включает retry и очистку повреждённого кэша.
+    """
+    if not WHISPER_AVAILABLE:
+        raise HTTPException(
+            status_code=400,
+            detail="Whisper не установлен. Выполните: pip install openai-whisper",
+        )
+
+    valid_models = {"tiny", "base", "small", "medium", "large"}
+    if model not in valid_models:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Неизвестная модель: {model}. Допустимые: {', '.join(sorted(valid_models))}",
+        )
+
+    try:
+        _get_whisper_model(model)
+        return {"status": "ok", "model": model, "message": f"Модель '{model}' готова к работе"}
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))

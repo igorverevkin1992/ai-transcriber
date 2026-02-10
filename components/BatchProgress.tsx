@@ -108,7 +108,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logMessages]);
 
-  // Phase 1: Upload files to server
+  // Phase 1: Preload Whisper model (if needed), then upload files to server
   useEffect(() => {
     let cancelled = false;
 
@@ -116,6 +116,21 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
       const queue = [...files];
       const updated = [...trackers];
       let doneCount = 0;
+
+      // Pre-download Whisper model before starting uploads
+      if (engine === 'whisper') {
+        addLog(`Проверка модели Whisper '${whisperModel}'...`);
+        try {
+          await api.preloadWhisperModel(whisperModel);
+          addLog(`✓ Модель Whisper '${whisperModel}' готова`);
+        } catch (e: any) {
+          addLog(`✗ Ошибка загрузки модели Whisper: ${e.message}`);
+          onError(`Не удалось загрузить модель Whisper '${whisperModel}': ${e.message}`);
+          setState('done');
+          return;
+        }
+        if (cancelled) return;
+      }
 
       addLog(`Начинаем загрузку ${queue.length} файлов на сервер...`);
 
