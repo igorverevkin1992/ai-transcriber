@@ -1,7 +1,10 @@
 import asyncio
+import shutil
 import time
+from pathlib import Path
 
 import ffmpeg
+import grpc
 import requests
 
 from backend.config import (
@@ -13,11 +16,11 @@ from backend.config import (
     logger,
 )
 from backend.models import ProjectStatusEnum
-from backend.s3 import delete_from_s3, upload_to_s3
 from backend.utils import (
     detect_fps,
     frames_to_tc,
     parse_filename_metadata,
+    strip_extension,
     tc_to_frames,
     validate_file_extension,
 )
@@ -27,6 +30,11 @@ projects_db: dict = {}
 
 # Semaphore to limit concurrent heavy tasks
 _task_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+
+# --- SpeechKit gRPC v3 ---
+SPEECHKIT_GRPC_HOST = "stt.api.cloud.yandex.net:443"
+GRPC_CHUNK_SIZE = 4000  # 4 KB chunks for streaming audio
+GRPC_TIMEOUT = 7200  # 2 hours max for recognition
 
 
 def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> str:
@@ -85,75 +93,116 @@ def _convert_to_opus(project_id: str, input_path, output_path):
     logger.info("[%s] Конвертация завершена.", project_id[:8])
 
 
-def _transcribe_with_speechkit(project_id: str, file_uri: str) -> dict:
-    """Отправляет аудио на распознавание и ожидает результат."""
+# ==================== SpeechKit API v3 (gRPC) ====================
+
+
+def _generate_recognition_requests(audio_path):
+    """Генератор gRPC-запросов: сначала настройки сессии, затем чанки аудио."""
+    from yandex.cloud.ai.stt.v3 import stt_pb2
+
+    recognize_options = stt_pb2.StreamingOptions(
+        recognition_model=stt_pb2.RecognitionModelOptions(
+            model="general",
+            audio_format=stt_pb2.AudioFormatOptions(
+                container_audio=stt_pb2.ContainerAudio(
+                    container_audio_type=stt_pb2.ContainerAudio.OGG_OPUS,
+                )
+            ),
+            text_normalization=stt_pb2.TextNormalizationOptions(
+                text_normalization=stt_pb2.TextNormalizationOptions.TEXT_NORMALIZATION_ENABLED,
+                profanity_filter=False,
+                literature_text=True,
+            ),
+            language_restriction=stt_pb2.LanguageRestrictionOptions(
+                restriction_type=stt_pb2.LanguageRestrictionOptions.WHITELIST,
+                language_code=["ru-RU"],
+            ),
+            audio_processing_type=stt_pb2.RecognitionModelOptions.FULL_DATA,
+        ),
+        speaker_labeling=stt_pb2.SpeakerLabelingOptions(
+            speaker_labeling=stt_pb2.SpeakerLabelingOptions.SPEAKER_LABELING_ENABLED,
+        ),
+    )
+    yield stt_pb2.StreamingRequest(session_options=recognize_options)
+
+    # Stream audio file in chunks
+    with open(str(audio_path), "rb") as f:
+        while True:
+            data = f.read(GRPC_CHUNK_SIZE)
+            if not data:
+                break
+            yield stt_pb2.StreamingRequest(chunk=stt_pb2.AudioChunk(data=data))
+
+
+def _transcribe_with_speechkit(project_id: str, audio_path) -> list[dict]:
+    """Распознавание через SpeechKit API v3 (gRPC) с диаризацией спикеров.
+
+    Стримит локальный аудиофайл напрямую в SpeechKit (S3 не нужен).
+    Возвращает список сегментов с channel_tag (0 или 1) для каждого спикера.
+    """
     if not YANDEX_API_KEY:
         raise RuntimeError("YANDEX_API_KEY не задан. Распознавание невозможно.")
 
-    sk_body = {
-        "config": {
-            "specification": {
-                "languageCode": "ru-RU",
-                "literature_text": True,
-                "profanityFilter": False,
-                "audioEncoding": "OGG_OPUS",
-                "sampleRateHertz": 48000,
-                "audioChannelCount": 1,
-            }
-        },
-        "audio": {"uri": file_uri},
-    }
+    from yandex.cloud.ai.stt.v3 import stt_service_pb2_grpc
 
-    sk_headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
+    cred = grpc.ssl_channel_credentials()
+    channel = grpc.secure_channel(SPEECHKIT_GRPC_HOST, cred)
+    stub = stt_service_pb2_grpc.RecognizerStub(channel)
 
-    for attempt in range(3):
-        try:
-            sk_resp = requests.post(
-                "https://transcribe.api.cloud.yandex.net/speech/stt/v2/longRunningRecognize",
-                json=sk_body,
-                headers=sk_headers,
-                timeout=60,
-            )
-            sk_resp.raise_for_status()
-            break
-        except requests.RequestException as e:
-            if attempt == 2:
-                raise
-            logger.warning("[%s] SpeechKit запрос не удался (попытка %d): %s", project_id[:8], attempt + 1, e)
-            time.sleep(2 ** (attempt + 1))
+    logger.info("[%s] Стримим аудио в SpeechKit v3 (gRPC с диаризацией)...", project_id[:8])
 
-    operation_id = sk_resp.json()["id"]
-    logger.info("[%s] Операция SpeechKit: %s", project_id[:8], operation_id)
+    try:
+        responses = stub.RecognizeStreaming(
+            _generate_recognition_requests(audio_path),
+            metadata=[("authorization", f"Api-Key {YANDEX_API_KEY}")],
+            timeout=GRPC_TIMEOUT,
+        )
 
-    poll_interval = 3
-    max_polls = 600
-    for _ in range(max_polls):
-        time.sleep(poll_interval)
-        try:
-            op_resp = requests.get(
-                f"https://operation.api.cloud.yandex.net/operations/{operation_id}",
-                headers=sk_headers,
-                timeout=30,
-            )
-            op_data = op_resp.json()
-        except requests.RequestException as e:
-            logger.warning("[%s] Ошибка при проверке статуса операции: %s", project_id[:8], e)
-            continue
+        segments = []
+        for r in responses:
+            event_type = r.WhichOneof("Event")
+            if event_type == "final_refinement":
+                alts = r.final_refinement.normalized_text.alternatives
+                if not alts:
+                    continue
+                alt = alts[0]
+                text = alt.text
+                words = list(alt.words)
+                if not words:
+                    continue
+                segments.append({
+                    "text": text,
+                    "channel_tag": r.channel_tag,
+                    "start_ms": words[0].start_time_ms,
+                    "end_ms": words[-1].end_time_ms,
+                    "words": [
+                        {
+                            "text": w.text,
+                            "start_ms": w.start_time_ms,
+                            "end_ms": w.end_time_ms,
+                        }
+                        for w in words
+                    ],
+                })
 
-        if op_data.get("done"):
-            break
-    else:
-        raise TimeoutError("SpeechKit: превышено время ожидания распознавания.")
+        logger.info(
+            "[%s] Распознавание завершено. Сегментов: %d",
+            project_id[:8], len(segments),
+        )
+        return segments
 
-    if "error" in op_data:
-        raise RuntimeError(f"SpeechKit Error: {op_data['error']}")
-
-    return op_data
+    except grpc.RpcError as e:
+        logger.error(
+            "[%s] gRPC ошибка: code=%s, details=%s",
+            project_id[:8], e.code(), e.details(),
+        )
+        raise RuntimeError(f"SpeechKit gRPC: {e.details()}") from e
+    finally:
+        channel.close()
 
 
-def _process_recognition_result(project_id: str, op_data: dict, original_filename: str, video_path):
-    """Обрабатывает результат распознавания и сохраняет в projects_db."""
-    chunks = op_data["response"]["chunks"]
+def _process_recognition_result(project_id: str, segments: list[dict], original_filename: str, video_path):
+    """Обрабатывает результат распознавания v3 и сохраняет в projects_db."""
     meta = parse_filename_metadata(original_filename)
     projects_db[project_id]["original_filename"] = original_filename
 
@@ -163,23 +212,15 @@ def _process_recognition_result(project_id: str, op_data: dict, original_filenam
     raw_segments = []
     start_frames = tc_to_frames(meta["start_tc"], fps)
 
-    for chunk in chunks:
-        channel = str(chunk.get("channelTag", "1"))
-        alternatives = chunk.get("alternatives", [])
-        if not alternatives:
-            continue
-
-        alt = alternatives[0]
-        text = alt.get("text", "")
-        words = alt.get("words", [])
+    for seg in segments:
+        channel = str(seg["channel_tag"])
+        text = seg["text"]
+        words = seg["words"]
         if not words:
             continue
 
-        start_s_str = words[0].get("startTime", "0s")
-        end_s_str = words[-1].get("endTime", "0s")
-
-        start_s = float(start_s_str.replace("s", ""))
-        end_s = float(end_s_str.replace("s", ""))
+        start_s = words[0]["start_ms"] / 1000.0
+        end_s = words[-1]["end_ms"] / 1000.0
 
         dur = end_s - start_s
         speaker_durations[channel] = speaker_durations.get(channel, 0) + dur
@@ -220,11 +261,13 @@ def _process_recognition_result(project_id: str, op_data: dict, original_filenam
     )
 
 
+# ==================== Task functions ====================
+
+
 def process_video_task(project_id: str, disk_url: str):
-    """Фоновая задача: скачивание -> конвертация -> загрузка в S3 -> распознавание."""
+    """Фоновая задача: скачивание -> конвертация -> распознавание с диаризацией."""
     local_video_path = TEMP_DIR / f"{project_id}_video"
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
-    object_name = f"{project_id}.opus"
 
     try:
         # 1. СКАЧИВАНИЕ
@@ -238,19 +281,13 @@ def process_video_task(project_id: str, disk_url: str):
         projects_db[project_id]["progress_percent"] = None
         _convert_to_opus(project_id, local_video_path, local_audio_path)
 
-        # 3. ЗАГРУЗКА В S3
-        projects_db[project_id]["status"] = ProjectStatusEnum.UPLOADING
-        logger.info("[%s] Загрузка в S3...", project_id[:8])
-        file_uri = upload_to_s3(str(local_audio_path), object_name)
-        logger.info("[%s] Файл загружен в S3.", project_id[:8])
-
-        # 4. РАСПОЗНАВАНИЕ
+        # 3. РАСПОЗНАВАНИЕ (gRPC v3 с диаризацией, S3 не нужен)
         projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
-        logger.info("[%s] Отправка на распознавание...", project_id[:8])
-        op_data = _transcribe_with_speechkit(project_id, file_uri)
+        logger.info("[%s] Распознавание с диаризацией...", project_id[:8])
+        segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
-        # 5. ОБРАБОТКА РЕЗУЛЬТАТА
-        _process_recognition_result(project_id, op_data, original_filename, local_video_path)
+        # 4. ОБРАБОТКА РЕЗУЛЬТАТА
+        _process_recognition_result(project_id, segments, original_filename, local_video_path)
         projects_db[project_id]["status"] = ProjectStatusEnum.COMPLETED
 
     except Exception as e:
@@ -265,15 +302,11 @@ def process_video_task(project_id: str, disk_url: str):
                     path.unlink()
             except OSError:
                 pass
-        delete_from_s3(object_name)
 
 
 def process_uploaded_file_task(project_id: str, local_video_path, original_filename: str):
-    """Фоновая задача для локально загруженного файла: конвертация -> S3 -> распознавание."""
+    """Фоновая задача для локально загруженного файла: конвертация -> распознавание с диаризацией."""
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
-    object_name = f"{project_id}.opus"
-    # Преобразуем в Path если передана строка
-    from pathlib import Path
     local_video_path = Path(local_video_path)
 
     try:
@@ -284,34 +317,24 @@ def process_uploaded_file_task(project_id: str, local_video_path, original_filen
         projects_db[project_id]["progress_percent"] = None
         _convert_to_opus(project_id, local_video_path, local_audio_path)
 
-        # 2. ЗАГРУЗКА В S3
-        projects_db[project_id]["status"] = ProjectStatusEnum.UPLOADING
-        logger.info("[%s] Загрузка в S3...", project_id[:8])
-        file_uri = upload_to_s3(str(local_audio_path), object_name)
-        logger.info("[%s] Файл загружен в S3.", project_id[:8])
-
-        # 3. РАСПОЗНАВАНИЕ
+        # 2. РАСПОЗНАВАНИЕ (gRPC v3 с диаризацией, S3 не нужен)
         projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
-        logger.info("[%s] Отправка на распознавание...", project_id[:8])
-        op_data = _transcribe_with_speechkit(project_id, file_uri)
+        logger.info("[%s] Распознавание с диаризацией...", project_id[:8])
+        segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
-        # 4. ОБРАБОТКА РЕЗУЛЬТАТА
-        _process_recognition_result(project_id, op_data, original_filename, local_video_path)
+        # 3. ОБРАБОТКА РЕЗУЛЬТАТА
+        _process_recognition_result(project_id, segments, original_filename, local_video_path)
         projects_db[project_id]["status"] = ProjectStatusEnum.COMPLETED
         logger.info("[%s] Файл обработан: %s", project_id[:8], original_filename)
 
-        # 5. АВТОСОХРАНЕНИЕ DOCX НА ДИСК
+        # 4. АВТОСОХРАНЕНИЕ DOCX НА ДИСК
         try:
             docx_path = str(OUTPUT_DIR / f"autosave_{project_id}.docx")
             saved_name = auto_export_project(project_id, docx_path)
             if saved_name:
-                # Переименовываем в человекочитаемое имя
                 final_path = OUTPUT_DIR / saved_name
-                # Если файл с таким именем уже есть, добавляем ID
                 if final_path.exists():
-                    from backend.utils import strip_extension
                     final_path = OUTPUT_DIR / f"{strip_extension(saved_name)}_{project_id[:8]}.docx"
-                import shutil
                 shutil.move(docx_path, str(final_path))
                 logger.info("[%s] DOCX сохранён: %s", project_id[:8], final_path.name)
         except Exception as e:
@@ -329,7 +352,6 @@ def process_uploaded_file_task(project_id: str, local_video_path, original_filen
                     path.unlink()
             except OSError:
                 pass
-        delete_from_s3(object_name)
 
 
 def auto_export_project(project_id: str, output_path: str) -> str | None:

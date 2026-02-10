@@ -9,6 +9,8 @@ pydantic
 python-dotenv
 slowapi
 aiofiles
+grpcio
+yandexcloud
 pytest
 httpx
 ruff

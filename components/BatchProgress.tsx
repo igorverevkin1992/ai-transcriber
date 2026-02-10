@@ -48,21 +48,22 @@ function formatSize(bytes: number): string {
 }
 
 // Status to step number (for mini progress bar per file)
+// Pipeline: convert → transcribe → done (S3 upload removed — gRPC streams directly)
 const STEP_ORDER: Record<string, number> = {
   queued: 0,
   downloading: 1,
   converting: 1,
-  uploading: 2,
-  transcribing: 3,
-  completed: 4,
+  transcribing: 2,
+  completed: 3,
   error: -1,
 };
+
+const TOTAL_STEPS = 3;
 
 const STEP_LABELS: Record<string, string> = {
   queued: 'В очереди',
   downloading: 'Скачивание...',
   converting: 'Конвертация аудио...',
-  uploading: 'Загрузка в облако...',
   transcribing: 'Распознавание речи...',
   completed: 'Готово',
   error: 'Ошибка',
@@ -462,9 +463,9 @@ export const BatchProgress: React.FC<Props> = ({ files, onDone, onError }) => {
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-gray-800 truncate">{fs.name}</p>
                   {/* Mini step indicator for active files */}
-                  {fs.step > 0 && fs.step < 4 && (
+                  {fs.step > 0 && fs.step < TOTAL_STEPS && (
                     <div className="flex gap-0.5 mt-1">
-                      {[1, 2, 3, 4].map(s => (
+                      {Array.from({ length: TOTAL_STEPS }, (_, i) => i + 1).map(s => (
                         <div key={s} className={`h-1 flex-1 rounded-full ${
                           s <= fs.step
                             ? 'bg-blue-500'
