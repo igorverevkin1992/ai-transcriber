@@ -36,6 +36,17 @@ SPEECHKIT_GRPC_HOST = "stt.api.cloud.yandex.net:443"
 GRPC_CHUNK_SIZE = 4000  # 4 KB chunks for streaming audio
 GRPC_TIMEOUT = 7200  # 2 hours max for recognition
 
+# --- Whisper (local) ---
+try:
+    import whisper as whisper_module
+    WHISPER_AVAILABLE = True
+except ImportError:
+    whisper_module = None
+    WHISPER_AVAILABLE = False
+
+_whisper_model = None
+_whisper_model_name = None
+
 
 def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> str:
     """Скачивает файл с Яндекс.Диска. Возвращает оригинальное имя файла."""
@@ -201,6 +212,69 @@ def _transcribe_with_speechkit(project_id: str, audio_path) -> list[dict]:
         channel.close()
 
 
+# ==================== Whisper (local, free) ====================
+
+
+def _get_whisper_model(model_name: str = "medium"):
+    """Загружает и кэширует модель Whisper."""
+    global _whisper_model, _whisper_model_name
+    if not WHISPER_AVAILABLE:
+        raise RuntimeError(
+            "Whisper не установлен. Выполните: pip install openai-whisper"
+        )
+    if _whisper_model is None or _whisper_model_name != model_name:
+        logger.info("Загрузка модели Whisper '%s'...", model_name)
+        _whisper_model = whisper_module.load_model(model_name)
+        _whisper_model_name = model_name
+        logger.info("Модель Whisper '%s' загружена.", model_name)
+    return _whisper_model
+
+
+def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
+    """Распознавание через Whisper (локально, бесплатно).
+
+    Принимает любой аудио/видео файл (Whisper использует ffmpeg внутри).
+    Конвертация в OPUS не нужна.
+    Без диаризации — все сегменты с channel_tag=0.
+    """
+    model = _get_whisper_model(model_name)
+    logger.info("[%s] Whisper: распознавание (модель: %s)...", project_id[:8], model_name)
+
+    result = model.transcribe(
+        str(file_path),
+        language="ru",
+        word_timestamps=True,
+        verbose=False,
+    )
+
+    segments = []
+    for seg in result["segments"]:
+        text = seg["text"].strip()
+        if not text:
+            continue
+
+        words = []
+        for w in seg.get("words", []):
+            words.append({
+                "text": w["word"].strip(),
+                "start_ms": int(w["start"] * 1000),
+                "end_ms": int(w["end"] * 1000),
+            })
+
+        segments.append({
+            "text": text,
+            "channel_tag": 0,
+            "start_ms": int(seg["start"] * 1000),
+            "end_ms": int(seg["end"] * 1000),
+            "words": words if words else [
+                {"text": text, "start_ms": int(seg["start"] * 1000), "end_ms": int(seg["end"] * 1000)}
+            ],
+        })
+
+    logger.info("[%s] Whisper: %d сегментов", project_id[:8], len(segments))
+    return segments
+
+
 def _process_recognition_result(project_id: str, segments: list[dict], original_filename: str, video_path):
     """Обрабатывает результат распознавания v3 и сохраняет в projects_db."""
     meta = parse_filename_metadata(original_filename)
@@ -304,23 +378,39 @@ def process_video_task(project_id: str, disk_url: str):
                 pass
 
 
-def process_uploaded_file_task(project_id: str, local_video_path, original_filename: str):
-    """Фоновая задача для локально загруженного файла: конвертация -> распознавание с диаризацией."""
+def process_uploaded_file_task(
+    project_id: str,
+    local_video_path,
+    original_filename: str,
+    engine: str = "speechkit",
+    whisper_model: str = "medium",
+):
+    """Фоновая задача для локально загруженного файла.
+
+    engine='whisper': файл -> Whisper (без конвертации, бесплатно)
+    engine='speechkit': файл -> OPUS -> gRPC v3 (диаризация, платно)
+    """
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
     local_video_path = Path(local_video_path)
 
     try:
         projects_db[project_id]["original_filename"] = original_filename
 
-        # 1. КОНВЕРТАЦИЯ
-        projects_db[project_id]["status"] = ProjectStatusEnum.CONVERTING
-        projects_db[project_id]["progress_percent"] = None
-        _convert_to_opus(project_id, local_video_path, local_audio_path)
+        if engine == "whisper":
+            # Whisper: передаём файл напрямую (конвертация не нужна)
+            projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
+            projects_db[project_id]["progress_percent"] = None
+            logger.info("[%s] Whisper: модель %s", project_id[:8], whisper_model)
+            segments = _transcribe_with_whisper(project_id, local_video_path, whisper_model)
+        else:
+            # SpeechKit: конвертация в OPUS, затем gRPC
+            projects_db[project_id]["status"] = ProjectStatusEnum.CONVERTING
+            projects_db[project_id]["progress_percent"] = None
+            _convert_to_opus(project_id, local_video_path, local_audio_path)
 
-        # 2. РАСПОЗНАВАНИЕ (gRPC v3 с диаризацией, S3 не нужен)
-        projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
-        logger.info("[%s] Распознавание с диаризацией...", project_id[:8])
-        segments = _transcribe_with_speechkit(project_id, local_audio_path)
+            projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
+            logger.info("[%s] SpeechKit v3 с диаризацией...", project_id[:8])
+            segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
         # 3. ОБРАБОТКА РЕЗУЛЬТАТА
         _process_recognition_result(project_id, segments, original_filename, local_video_path)

@@ -6,7 +6,7 @@ from io import BytesIO
 from typing import List
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -111,8 +111,17 @@ async def export_docx(pid: str, req: ExportRequest, background_tasks: Background
 
 
 @router.post("/batch/upload", response_model=CreateProjectResponse)
-async def upload_file(file: UploadFile, background_tasks: BackgroundTasks):
-    """Загружает один файл с локальной машины и запускает обработку."""
+async def upload_file(
+    file: UploadFile,
+    background_tasks: BackgroundTasks,
+    engine: str = Form("whisper"),
+    whisper_model: str = Form("medium"),
+):
+    """Загружает один файл с локальной машины и запускает обработку.
+
+    engine: 'whisper' (бесплатно, локально) или 'speechkit' (облако, диаризация)
+    whisper_model: 'tiny', 'base', 'small', 'medium', 'large' (только для Whisper)
+    """
     if not file.filename:
         raise HTTPException(status_code=400, detail="Имя файла не указано")
 
@@ -133,10 +142,14 @@ async def upload_file(file: UploadFile, background_tasks: BackgroundTasks):
         "status": ProjectStatusEnum.QUEUED,
         "created_at": time.time(),
         "original_filename": file.filename,
+        "engine": engine,
     }
 
-    background_tasks.add_task(process_uploaded_file_task, pid, str(local_path), file.filename)
-    logger.info("Файл загружен: %s -> проект %s", file.filename, pid[:8])
+    background_tasks.add_task(
+        process_uploaded_file_task, pid, str(local_path), file.filename,
+        engine=engine, whisper_model=whisper_model,
+    )
+    logger.info("Файл загружен: %s -> проект %s (engine=%s)", file.filename, pid[:8], engine)
     return CreateProjectResponse(id=pid)
 
 

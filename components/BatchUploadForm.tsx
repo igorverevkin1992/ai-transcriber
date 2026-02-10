@@ -1,8 +1,11 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, FolderOpen, AlertCircle, X } from 'lucide-react';
+import { UploadCloud, FolderOpen, AlertCircle, X, Cpu, Cloud } from 'lucide-react';
+
+export type EngineType = 'whisper' | 'speechkit';
+export type WhisperModel = 'tiny' | 'base' | 'small' | 'medium' | 'large';
 
 interface Props {
-  onStartBatch: (files: File[]) => void;
+  onStartBatch: (files: File[], engine: EngineType, whisperModel: WhisperModel) => void;
   onSwitchToSingle: () => void;
 }
 
@@ -10,10 +13,20 @@ const ALLOWED_EXTENSIONS = new Set([
   '.mp3', '.wav', '.mov', '.mxf', '.mp4', '.wmv', '.avi', '.mkv', '.ogg', '.flac',
 ]);
 
+const WHISPER_MODELS: { value: WhisperModel; label: string; desc: string }[] = [
+  { value: 'tiny', label: 'Tiny', desc: '~1 ГБ VRAM, быстро, низкое качество' },
+  { value: 'base', label: 'Base', desc: '~1 ГБ VRAM, быстро, среднее качество' },
+  { value: 'small', label: 'Small', desc: '~2 ГБ VRAM, средне, хорошее качество' },
+  { value: 'medium', label: 'Medium', desc: '~5 ГБ VRAM, медленно, высокое качество' },
+  { value: 'large', label: 'Large', desc: '~10 ГБ VRAM, очень медленно, лучшее качество' },
+];
+
 export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingle }) => {
   const [files, setFiles] = useState<File[]>([]);
   const [error, setError] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+  const [engine, setEngine] = useState<EngineType>('whisper');
+  const [whisperModel, setWhisperModel] = useState<WhisperModel>('medium');
   const inputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
 
@@ -31,7 +44,6 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
       setError('Не найдено поддерживаемых медиафайлов');
       return;
     }
-    // Deduplicate by name+size
     setFiles(prev => {
       const existing = new Set(prev.map(f => `${f.name}_${f.size}`));
       const unique = valid.filter(f => !existing.has(`${f.name}_${f.size}`));
@@ -43,7 +55,6 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.length) return;
     addFiles(Array.from(e.target.files));
-    // Reset input so re-selecting the same files works
     e.target.value = '';
   };
 
@@ -89,7 +100,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
       setError('Выберите файлы для обработки');
       return;
     }
-    onStartBatch(files);
+    onStartBatch(files, engine, whisperModel);
   };
 
   const totalSize = files.reduce((acc, f) => acc + f.size, 0);
@@ -108,6 +119,65 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
           </div>
           <h1 className="text-2xl font-bold text-gray-900">Пакетная обработка</h1>
           <p className="text-gray-500 mt-2">Загрузите несколько файлов для автоматической расшифровки</p>
+        </div>
+
+        {/* Engine selector */}
+        <div className="mb-5">
+          <label className="block text-sm font-medium text-gray-700 mb-2">Движок распознавания</label>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setEngine('whisper')}
+              className={`flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors ${
+                engine === 'whisper'
+                  ? 'border-green-500 bg-green-50'
+                  : 'border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              <Cpu className={`w-5 h-5 flex-shrink-0 ${engine === 'whisper' ? 'text-green-600' : 'text-gray-400'}`} />
+              <div>
+                <div className={`text-sm font-semibold ${engine === 'whisper' ? 'text-green-900' : 'text-gray-700'}`}>
+                  Whisper
+                </div>
+                <div className="text-xs text-gray-500">Бесплатно, локально</div>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setEngine('speechkit')}
+              className={`flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors ${
+                engine === 'speechkit'
+                  ? 'border-blue-500 bg-blue-50'
+                  : 'border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              <Cloud className={`w-5 h-5 flex-shrink-0 ${engine === 'speechkit' ? 'text-blue-600' : 'text-gray-400'}`} />
+              <div>
+                <div className={`text-sm font-semibold ${engine === 'speechkit' ? 'text-blue-900' : 'text-gray-700'}`}>
+                  SpeechKit
+                </div>
+                <div className="text-xs text-gray-500">Облако, диаризация</div>
+              </div>
+            </button>
+          </div>
+
+          {/* Whisper model selector */}
+          {engine === 'whisper' && (
+            <div className="mt-3">
+              <label className="block text-xs font-medium text-gray-600 mb-1.5">Модель Whisper</label>
+              <select
+                value={whisperModel}
+                onChange={e => setWhisperModel(e.target.value as WhisperModel)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-green-500 focus:border-green-500"
+              >
+                {WHISPER_MODELS.map(m => (
+                  <option key={m.value} value={m.value}>
+                    {m.label} — {m.desc}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         {/* Hidden file input */}
@@ -202,9 +272,13 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
         <button
           onClick={handleSubmit}
           disabled={files.length === 0}
-          className="w-full mt-6 flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+          className={`w-full mt-6 flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors ${
+            engine === 'whisper'
+              ? 'bg-green-600 hover:bg-green-700'
+              : 'bg-purple-600 hover:bg-purple-700'
+          }`}
         >
-          Начать обработку ({files.length} файлов)
+          {engine === 'whisper' ? `Whisper: обработать ${files.length} файлов` : `SpeechKit: обработать ${files.length} файлов`}
         </button>
 
         <div className="mt-4 text-center">

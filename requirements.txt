@@ -11,6 +11,7 @@ slowapi
 aiofiles
 grpcio
 yandexcloud
+openai-whisper
 pytest
 httpx
 ruff

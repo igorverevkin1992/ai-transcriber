@@ -16,6 +16,8 @@ import { BatchFileInfo } from '../types';
 
 interface Props {
   files: File[];
+  engine?: string;
+  whisperModel?: string;
   onDone: () => void;
   onError: (msg: string) => void;
 }
@@ -69,7 +71,7 @@ const STEP_LABELS: Record<string, string> = {
   error: 'Ошибка',
 };
 
-export const BatchProgress: React.FC<Props> = ({ files, onDone, onError }) => {
+export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whisperModel = 'medium', onDone, onError }) => {
   const [state, setState] = useState<UploadState>('uploading');
   const [trackers, setTrackers] = useState<FileTracker[]>(() =>
     files.map(f => ({ file: f }))
@@ -123,7 +125,7 @@ export const BatchProgress: React.FC<Props> = ({ files, onDone, onError }) => {
         setCurrentUploadName(file.name);
         addLog(`Загрузка: ${file.name} (${formatSize(file.size)})`);
         try {
-          const projectId = await api.batchUploadFile(file);
+          const projectId = await api.batchUploadFile(file, engine, whisperModel);
           updated[index] = { ...updated[index], projectId };
           addLog(`✓ Загружен: ${file.name}`);
         } catch (e: any) {
