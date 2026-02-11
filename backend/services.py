@@ -448,11 +448,13 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
     logger.info("[%s] Whisper: распознавание файла %s (%d МБ, модель: %s)...",
                 project_id[:8], file_path.name, file_path.stat().st_size // (1024*1024), model_name)
 
+    # fp16=False avoids the FP16 warning on CPU and potential edge cases
     result = model.transcribe(
         str(file_path),
         language="ru",
         word_timestamps=True,
         verbose=False,
+        fp16=False,
     )
 
     if result is None:

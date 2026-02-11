@@ -23,7 +23,9 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # --- Limits ---
 MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
-MAX_CONCURRENT_TASKS = 3
+# Process one file at a time — Whisper on CPU uses ~5GB RAM per transcription,
+# running multiple in parallel causes OOM and kills the server process.
+MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "1"))
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".mov", ".mxf", ".mp4", ".wmv", ".avi", ".mkv", ".ogg", ".flac"}
 ALLOWED_URL_HOSTS = {"yadi.sk", "disk.yandex.ru", "disk.yandex.com"}
 
