@@ -230,9 +230,10 @@ def _get_whisper_cache_dir() -> Path:
 
 
 # Max retries for each chunk/resume attempt during download
-DOWNLOAD_MAX_RETRIES = 10
-DOWNLOAD_RETRY_DELAY = 5  # seconds between resume attempts
-DOWNLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MB chunks
+DOWNLOAD_MAX_RETRIES = 20
+DOWNLOAD_RETRY_DELAY = 3  # seconds between resume attempts
+DOWNLOAD_CHUNK_SIZE = 256 * 1024  # 256 KB — smaller chunks = less data lost on disconnect
+DOWNLOAD_SOCKET_TIMEOUT = 300  # 5 minutes — Azure CDN can be slow
 
 
 def _download_whisper_model_resumable(url: str, target_path: Path, expected_sha256: str):
@@ -263,7 +264,7 @@ def _download_whisper_model_resumable(url: str, target_path: Path, expected_sha2
                     attempt, DOWNLOAD_MAX_RETRIES,
                 )
 
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with urllib.request.urlopen(req, timeout=DOWNLOAD_SOCKET_TIMEOUT) as response:
                 # Get total size
                 if downloaded > 0 and response.status == 206:
                     # Partial content — resume worked
@@ -280,6 +281,7 @@ def _download_whisper_model_resumable(url: str, target_path: Path, expected_sha2
                     total_size = 0
 
                 total_mb = total_size / (1024 * 1024) if total_size else 0
+                last_logged_pct = -1
 
                 mode = "ab" if downloaded > 0 and response.status == 206 else "wb"
                 with open(temp_path, mode) as f:
@@ -291,9 +293,13 @@ def _download_whisper_model_resumable(url: str, target_path: Path, expected_sha2
                         downloaded += len(chunk)
                         if total_size > 0:
                             pct = int(downloaded / total_size * 100)
-                            dl_mb = downloaded / (1024 * 1024)
-                            if pct % 10 == 0:
-                                logger.info("  %d%% (%d / %d МБ)", pct, int(dl_mb), int(total_mb))
+                            # Log every 5%
+                            if pct >= last_logged_pct + 5:
+                                last_logged_pct = pct
+                                logger.info(
+                                    "  %d%% (%d / %d МБ)",
+                                    pct, int(downloaded / (1024 * 1024)), int(total_mb),
+                                )
 
             # Download complete — verify SHA256
             logger.info("Скачивание завершено. Проверка SHA256...")
@@ -352,6 +358,7 @@ def _ensure_whisper_model_downloaded(model_name: str) -> str:
 
     # Check if already downloaded and valid
     if target_path.exists():
+        logger.info("Проверка SHA256 существующего файла %s...", target_path.name)
         sha256 = hashlib.sha256()
         with open(target_path, "rb") as f:
             while True:
@@ -363,8 +370,18 @@ def _ensure_whisper_model_downloaded(model_name: str) -> str:
             logger.info("Модель '%s' уже скачана и проверена.", model_name)
             return model_name
         else:
-            logger.warning("Модель '%s' повреждена, перекачиваю...", model_name)
+            file_size_mb = target_path.stat().st_size / (1024 * 1024)
+            logger.warning(
+                "Модель '%s' повреждена (%.1f МБ, SHA256 не совпадает). Удаляю и перекачиваю...",
+                model_name, file_size_mb,
+            )
             target_path.unlink(missing_ok=True)
+
+    # Check if partial .downloading file exists from a previous interrupted attempt
+    temp_path = target_path.with_suffix(".pt.downloading")
+    if temp_path.exists():
+        partial_mb = temp_path.stat().st_size / (1024 * 1024)
+        logger.info("Найден частично скачанный файл (%.1f МБ). Продолжаю докачку...", partial_mb)
 
     # Download with resume support
     _download_whisper_model_resumable(url, target_path, expected_sha256)
