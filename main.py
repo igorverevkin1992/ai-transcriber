@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.config import CORS_ORIGINS, TEMP_DIR, YANDEX_API_KEY, logger
 from backend.models import HealthResponse
 from backend.routes import router
+from backend.services import shutdown_executor
 
 
 @asynccontextmanager
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI):
     logger.info("--- ПРОВЕРКИ ЗАВЕРШЕНЫ ---")
     yield
 
+    shutdown_executor()
     for f in TEMP_DIR.iterdir():
         try:
             f.unlink()

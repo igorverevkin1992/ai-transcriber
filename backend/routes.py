@@ -32,6 +32,7 @@ from backend.services import (
     process_uploaded_file_task,
     process_video_task,
     projects_db,
+    submit_task,
 )
 from backend.utils import sanitize_filename, validate_file_extension, validate_url
 
@@ -44,7 +45,7 @@ batches_db: dict = {}
 
 @router.post("/projects", response_model=CreateProjectResponse)
 @limiter.limit("5/minute")
-async def create_project(request: Request, req: CreateProjectRequest, background_tasks: BackgroundTasks):
+async def create_project(request: Request, req: CreateProjectRequest):
     """Создает проект и запускает фоновую обработку."""
     url_error = validate_url(req.url)
     if url_error:
@@ -56,7 +57,7 @@ async def create_project(request: Request, req: CreateProjectRequest, background
         "status": ProjectStatusEnum.QUEUED,
         "created_at": time.time(),
     }
-    background_tasks.add_task(process_video_task, pid, req.url)
+    submit_task(process_video_task, pid, req.url)
     logger.info("Проект создан: %s для URL: %s", pid[:8], req.url[:60])
     return CreateProjectResponse(id=pid)
 
@@ -117,7 +118,6 @@ async def export_docx(pid: str, req: ExportRequest, background_tasks: Background
 @router.post("/batch/upload", response_model=CreateProjectResponse)
 async def upload_file(
     file: UploadFile,
-    background_tasks: BackgroundTasks,
     engine: str = Form("whisper"),
     whisper_model: str = Form("medium"),
 ):
@@ -163,7 +163,7 @@ async def upload_file(
         "engine": engine,
     }
 
-    background_tasks.add_task(
+    submit_task(
         process_uploaded_file_task, pid, str(local_path), safe_filename,
         engine=engine, whisper_model=whisper_model,
     )

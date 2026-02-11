@@ -4,6 +4,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import ffmpeg
@@ -31,8 +32,13 @@ from backend.utils import (
 # --- In-memory storage ---
 projects_db: dict = {}
 
-# Semaphore to limit concurrent heavy tasks (threading-based for sync background tasks)
-_task_semaphore = threading.Semaphore(MAX_CONCURRENT_TASKS)
+# Dedicated thread pool for heavy processing tasks.
+# max_workers=MAX_CONCURRENT_TASKS ensures only N tasks run simultaneously;
+# extra tasks queue internally without blocking any threads.
+_task_executor = ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT_TASKS,
+    thread_name_prefix="transcribe",
+)
 
 # TTL for completed projects (seconds) — cleaned up periodically
 PROJECT_TTL_SECONDS = 6 * 3600  # 6 hours
@@ -545,7 +551,6 @@ def _cleanup_old_projects():
 
 def process_video_task(project_id: str, disk_url: str):
     """Фоновая задача: скачивание -> конвертация -> распознавание с диаризацией."""
-    _task_semaphore.acquire()
     local_video_path = TEMP_DIR / f"{project_id}_video"
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
 
@@ -578,7 +583,6 @@ def process_video_task(project_id: str, disk_url: str):
         projects_db[project_id]["error"] = str(e)
 
     finally:
-        _task_semaphore.release()
         for path in (local_video_path, local_audio_path):
             try:
                 if path.exists():
@@ -599,7 +603,6 @@ def process_uploaded_file_task(
     engine='whisper': файл -> Whisper (без конвертации, бесплатно)
     engine='speechkit': файл -> OPUS -> gRPC v3 (диаризация, платно)
     """
-    _task_semaphore.acquire()
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
     local_video_path = Path(local_video_path)
 
@@ -647,13 +650,35 @@ def process_uploaded_file_task(
         projects_db[project_id]["error"] = str(e)
 
     finally:
-        _task_semaphore.release()
         for path in (local_video_path, local_audio_path):
             try:
                 if path.exists():
                     path.unlink()
             except OSError:
                 pass
+
+
+def submit_task(func, *args, **kwargs):
+    """Submit a heavy processing task to the dedicated executor.
+
+    The executor has max_workers=MAX_CONCURRENT_TASKS, so only N tasks run
+    at a time. Extra tasks wait in an internal queue without blocking any threads.
+    This keeps the main ASGI thread pool free for serving HTTP requests.
+    """
+    def _wrapper():
+        try:
+            func(*args, **kwargs)
+        except Exception:
+            # Already logged inside task functions, but catch here as safety net
+            logger.exception("Необработанная ошибка в фоновой задаче")
+
+    _task_executor.submit(_wrapper)
+
+
+def shutdown_executor():
+    """Graceful shutdown of the task executor (called from lifespan)."""
+    logger.info("Завершение фоновых задач...")
+    _task_executor.shutdown(wait=False)
 
 
 def auto_export_project(project_id: str, output_path: str) -> str | None:
