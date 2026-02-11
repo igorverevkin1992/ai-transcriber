@@ -111,15 +111,16 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
   };
 
   return (
-    <div className="flex flex-col items-center justify-center h-full max-w-3xl mx-auto px-4">
-      <div className="bg-white p-8 rounded-2xl shadow-xl w-full border border-gray-100">
-        <div className="text-center mb-6">
-          <div className="bg-purple-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-            <FolderOpen className="w-8 h-8 text-purple-600" />
+    <div className="flex flex-col h-full overflow-y-auto">
+      <div className="flex-1 flex items-start justify-center py-6 px-4">
+        <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-3xl border border-gray-100">
+          <div className="text-center mb-6">
+            <div className="bg-purple-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+              <FolderOpen className="w-8 h-8 text-purple-600" />
+            </div>
+            <h1 className="text-2xl font-bold text-gray-900">Пакетная обработка</h1>
+            <p className="text-gray-500 mt-2">Загрузите несколько файлов для автоматической расшифровки</p>
           </div>
-          <h1 className="text-2xl font-bold text-gray-900">Пакетная обработка</h1>
-          <p className="text-gray-500 mt-2">Загрузите несколько файлов для автоматической расшифровки</p>
-        </div>
 
         {/* Engine selector */}
         <div className="mb-5">
@@ -288,6 +289,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
           >
             Обработать один файл по ссылке
           </button>
+        </div>
         </div>
       </div>
     </div>
