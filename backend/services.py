@@ -1,5 +1,5 @@
-import asyncio
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -28,8 +28,11 @@ from backend.utils import (
 # --- In-memory storage ---
 projects_db: dict = {}
 
-# Semaphore to limit concurrent heavy tasks
-_task_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+# Semaphore to limit concurrent heavy tasks (threading-based for sync background tasks)
+_task_semaphore = threading.Semaphore(MAX_CONCURRENT_TASKS)
+
+# TTL for completed projects (seconds) — cleaned up periodically
+PROJECT_TTL_SECONDS = 6 * 3600  # 6 hours
 
 # --- SpeechKit gRPC v3 ---
 SPEECHKIT_GRPC_HOST = "stt.api.cloud.yandex.net:443"
@@ -46,6 +49,7 @@ except ImportError:
 
 _whisper_model = None
 _whisper_model_name = None
+_whisper_lock = threading.Lock()
 
 
 def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> str:
@@ -239,10 +243,10 @@ WHISPER_MAX_RETRIES = 3
 WHISPER_RETRY_DELAYS = [5, 15, 30]  # секунды между попытками
 
 
-def _get_whisper_model(model_name: str = "medium"):
+def get_whisper_model(model_name: str = "medium"):
     """Загружает и кэширует модель Whisper с ретраями и очисткой кэша.
 
-    При ошибке скачивания (обрыв сети, повреждённый файл) автоматически
+    Потокобезопасна (threading.Lock). При ошибке скачивания автоматически
     удаляет битый кэш и повторяет попытку до WHISPER_MAX_RETRIES раз.
     """
     global _whisper_model, _whisper_model_name
@@ -250,48 +254,52 @@ def _get_whisper_model(model_name: str = "medium"):
         raise RuntimeError(
             "Whisper не установлен. Выполните: pip install openai-whisper"
         )
+    # Fast path: model already loaded (no lock needed for read)
     if _whisper_model is not None and _whisper_model_name == model_name:
         return _whisper_model
 
-    last_error = None
-    for attempt in range(1, WHISPER_MAX_RETRIES + 1):
-        try:
-            logger.info(
-                "Загрузка модели Whisper '%s' (попытка %d/%d)...",
-                model_name, attempt, WHISPER_MAX_RETRIES,
-            )
-            _whisper_model = whisper_module.load_model(model_name)
-            _whisper_model_name = model_name
-            logger.info("Модель Whisper '%s' загружена успешно.", model_name)
+    with _whisper_lock:
+        # Double-check after acquiring lock
+        if _whisper_model is not None and _whisper_model_name == model_name:
             return _whisper_model
 
-        except RuntimeError as e:
-            # SHA256 checksum mismatch или другая ошибка загрузки
-            last_error = e
-            logger.warning(
-                "Ошибка загрузки Whisper '%s' (попытка %d/%d): %s",
-                model_name, attempt, WHISPER_MAX_RETRIES, e,
-            )
-            _clear_corrupted_whisper_cache(model_name)
+        last_error = None
+        for attempt in range(1, WHISPER_MAX_RETRIES + 1):
+            try:
+                logger.info(
+                    "Загрузка модели Whisper '%s' (попытка %d/%d)...",
+                    model_name, attempt, WHISPER_MAX_RETRIES,
+                )
+                _whisper_model = whisper_module.load_model(model_name)
+                _whisper_model_name = model_name
+                logger.info("Модель Whisper '%s' загружена успешно.", model_name)
+                return _whisper_model
 
-        except (OSError, ConnectionError, Exception) as e:
-            # Обрыв соединения, таймаут, и т.д.
-            last_error = e
-            logger.warning(
-                "Сетевая ошибка при загрузке Whisper '%s' (попытка %d/%d): %s",
-                model_name, attempt, WHISPER_MAX_RETRIES, e,
-            )
-            _clear_corrupted_whisper_cache(model_name)
+            except RuntimeError as e:
+                last_error = e
+                logger.warning(
+                    "Ошибка загрузки Whisper '%s' (попытка %d/%d): %s",
+                    model_name, attempt, WHISPER_MAX_RETRIES, e,
+                )
+                _clear_corrupted_whisper_cache(model_name)
 
-        if attempt < WHISPER_MAX_RETRIES:
-            delay = WHISPER_RETRY_DELAYS[attempt - 1]
-            logger.info("Повтор через %d сек...", delay)
-            time.sleep(delay)
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Сетевая ошибка при загрузке Whisper '%s' (попытка %d/%d): %s",
+                    model_name, attempt, WHISPER_MAX_RETRIES, e,
+                )
+                _clear_corrupted_whisper_cache(model_name)
 
-    raise RuntimeError(
-        f"Не удалось загрузить модель Whisper '{model_name}' "
-        f"после {WHISPER_MAX_RETRIES} попыток: {last_error}"
-    )
+            if attempt < WHISPER_MAX_RETRIES:
+                delay = WHISPER_RETRY_DELAYS[attempt - 1]
+                logger.info("Повтор через %d сек...", delay)
+                time.sleep(delay)
+
+        raise RuntimeError(
+            f"Не удалось загрузить модель Whisper '{model_name}' "
+            f"после {WHISPER_MAX_RETRIES} попыток: {last_error}"
+        )
 
 
 def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
@@ -301,7 +309,7 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
     Конвертация в OPUS не нужна.
     Без диаризации — все сегменты с channel_tag=0.
     """
-    model = _get_whisper_model(model_name)
+    model = get_whisper_model(model_name)
     logger.info("[%s] Whisper: распознавание (модель: %s)...", project_id[:8], model_name)
 
     result = model.transcribe(
@@ -402,12 +410,31 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
 # ==================== Task functions ====================
 
 
+def _cleanup_old_projects():
+    """Удаляет завершённые/ошибочные проекты старше PROJECT_TTL_SECONDS."""
+    now = time.time()
+    to_delete = []
+    for pid, proj in projects_db.items():
+        status = proj.get("status")
+        if status in (ProjectStatusEnum.COMPLETED, ProjectStatusEnum.ERROR):
+            created = proj.get("created_at", now)
+            if now - created > PROJECT_TTL_SECONDS:
+                to_delete.append(pid)
+    for pid in to_delete:
+        del projects_db[pid]
+    if to_delete:
+        logger.info("TTL-очистка: удалено %d старых проектов", len(to_delete))
+
+
 def process_video_task(project_id: str, disk_url: str):
     """Фоновая задача: скачивание -> конвертация -> распознавание с диаризацией."""
+    _task_semaphore.acquire()
     local_video_path = TEMP_DIR / f"{project_id}_video"
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
 
     try:
+        _cleanup_old_projects()
+
         # 1. СКАЧИВАНИЕ
         projects_db[project_id]["status"] = ProjectStatusEnum.DOWNLOADING
         projects_db[project_id]["progress_percent"] = 0
@@ -419,7 +446,7 @@ def process_video_task(project_id: str, disk_url: str):
         projects_db[project_id]["progress_percent"] = None
         _convert_to_opus(project_id, local_video_path, local_audio_path)
 
-        # 3. РАСПОЗНАВАНИЕ (gRPC v3 с диаризацией, S3 не нужен)
+        # 3. РАСПОЗНАВАНИЕ (gRPC v3 с диаризацией)
         projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
         logger.info("[%s] Распознавание с диаризацией...", project_id[:8])
         segments = _transcribe_with_speechkit(project_id, local_audio_path)
@@ -434,6 +461,7 @@ def process_video_task(project_id: str, disk_url: str):
         projects_db[project_id]["error"] = str(e)
 
     finally:
+        _task_semaphore.release()
         for path in (local_video_path, local_audio_path):
             try:
                 if path.exists():
@@ -454,10 +482,12 @@ def process_uploaded_file_task(
     engine='whisper': файл -> Whisper (без конвертации, бесплатно)
     engine='speechkit': файл -> OPUS -> gRPC v3 (диаризация, платно)
     """
+    _task_semaphore.acquire()
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
     local_video_path = Path(local_video_path)
 
     try:
+        _cleanup_old_projects()
         projects_db[project_id]["original_filename"] = original_filename
 
         if engine == "whisper":
@@ -500,6 +530,7 @@ def process_uploaded_file_task(
         projects_db[project_id]["error"] = str(e)
 
     finally:
+        _task_semaphore.release()
         for path in (local_video_path, local_audio_path):
             try:
                 if path.exists():

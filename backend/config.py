@@ -14,10 +14,6 @@ logger = logging.getLogger("abtgs")
 
 # --- API Keys ---
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-BUCKET_NAME = os.getenv("BUCKET_NAME", "tv-source-files-2026")
-REGION = "ru-central1"
 
 # --- Paths ---
 TEMP_DIR = Path("temp_files")

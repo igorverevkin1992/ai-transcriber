@@ -1,5 +1,6 @@
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 
 from backend.utils import strip_extension
@@ -68,12 +69,22 @@ def generate_docx(project: dict, final_map: dict, abbr_map: dict, output_path: s
 
         p.add_run(seg["text"])
 
-    # Номера страниц
+    # Номера страниц (вставляем XML-поле PAGE для автонумерации)
     for section in doc.sections:
         footer = section.footer
         footer.is_linked_to_previous = False
         footer_para = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
         footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = footer_para.add_run()
+        fld_char_begin = run._r.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "begin"})
+        run._r.append(fld_char_begin)
+        run2 = footer_para.add_run()
+        instr_text = run2._r.makeelement(qn("w:instrText"), {})
+        instr_text.text = " PAGE "
+        run2._r.append(instr_text)
+        run3 = footer_para.add_run()
+        fld_char_end = run3._r.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "end"})
+        run3._r.append(fld_char_end)
 
     doc.save(output_path)
 

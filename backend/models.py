@@ -8,7 +8,6 @@ class ProjectStatusEnum(str, Enum):
     QUEUED = "queued"
     DOWNLOADING = "downloading"
     CONVERTING = "converting"
-    UPLOADING = "uploading"
     TRANSCRIBING = "transcribing"
     COMPLETED = "completed"
     ERROR = "error"
@@ -18,7 +17,6 @@ STATUS_LABELS_RU = {
     ProjectStatusEnum.QUEUED: "В очереди",
     ProjectStatusEnum.DOWNLOADING: "Скачивание",
     ProjectStatusEnum.CONVERTING: "Конвертация",
-    ProjectStatusEnum.UPLOADING: "Загрузка в облако",
     ProjectStatusEnum.TRANSCRIBING: "Распознавание",
     ProjectStatusEnum.COMPLETED: "Готово",
     ProjectStatusEnum.ERROR: "Ошибка",

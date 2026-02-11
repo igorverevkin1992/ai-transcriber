@@ -1,8 +1,10 @@
+import asyncio
 import os
 import time
 import uuid
 import zipfile
 from io import BytesIO
+from pathlib import Path
 from typing import List
 
 import aiofiles
@@ -11,7 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from backend.config import ALLOWED_EXTENSIONS, OUTPUT_DIR, TEMP_DIR, logger
+from backend.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_BYTES, OUTPUT_DIR, TEMP_DIR, logger
 from backend.docx_export import generate_docx
 from backend.models import (
     STATUS_LABELS_RU,
@@ -25,13 +27,13 @@ from backend.models import (
 )
 from backend.services import (
     WHISPER_AVAILABLE,
-    _get_whisper_model,
+    get_whisper_model,
     auto_export_project,
     process_uploaded_file_task,
     process_video_task,
     projects_db,
 )
-from backend.utils import validate_file_extension, validate_url
+from backend.utils import sanitize_filename, validate_file_extension, validate_url
 
 router = APIRouter(prefix="/api/v1")
 limiter = Limiter(key_func=get_remote_address)
@@ -127,31 +129,45 @@ async def upload_file(
     if not file.filename:
         raise HTTPException(status_code=400, detail="Имя файла не указано")
 
-    ext_error = validate_file_extension(file.filename)
+    safe_filename = sanitize_filename(file.filename)
+
+    ext_error = validate_file_extension(safe_filename)
     if ext_error:
         raise HTTPException(status_code=400, detail=ext_error)
 
     pid = str(uuid.uuid4())
     local_path = TEMP_DIR / f"{pid}_video"
 
-    # Потоковая запись на диск
+    # Потоковая запись на диск с проверкой размера
+    total_size = 0
     async with aiofiles.open(str(local_path), "wb") as f:
         while chunk := await file.read(65536):
+            total_size += len(chunk)
+            if total_size > MAX_FILE_SIZE_BYTES:
+                await f.close()
+                try:
+                    local_path.unlink()
+                except OSError:
+                    pass
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Файл слишком большой. Максимум: {MAX_FILE_SIZE_BYTES // (1024**3)} ГБ",
+                )
             await f.write(chunk)
 
     projects_db[pid] = {
         "id": pid,
         "status": ProjectStatusEnum.QUEUED,
         "created_at": time.time(),
-        "original_filename": file.filename,
+        "original_filename": safe_filename,
         "engine": engine,
     }
 
     background_tasks.add_task(
-        process_uploaded_file_task, pid, str(local_path), file.filename,
+        process_uploaded_file_task, pid, str(local_path), safe_filename,
         engine=engine, whisper_model=whisper_model,
     )
-    logger.info("Файл загружен: %s -> проект %s (engine=%s)", file.filename, pid[:8], engine)
+    logger.info("Файл загружен: %s -> проект %s (engine=%s)", safe_filename, pid[:8], engine)
     return CreateProjectResponse(id=pid)
 
 
@@ -293,7 +309,7 @@ async def preload_whisper_model(
         )
 
     try:
-        _get_whisper_model(model)
+        await asyncio.to_thread(get_whisper_model, model)
         return {"status": "ok", "model": model, "message": f"Модель '{model}' готова к работе"}
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))

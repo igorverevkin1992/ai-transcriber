@@ -60,6 +60,15 @@ def strip_extension(filename: str) -> str:
     return re.sub(r"\.[^.]+$", "", filename)
 
 
+def sanitize_filename(filename: str) -> str:
+    """Очищает имя файла от path traversal и опасных символов."""
+    import os
+    name = os.path.basename(filename)
+    name = name.replace("\\", "").replace("/", "")
+    name = name.replace("\x00", "")
+    return name if name else "unnamed_file"
+
+
 def validate_url(url: str) -> str | None:
     """Проверяет, что URL ведёт на разрешённый хост. Возвращает ошибку или None."""
     try:
