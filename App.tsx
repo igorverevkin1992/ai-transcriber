@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { UploadForm } from './components/UploadForm';
-import { BatchUploadForm } from './components/BatchUploadForm';
+import { BatchUploadForm, EngineType, WhisperModel } from './components/BatchUploadForm';
 import { BatchProgress } from './components/BatchProgress';
 import { ProcessingStatus } from './components/ProcessingStatus';
 import { VerificationDashboard } from './components/VerificationDashboard';
@@ -16,6 +16,8 @@ const App: React.FC = () => {
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [projectData, setProjectData] = useState<ProjectData | null>(null);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [batchEngine, setBatchEngine] = useState<EngineType>('whisper');
+  const [batchWhisperModel, setBatchWhisperModel] = useState<WhisperModel>('medium');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -71,8 +73,10 @@ const App: React.FC = () => {
     addToast('success', 'Монтажный лист успешно сформирован');
   };
 
-  const handleStartBatch = (files: File[]) => {
+  const handleStartBatch = (files: File[], engine: EngineType, whisperModel: WhisperModel) => {
     setBatchFiles(files);
+    setBatchEngine(engine);
+    setBatchWhisperModel(whisperModel);
     setStatus('BATCH_PROCESSING');
   };
 
@@ -139,6 +143,8 @@ const App: React.FC = () => {
         {status === 'BATCH_PROCESSING' && batchFiles.length > 0 && (
           <BatchProgress
             files={batchFiles}
+            engine={batchEngine}
+            whisperModel={batchWhisperModel}
             onDone={resetToIdle}
             onError={(msg) => addToast('error', msg)}
           />

@@ -1,17 +1,19 @@
+import asyncio
 import os
 import time
 import uuid
 import zipfile
 from io import BytesIO
+from pathlib import Path
 from typing import List
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from backend.config import ALLOWED_EXTENSIONS, TEMP_DIR, logger
+from backend.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_BYTES, OUTPUT_DIR, TEMP_DIR, logger
 from backend.docx_export import generate_docx
 from backend.models import (
     STATUS_LABELS_RU,
@@ -24,12 +26,14 @@ from backend.models import (
     ProjectStatusResponse,
 )
 from backend.services import (
+    WHISPER_AVAILABLE,
+    get_whisper_model,
     auto_export_project,
     process_uploaded_file_task,
     process_video_task,
     projects_db,
 )
-from backend.utils import validate_file_extension, validate_url
+from backend.utils import sanitize_filename, validate_file_extension, validate_url
 
 router = APIRouter(prefix="/api/v1")
 limiter = Limiter(key_func=get_remote_address)
@@ -111,32 +115,59 @@ async def export_docx(pid: str, req: ExportRequest, background_tasks: Background
 
 
 @router.post("/batch/upload", response_model=CreateProjectResponse)
-async def upload_file(file: UploadFile, background_tasks: BackgroundTasks):
-    """Загружает один файл с локальной машины и запускает обработку."""
+async def upload_file(
+    file: UploadFile,
+    background_tasks: BackgroundTasks,
+    engine: str = Form("whisper"),
+    whisper_model: str = Form("medium"),
+):
+    """Загружает один файл с локальной машины и запускает обработку.
+
+    engine: 'whisper' (бесплатно, локально) или 'speechkit' (облако, диаризация)
+    whisper_model: 'tiny', 'base', 'small', 'medium', 'large' (только для Whisper)
+    """
     if not file.filename:
         raise HTTPException(status_code=400, detail="Имя файла не указано")
 
-    ext_error = validate_file_extension(file.filename)
+    safe_filename = sanitize_filename(file.filename)
+
+    ext_error = validate_file_extension(safe_filename)
     if ext_error:
         raise HTTPException(status_code=400, detail=ext_error)
 
     pid = str(uuid.uuid4())
     local_path = TEMP_DIR / f"{pid}_video"
 
-    # Потоковая запись на диск
+    # Потоковая запись на диск с проверкой размера
+    total_size = 0
     async with aiofiles.open(str(local_path), "wb") as f:
         while chunk := await file.read(65536):
+            total_size += len(chunk)
+            if total_size > MAX_FILE_SIZE_BYTES:
+                await f.close()
+                try:
+                    local_path.unlink()
+                except OSError:
+                    pass
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Файл слишком большой. Максимум: {MAX_FILE_SIZE_BYTES // (1024**3)} ГБ",
+                )
             await f.write(chunk)
 
     projects_db[pid] = {
         "id": pid,
         "status": ProjectStatusEnum.QUEUED,
         "created_at": time.time(),
-        "original_filename": file.filename,
+        "original_filename": safe_filename,
+        "engine": engine,
     }
 
-    background_tasks.add_task(process_uploaded_file_task, pid, str(local_path), file.filename)
-    logger.info("Файл загружен: %s -> проект %s", file.filename, pid[:8])
+    background_tasks.add_task(
+        process_uploaded_file_task, pid, str(local_path), safe_filename,
+        engine=engine, whisper_model=whisper_model,
+    )
+    logger.info("Файл загружен: %s -> проект %s (engine=%s)", safe_filename, pid[:8], engine)
     return CreateProjectResponse(id=pid)
 
 
@@ -228,3 +259,57 @@ async def batch_download(ids: str = Query(..., description="ID проектов 
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
     )
+
+
+@router.get("/batch/download-saved")
+async def download_saved():
+    """Скачивает все автосохранённые DOCX из папки completed_docx/ как ZIP."""
+    docx_files = list(OUTPUT_DIR.glob("*.docx"))
+    if not docx_files:
+        raise HTTPException(status_code=400, detail="Нет сохранённых файлов в completed_docx/")
+
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in docx_files:
+            zf.write(str(f), f.name)
+
+    zip_buffer.seek(0)
+    logger.info("Скачивание сохранённых файлов: %d DOCX", len(docx_files))
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
+    )
+
+
+# ==================== WHISPER MODEL MANAGEMENT ====================
+
+
+@router.post("/whisper/preload")
+async def preload_whisper_model(
+    model: str = Form("medium"),
+):
+    """Предварительно скачивает и загружает модель Whisper.
+
+    Вызовите перед началом пакетной обработки, чтобы убедиться что модель
+    скачана и готова к работе. Включает retry и очистку повреждённого кэша.
+    """
+    if not WHISPER_AVAILABLE:
+        raise HTTPException(
+            status_code=400,
+            detail="Whisper не установлен. Выполните: pip install openai-whisper",
+        )
+
+    valid_models = {"tiny", "base", "small", "medium", "large"}
+    if model not in valid_models:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Неизвестная модель: {model}. Допустимые: {', '.join(sorted(valid_models))}",
+        )
+
+    try:
+        await asyncio.to_thread(get_whisper_model, model)
+        return {"status": "ok", "model": model, "message": f"Модель '{model}' готова к работе"}
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))

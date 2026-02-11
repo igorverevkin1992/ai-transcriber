@@ -2,13 +2,15 @@ fastapi
 uvicorn
 python-multipart
 requests
-boto3
 ffmpeg-python
 python-docx
 pydantic
 python-dotenv
 slowapi
 aiofiles
+grpcio
+yandexcloud
+openai-whisper
 pytest
 httpx
 ruff

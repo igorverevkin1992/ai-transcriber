@@ -125,9 +125,11 @@ export const api = {
 
   // --- Batch methods ---
 
-  batchUploadFile: async (file: File): Promise<string> => {
+  batchUploadFile: async (file: File, engine: string = 'whisper', whisperModel: string = 'medium'): Promise<string> => {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('engine', engine);
+    formData.append('whisper_model', whisperModel);
 
     const response = await fetch(`${API_BASE_URL}/batch/upload`, {
       method: 'POST',
@@ -147,6 +149,21 @@ export const api = {
     const response = await fetch(`${API_BASE_URL}/batch/status?ids=${projectIds.join(',')}`);
     if (!response.ok) throw new Error('Ошибка получения статуса пакета');
     return await response.json();
+  },
+
+  preloadWhisperModel: async (model: string = 'medium'): Promise<void> => {
+    const formData = new FormData();
+    formData.append('model', model);
+
+    const response = await fetch(`${API_BASE_URL}/whisper/preload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.detail || 'Не удалось загрузить модель Whisper');
+    }
   },
 
   batchDownload: async (projectIds: string[]): Promise<Blob> => {

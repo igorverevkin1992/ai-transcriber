@@ -1,22 +1,26 @@
-import asyncio
+import shutil
+import threading
 import time
+from pathlib import Path
 
 import ffmpeg
+import grpc
 import requests
 
 from backend.config import (
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
+    OUTPUT_DIR,
     TEMP_DIR,
     YANDEX_API_KEY,
     logger,
 )
 from backend.models import ProjectStatusEnum
-from backend.s3 import delete_from_s3, upload_to_s3
 from backend.utils import (
     detect_fps,
     frames_to_tc,
     parse_filename_metadata,
+    strip_extension,
     tc_to_frames,
     validate_file_extension,
 )
@@ -24,8 +28,28 @@ from backend.utils import (
 # --- In-memory storage ---
 projects_db: dict = {}
 
-# Semaphore to limit concurrent heavy tasks
-_task_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+# Semaphore to limit concurrent heavy tasks (threading-based for sync background tasks)
+_task_semaphore = threading.Semaphore(MAX_CONCURRENT_TASKS)
+
+# TTL for completed projects (seconds) — cleaned up periodically
+PROJECT_TTL_SECONDS = 6 * 3600  # 6 hours
+
+# --- SpeechKit gRPC v3 ---
+SPEECHKIT_GRPC_HOST = "stt.api.cloud.yandex.net:443"
+GRPC_CHUNK_SIZE = 4000  # 4 KB chunks for streaming audio
+GRPC_TIMEOUT = 7200  # 2 hours max for recognition
+
+# --- Whisper (local) ---
+try:
+    import whisper as whisper_module
+    WHISPER_AVAILABLE = True
+except ImportError:
+    whisper_module = None
+    WHISPER_AVAILABLE = False
+
+_whisper_model = None
+_whisper_model_name = None
+_whisper_lock = threading.Lock()
 
 
 def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> str:
@@ -84,75 +108,247 @@ def _convert_to_opus(project_id: str, input_path, output_path):
     logger.info("[%s] Конвертация завершена.", project_id[:8])
 
 
-def _transcribe_with_speechkit(project_id: str, file_uri: str) -> dict:
-    """Отправляет аудио на распознавание и ожидает результат."""
+# ==================== SpeechKit API v3 (gRPC) ====================
+
+
+def _generate_recognition_requests(audio_path):
+    """Генератор gRPC-запросов: сначала настройки сессии, затем чанки аудио."""
+    from yandex.cloud.ai.stt.v3 import stt_pb2
+
+    recognize_options = stt_pb2.StreamingOptions(
+        recognition_model=stt_pb2.RecognitionModelOptions(
+            model="general",
+            audio_format=stt_pb2.AudioFormatOptions(
+                container_audio=stt_pb2.ContainerAudio(
+                    container_audio_type=stt_pb2.ContainerAudio.OGG_OPUS,
+                )
+            ),
+            text_normalization=stt_pb2.TextNormalizationOptions(
+                text_normalization=stt_pb2.TextNormalizationOptions.TEXT_NORMALIZATION_ENABLED,
+                profanity_filter=False,
+                literature_text=True,
+            ),
+            language_restriction=stt_pb2.LanguageRestrictionOptions(
+                restriction_type=stt_pb2.LanguageRestrictionOptions.WHITELIST,
+                language_code=["ru-RU"],
+            ),
+            audio_processing_type=stt_pb2.RecognitionModelOptions.FULL_DATA,
+        ),
+        speaker_labeling=stt_pb2.SpeakerLabelingOptions(
+            speaker_labeling=stt_pb2.SpeakerLabelingOptions.SPEAKER_LABELING_ENABLED,
+        ),
+    )
+    yield stt_pb2.StreamingRequest(session_options=recognize_options)
+
+    # Stream audio file in chunks
+    with open(str(audio_path), "rb") as f:
+        while True:
+            data = f.read(GRPC_CHUNK_SIZE)
+            if not data:
+                break
+            yield stt_pb2.StreamingRequest(chunk=stt_pb2.AudioChunk(data=data))
+
+
+def _transcribe_with_speechkit(project_id: str, audio_path) -> list[dict]:
+    """Распознавание через SpeechKit API v3 (gRPC) с диаризацией спикеров.
+
+    Стримит локальный аудиофайл напрямую в SpeechKit (S3 не нужен).
+    Возвращает список сегментов с channel_tag (0 или 1) для каждого спикера.
+    """
     if not YANDEX_API_KEY:
         raise RuntimeError("YANDEX_API_KEY не задан. Распознавание невозможно.")
 
-    sk_body = {
-        "config": {
-            "specification": {
-                "languageCode": "ru-RU",
-                "literature_text": True,
-                "profanityFilter": False,
-                "audioEncoding": "OGG_OPUS",
-                "sampleRateHertz": 48000,
-                "audioChannelCount": 1,
-            }
-        },
-        "audio": {"uri": file_uri},
-    }
+    from yandex.cloud.ai.stt.v3 import stt_service_pb2_grpc
 
-    sk_headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
+    cred = grpc.ssl_channel_credentials()
+    channel = grpc.secure_channel(SPEECHKIT_GRPC_HOST, cred)
+    stub = stt_service_pb2_grpc.RecognizerStub(channel)
 
-    for attempt in range(3):
+    logger.info("[%s] Стримим аудио в SpeechKit v3 (gRPC с диаризацией)...", project_id[:8])
+
+    try:
+        responses = stub.RecognizeStreaming(
+            _generate_recognition_requests(audio_path),
+            metadata=[("authorization", f"Api-Key {YANDEX_API_KEY}")],
+            timeout=GRPC_TIMEOUT,
+        )
+
+        segments = []
+        for r in responses:
+            event_type = r.WhichOneof("Event")
+            if event_type == "final_refinement":
+                alts = r.final_refinement.normalized_text.alternatives
+                if not alts:
+                    continue
+                alt = alts[0]
+                text = alt.text
+                words = list(alt.words)
+                if not words:
+                    continue
+                segments.append({
+                    "text": text,
+                    "channel_tag": r.channel_tag,
+                    "start_ms": words[0].start_time_ms,
+                    "end_ms": words[-1].end_time_ms,
+                    "words": [
+                        {
+                            "text": w.text,
+                            "start_ms": w.start_time_ms,
+                            "end_ms": w.end_time_ms,
+                        }
+                        for w in words
+                    ],
+                })
+
+        logger.info(
+            "[%s] Распознавание завершено. Сегментов: %d",
+            project_id[:8], len(segments),
+        )
+        return segments
+
+    except grpc.RpcError as e:
+        logger.error(
+            "[%s] gRPC ошибка: code=%s, details=%s",
+            project_id[:8], e.code(), e.details(),
+        )
+        raise RuntimeError(f"SpeechKit gRPC: {e.details()}") from e
+    finally:
+        channel.close()
+
+
+# ==================== Whisper (local, free) ====================
+
+
+def _get_whisper_cache_dir() -> Path:
+    """Возвращает директорию кэша Whisper (~/.cache/whisper)."""
+    import os
+    default = os.path.join(os.path.expanduser("~"), ".cache")
+    return Path(os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper"))
+
+
+def _clear_corrupted_whisper_cache(model_name: str):
+    """Удаляет потенциально повреждённый файл модели из кэша Whisper."""
+    cache_dir = _get_whisper_cache_dir()
+    # Whisper сохраняет модели как <model_name>.pt
+    model_file = cache_dir / f"{model_name}.pt"
+    if model_file.exists():
+        logger.warning("Удаляю повреждённый файл модели: %s", model_file)
         try:
-            sk_resp = requests.post(
-                "https://transcribe.api.cloud.yandex.net/speech/stt/v2/longRunningRecognize",
-                json=sk_body,
-                headers=sk_headers,
-                timeout=60,
-            )
-            sk_resp.raise_for_status()
-            break
-        except requests.RequestException as e:
-            if attempt == 2:
-                raise
-            logger.warning("[%s] SpeechKit запрос не удался (попытка %d): %s", project_id[:8], attempt + 1, e)
-            time.sleep(2 ** (attempt + 1))
+            model_file.unlink()
+        except OSError as e:
+            logger.error("Не удалось удалить %s: %s", model_file, e)
 
-    operation_id = sk_resp.json()["id"]
-    logger.info("[%s] Операция SpeechKit: %s", project_id[:8], operation_id)
 
-    poll_interval = 3
-    max_polls = 600
-    for _ in range(max_polls):
-        time.sleep(poll_interval)
-        try:
-            op_resp = requests.get(
-                f"https://operation.api.cloud.yandex.net/operations/{operation_id}",
-                headers=sk_headers,
-                timeout=30,
-            )
-            op_data = op_resp.json()
-        except requests.RequestException as e:
-            logger.warning("[%s] Ошибка при проверке статуса операции: %s", project_id[:8], e)
+WHISPER_MAX_RETRIES = 3
+WHISPER_RETRY_DELAYS = [5, 15, 30]  # секунды между попытками
+
+
+def get_whisper_model(model_name: str = "medium"):
+    """Загружает и кэширует модель Whisper с ретраями и очисткой кэша.
+
+    Потокобезопасна (threading.Lock). При ошибке скачивания автоматически
+    удаляет битый кэш и повторяет попытку до WHISPER_MAX_RETRIES раз.
+    """
+    global _whisper_model, _whisper_model_name
+    if not WHISPER_AVAILABLE:
+        raise RuntimeError(
+            "Whisper не установлен. Выполните: pip install openai-whisper"
+        )
+    # Fast path: model already loaded (no lock needed for read)
+    if _whisper_model is not None and _whisper_model_name == model_name:
+        return _whisper_model
+
+    with _whisper_lock:
+        # Double-check after acquiring lock
+        if _whisper_model is not None and _whisper_model_name == model_name:
+            return _whisper_model
+
+        last_error = None
+        for attempt in range(1, WHISPER_MAX_RETRIES + 1):
+            try:
+                logger.info(
+                    "Загрузка модели Whisper '%s' (попытка %d/%d)...",
+                    model_name, attempt, WHISPER_MAX_RETRIES,
+                )
+                _whisper_model = whisper_module.load_model(model_name)
+                _whisper_model_name = model_name
+                logger.info("Модель Whisper '%s' загружена успешно.", model_name)
+                return _whisper_model
+
+            except RuntimeError as e:
+                last_error = e
+                logger.warning(
+                    "Ошибка загрузки Whisper '%s' (попытка %d/%d): %s",
+                    model_name, attempt, WHISPER_MAX_RETRIES, e,
+                )
+                _clear_corrupted_whisper_cache(model_name)
+
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Сетевая ошибка при загрузке Whisper '%s' (попытка %d/%d): %s",
+                    model_name, attempt, WHISPER_MAX_RETRIES, e,
+                )
+                _clear_corrupted_whisper_cache(model_name)
+
+            if attempt < WHISPER_MAX_RETRIES:
+                delay = WHISPER_RETRY_DELAYS[attempt - 1]
+                logger.info("Повтор через %d сек...", delay)
+                time.sleep(delay)
+
+        raise RuntimeError(
+            f"Не удалось загрузить модель Whisper '{model_name}' "
+            f"после {WHISPER_MAX_RETRIES} попыток: {last_error}"
+        )
+
+
+def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
+    """Распознавание через Whisper (локально, бесплатно).
+
+    Принимает любой аудио/видео файл (Whisper использует ffmpeg внутри).
+    Конвертация в OPUS не нужна.
+    Без диаризации — все сегменты с channel_tag=0.
+    """
+    model = get_whisper_model(model_name)
+    logger.info("[%s] Whisper: распознавание (модель: %s)...", project_id[:8], model_name)
+
+    result = model.transcribe(
+        str(file_path),
+        language="ru",
+        word_timestamps=True,
+        verbose=False,
+    )
+
+    segments = []
+    for seg in result["segments"]:
+        text = seg["text"].strip()
+        if not text:
             continue
 
-        if op_data.get("done"):
-            break
-    else:
-        raise TimeoutError("SpeechKit: превышено время ожидания распознавания.")
+        words = []
+        for w in seg.get("words", []):
+            words.append({
+                "text": w["word"].strip(),
+                "start_ms": int(w["start"] * 1000),
+                "end_ms": int(w["end"] * 1000),
+            })
 
-    if "error" in op_data:
-        raise RuntimeError(f"SpeechKit Error: {op_data['error']}")
+        segments.append({
+            "text": text,
+            "channel_tag": 0,
+            "start_ms": int(seg["start"] * 1000),
+            "end_ms": int(seg["end"] * 1000),
+            "words": words if words else [
+                {"text": text, "start_ms": int(seg["start"] * 1000), "end_ms": int(seg["end"] * 1000)}
+            ],
+        })
 
-    return op_data
+    logger.info("[%s] Whisper: %d сегментов", project_id[:8], len(segments))
+    return segments
 
 
-def _process_recognition_result(project_id: str, op_data: dict, original_filename: str, video_path):
-    """Обрабатывает результат распознавания и сохраняет в projects_db."""
-    chunks = op_data["response"]["chunks"]
+def _process_recognition_result(project_id: str, segments: list[dict], original_filename: str, video_path):
+    """Обрабатывает результат распознавания v3 и сохраняет в projects_db."""
     meta = parse_filename_metadata(original_filename)
     projects_db[project_id]["original_filename"] = original_filename
 
@@ -162,23 +358,15 @@ def _process_recognition_result(project_id: str, op_data: dict, original_filenam
     raw_segments = []
     start_frames = tc_to_frames(meta["start_tc"], fps)
 
-    for chunk in chunks:
-        channel = str(chunk.get("channelTag", "1"))
-        alternatives = chunk.get("alternatives", [])
-        if not alternatives:
-            continue
-
-        alt = alternatives[0]
-        text = alt.get("text", "")
-        words = alt.get("words", [])
+    for seg in segments:
+        channel = str(seg["channel_tag"])
+        text = seg["text"]
+        words = seg["words"]
         if not words:
             continue
 
-        start_s_str = words[0].get("startTime", "0s")
-        end_s_str = words[-1].get("endTime", "0s")
-
-        start_s = float(start_s_str.replace("s", ""))
-        end_s = float(end_s_str.replace("s", ""))
+        start_s = words[0]["start_ms"] / 1000.0
+        end_s = words[-1]["end_ms"] / 1000.0
 
         dur = end_s - start_s
         speaker_durations[channel] = speaker_durations.get(channel, 0) + dur
@@ -219,13 +407,34 @@ def _process_recognition_result(project_id: str, op_data: dict, original_filenam
     )
 
 
+# ==================== Task functions ====================
+
+
+def _cleanup_old_projects():
+    """Удаляет завершённые/ошибочные проекты старше PROJECT_TTL_SECONDS."""
+    now = time.time()
+    to_delete = []
+    for pid, proj in projects_db.items():
+        status = proj.get("status")
+        if status in (ProjectStatusEnum.COMPLETED, ProjectStatusEnum.ERROR):
+            created = proj.get("created_at", now)
+            if now - created > PROJECT_TTL_SECONDS:
+                to_delete.append(pid)
+    for pid in to_delete:
+        del projects_db[pid]
+    if to_delete:
+        logger.info("TTL-очистка: удалено %d старых проектов", len(to_delete))
+
+
 def process_video_task(project_id: str, disk_url: str):
-    """Фоновая задача: скачивание -> конвертация -> загрузка в S3 -> распознавание."""
+    """Фоновая задача: скачивание -> конвертация -> распознавание с диаризацией."""
+    _task_semaphore.acquire()
     local_video_path = TEMP_DIR / f"{project_id}_video"
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
-    object_name = f"{project_id}.opus"
 
     try:
+        _cleanup_old_projects()
+
         # 1. СКАЧИВАНИЕ
         projects_db[project_id]["status"] = ProjectStatusEnum.DOWNLOADING
         projects_db[project_id]["progress_percent"] = 0
@@ -237,19 +446,13 @@ def process_video_task(project_id: str, disk_url: str):
         projects_db[project_id]["progress_percent"] = None
         _convert_to_opus(project_id, local_video_path, local_audio_path)
 
-        # 3. ЗАГРУЗКА В S3
-        projects_db[project_id]["status"] = ProjectStatusEnum.UPLOADING
-        logger.info("[%s] Загрузка в S3...", project_id[:8])
-        file_uri = upload_to_s3(str(local_audio_path), object_name)
-        logger.info("[%s] Файл загружен в S3.", project_id[:8])
-
-        # 4. РАСПОЗНАВАНИЕ
+        # 3. РАСПОЗНАВАНИЕ (gRPC v3 с диаризацией)
         projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
-        logger.info("[%s] Отправка на распознавание...", project_id[:8])
-        op_data = _transcribe_with_speechkit(project_id, file_uri)
+        logger.info("[%s] Распознавание с диаризацией...", project_id[:8])
+        segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
-        # 5. ОБРАБОТКА РЕЗУЛЬТАТА
-        _process_recognition_result(project_id, op_data, original_filename, local_video_path)
+        # 4. ОБРАБОТКА РЕЗУЛЬТАТА
+        _process_recognition_result(project_id, segments, original_filename, local_video_path)
         projects_db[project_id]["status"] = ProjectStatusEnum.COMPLETED
 
     except Exception as e:
@@ -258,46 +461,68 @@ def process_video_task(project_id: str, disk_url: str):
         projects_db[project_id]["error"] = str(e)
 
     finally:
+        _task_semaphore.release()
         for path in (local_video_path, local_audio_path):
             try:
                 if path.exists():
                     path.unlink()
             except OSError:
                 pass
-        delete_from_s3(object_name)
 
 
-def process_uploaded_file_task(project_id: str, local_video_path, original_filename: str):
-    """Фоновая задача для локально загруженного файла: конвертация -> S3 -> распознавание."""
+def process_uploaded_file_task(
+    project_id: str,
+    local_video_path,
+    original_filename: str,
+    engine: str = "speechkit",
+    whisper_model: str = "medium",
+):
+    """Фоновая задача для локально загруженного файла.
+
+    engine='whisper': файл -> Whisper (без конвертации, бесплатно)
+    engine='speechkit': файл -> OPUS -> gRPC v3 (диаризация, платно)
+    """
+    _task_semaphore.acquire()
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
-    object_name = f"{project_id}.opus"
-    # Преобразуем в Path если передана строка
-    from pathlib import Path
     local_video_path = Path(local_video_path)
 
     try:
+        _cleanup_old_projects()
         projects_db[project_id]["original_filename"] = original_filename
 
-        # 1. КОНВЕРТАЦИЯ
-        projects_db[project_id]["status"] = ProjectStatusEnum.CONVERTING
-        projects_db[project_id]["progress_percent"] = None
-        _convert_to_opus(project_id, local_video_path, local_audio_path)
+        if engine == "whisper":
+            # Whisper: передаём файл напрямую (конвертация не нужна)
+            projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
+            projects_db[project_id]["progress_percent"] = None
+            logger.info("[%s] Whisper: модель %s", project_id[:8], whisper_model)
+            segments = _transcribe_with_whisper(project_id, local_video_path, whisper_model)
+        else:
+            # SpeechKit: конвертация в OPUS, затем gRPC
+            projects_db[project_id]["status"] = ProjectStatusEnum.CONVERTING
+            projects_db[project_id]["progress_percent"] = None
+            _convert_to_opus(project_id, local_video_path, local_audio_path)
 
-        # 2. ЗАГРУЗКА В S3
-        projects_db[project_id]["status"] = ProjectStatusEnum.UPLOADING
-        logger.info("[%s] Загрузка в S3...", project_id[:8])
-        file_uri = upload_to_s3(str(local_audio_path), object_name)
-        logger.info("[%s] Файл загружен в S3.", project_id[:8])
+            projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
+            logger.info("[%s] SpeechKit v3 с диаризацией...", project_id[:8])
+            segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
-        # 3. РАСПОЗНАВАНИЕ
-        projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
-        logger.info("[%s] Отправка на распознавание...", project_id[:8])
-        op_data = _transcribe_with_speechkit(project_id, file_uri)
-
-        # 4. ОБРАБОТКА РЕЗУЛЬТАТА
-        _process_recognition_result(project_id, op_data, original_filename, local_video_path)
+        # 3. ОБРАБОТКА РЕЗУЛЬТАТА
+        _process_recognition_result(project_id, segments, original_filename, local_video_path)
         projects_db[project_id]["status"] = ProjectStatusEnum.COMPLETED
         logger.info("[%s] Файл обработан: %s", project_id[:8], original_filename)
+
+        # 4. АВТОСОХРАНЕНИЕ DOCX НА ДИСК
+        try:
+            docx_path = str(OUTPUT_DIR / f"autosave_{project_id}.docx")
+            saved_name = auto_export_project(project_id, docx_path)
+            if saved_name:
+                final_path = OUTPUT_DIR / saved_name
+                if final_path.exists():
+                    final_path = OUTPUT_DIR / f"{strip_extension(saved_name)}_{project_id[:8]}.docx"
+                shutil.move(docx_path, str(final_path))
+                logger.info("[%s] DOCX сохранён: %s", project_id[:8], final_path.name)
+        except Exception as e:
+            logger.warning("[%s] Не удалось автосохранить DOCX: %s", project_id[:8], e)
 
     except Exception as e:
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
@@ -305,13 +530,13 @@ def process_uploaded_file_task(project_id: str, local_video_path, original_filen
         projects_db[project_id]["error"] = str(e)
 
     finally:
+        _task_semaphore.release()
         for path in (local_video_path, local_audio_path):
             try:
                 if path.exists():
                     path.unlink()
             except OSError:
                 pass
-        delete_from_s3(object_name)
 
 
 def auto_export_project(project_id: str, output_path: str) -> str | None:

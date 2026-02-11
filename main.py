@@ -1,13 +1,14 @@
 import subprocess
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from backend.config import CORS_ORIGINS, TEMP_DIR, YANDEX_API_KEY, logger
 from backend.models import HealthResponse
 from backend.routes import router
-from backend.s3 import check_bucket
 
 
 @asynccontextmanager
@@ -16,9 +17,7 @@ async def lifespan(app: FastAPI):
     logger.info("--- ЗАПУСК ПРОВЕРОК ---")
 
     if not YANDEX_API_KEY:
-        logger.warning("YANDEX_API_KEY не задан — распознавание речи не будет работать.")
-
-    check_bucket()
+        logger.warning("YANDEX_API_KEY не задан — облачное распознавание (SpeechKit) не будет работать.")
 
     try:
         result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
@@ -54,14 +53,21 @@ app.add_middleware(
 app.include_router(router)
 
 
-@app.get("/", response_model=HealthResponse)
-def read_root():
-    """Проверка здоровья сервера."""
+@app.get("/health", response_model=HealthResponse)
+def health_check():
+    """Проверка здоровья сервера (для Docker HEALTHCHECK)."""
     return HealthResponse(
         status="ok",
         service="ABTGS Backend",
-        message="Перейдите на http://localhost:3000 для работы с интерфейсом.",
+        message="Сервер работает.",
     )
+
+
+# Serve built frontend in production (Docker copies dist/ to static/)
+static_dir = Path("static")
+if static_dir.is_dir():
+    app.mount("/", StaticFiles(directory="static", html=True), name="static")
+    logger.info("Раздача статики из /static включена (production mode).")
 
 
 if __name__ == "__main__":
