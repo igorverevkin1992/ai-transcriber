@@ -136,7 +136,9 @@ async def upload_file(
         raise HTTPException(status_code=400, detail=ext_error)
 
     pid = str(uuid.uuid4())
-    local_path = TEMP_DIR / f"{pid}_video"
+    # Preserve original extension — ffmpeg/Whisper need it to detect container format
+    ext = Path(safe_filename).suffix  # e.g. ".wmv", ".mp4"
+    local_path = TEMP_DIR / f"{pid}_video{ext}"
 
     # Потоковая запись на диск с проверкой размера
     total_size = 0

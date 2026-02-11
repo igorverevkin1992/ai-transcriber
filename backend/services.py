@@ -400,6 +400,7 @@ def get_whisper_model(model_name: str = "medium"):
 
     Потокобезопасна (threading.Lock). Скачивает модель с поддержкой
     докачки (HTTP Range) — при обрыве продолжает с того же места.
+    При ошибке CUDA автоматически переключается на CPU.
     """
     global _whisper_model, _whisper_model_name
     if not WHISPER_AVAILABLE:
@@ -418,9 +419,13 @@ def get_whisper_model(model_name: str = "medium"):
         # Step 1: Ensure model file is downloaded (resumable)
         _ensure_whisper_model_downloaded(model_name)
 
-        # Step 2: Load model into memory
+        # Step 2: Load model into memory (try GPU first, fall back to CPU)
         logger.info("Загрузка модели Whisper '%s' в память...", model_name)
-        _whisper_model = whisper_module.load_model(model_name)
+        try:
+            _whisper_model = whisper_module.load_model(model_name)
+        except Exception as e:
+            logger.warning("Ошибка загрузки модели (возможно CUDA): %s. Переключаемся на CPU...", e)
+            _whisper_model = whisper_module.load_model(model_name, device="cpu")
         _whisper_model_name = model_name
         logger.info("Модель Whisper '%s' готова.", model_name)
         return _whisper_model
@@ -433,8 +438,15 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
     Конвертация в OPUS не нужна.
     Без диаризации — все сегменты с channel_tag=0.
     """
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise RuntimeError(f"Файл не найден: {file_path}")
+    if file_path.stat().st_size == 0:
+        raise RuntimeError(f"Файл пустой (0 байт): {file_path}")
+
     model = get_whisper_model(model_name)
-    logger.info("[%s] Whisper: распознавание файла %s (модель: %s)...", project_id[:8], file_path, model_name)
+    logger.info("[%s] Whisper: распознавание файла %s (%d МБ, модель: %s)...",
+                project_id[:8], file_path.name, file_path.stat().st_size // (1024*1024), model_name)
 
     result = model.transcribe(
         str(file_path),
@@ -456,7 +468,9 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
             continue
 
         words = []
-        for w in seg.get("words", []):
+        for w in seg.get("words") or []:
+            if w is None:
+                continue
             words.append({
                 "text": w["word"].strip(),
                 "start_ms": int(w["start"] * 1000),
