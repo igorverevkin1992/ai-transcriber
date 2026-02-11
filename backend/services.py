@@ -2,6 +2,7 @@ import hashlib
 import shutil
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -433,7 +434,7 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
     Без диаризации — все сегменты с channel_tag=0.
     """
     model = get_whisper_model(model_name)
-    logger.info("[%s] Whisper: распознавание (модель: %s)...", project_id[:8], model_name)
+    logger.info("[%s] Whisper: распознавание файла %s (модель: %s)...", project_id[:8], file_path, model_name)
 
     result = model.transcribe(
         str(file_path),
@@ -441,6 +442,12 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
         word_timestamps=True,
         verbose=False,
     )
+
+    if result is None:
+        raise RuntimeError(f"Whisper вернул None для файла {file_path}")
+
+    if "segments" not in result:
+        raise RuntimeError(f"Whisper не вернул segments. Ключи результата: {list(result.keys())}")
 
     segments = []
     for seg in result["segments"]:
@@ -537,14 +544,15 @@ def _cleanup_old_projects():
     """Удаляет завершённые/ошибочные проекты старше PROJECT_TTL_SECONDS."""
     now = time.time()
     to_delete = []
-    for pid, proj in projects_db.items():
+    # Use list() snapshot to avoid RuntimeError: dictionary changed size during iteration
+    for pid, proj in list(projects_db.items()):
         status = proj.get("status")
         if status in (ProjectStatusEnum.COMPLETED, ProjectStatusEnum.ERROR):
             created = proj.get("created_at", now)
             if now - created > PROJECT_TTL_SECONDS:
                 to_delete.append(pid)
     for pid in to_delete:
-        del projects_db[pid]
+        projects_db.pop(pid, None)  # pop avoids KeyError if already deleted by another thread
     if to_delete:
         logger.info("TTL-очистка: удалено %d старых проектов", len(to_delete))
 
@@ -578,9 +586,10 @@ def process_video_task(project_id: str, disk_url: str):
         projects_db[project_id]["status"] = ProjectStatusEnum.COMPLETED
 
     except Exception as e:
+        tb = traceback.format_exc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
         projects_db[project_id]["status"] = ProjectStatusEnum.ERROR
-        projects_db[project_id]["error"] = str(e)
+        projects_db[project_id]["error"] = f"{e}\n\nTraceback:\n{tb}"
 
     finally:
         for path in (local_video_path, local_audio_path):
@@ -645,9 +654,10 @@ def process_uploaded_file_task(
             logger.warning("[%s] Не удалось автосохранить DOCX: %s", project_id[:8], e)
 
     except Exception as e:
+        tb = traceback.format_exc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
         projects_db[project_id]["status"] = ProjectStatusEnum.ERROR
-        projects_db[project_id]["error"] = str(e)
+        projects_db[project_id]["error"] = f"{e}\n\nTraceback:\n{tb}"
 
     finally:
         for path in (local_video_path, local_audio_path):
