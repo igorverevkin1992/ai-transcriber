@@ -1,10 +1,7 @@
-import hashlib
 import shutil
 import threading
 import time
 import traceback
-import urllib.error
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -49,12 +46,12 @@ SPEECHKIT_GRPC_HOST = "stt.api.cloud.yandex.net:443"
 GRPC_CHUNK_SIZE = 4000  # 4 KB chunks for streaming audio
 GRPC_TIMEOUT = 7200  # 2 hours max for recognition
 
-# --- Whisper (local) ---
+# --- Whisper (local, via faster-whisper / CTranslate2) ---
 try:
-    import whisper as whisper_module
+    from faster_whisper import WhisperModel
     WHISPER_AVAILABLE = True
 except ImportError:
-    whisper_module = None
+    WhisperModel = None
     WHISPER_AVAILABLE = False
 
 _whisper_model = None
@@ -226,186 +223,19 @@ def _transcribe_with_speechkit(project_id: str, audio_path) -> list[dict]:
         channel.close()
 
 
-# ==================== Whisper (local, free) ====================
-
-
-def _get_whisper_cache_dir() -> Path:
-    """Возвращает директорию кэша Whisper (~/.cache/whisper)."""
-    import os
-    default = os.path.join(os.path.expanduser("~"), ".cache")
-    return Path(os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper"))
-
-
-# Max retries for each chunk/resume attempt during download
-DOWNLOAD_MAX_RETRIES = 20
-DOWNLOAD_RETRY_DELAY = 3  # seconds between resume attempts
-DOWNLOAD_CHUNK_SIZE = 256 * 1024  # 256 KB — smaller chunks = less data lost on disconnect
-DOWNLOAD_SOCKET_TIMEOUT = 300  # 5 minutes — Azure CDN can be slow
-
-
-def _download_whisper_model_resumable(url: str, target_path: Path, expected_sha256: str):
-    """Скачивает модель Whisper с поддержкой докачки (HTTP Range).
-
-    При обрыве соединения продолжает с того же места, а не с нуля.
-    После завершения проверяет SHA256.
-    """
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = target_path.with_suffix(".pt.downloading")
-
-    for attempt in range(1, DOWNLOAD_MAX_RETRIES + 1):
-        try:
-            # Determine how much we already have
-            downloaded = temp_path.stat().st_size if temp_path.exists() else 0
-
-            # Build request with Range header for resume
-            req = urllib.request.Request(url)
-            if downloaded > 0:
-                req.add_header("Range", f"bytes={downloaded}-")
-                logger.info(
-                    "Докачка модели с %d МБ (попытка %d/%d)...",
-                    downloaded // (1024 * 1024), attempt, DOWNLOAD_MAX_RETRIES,
-                )
-            else:
-                logger.info(
-                    "Скачивание модели (попытка %d/%d)...",
-                    attempt, DOWNLOAD_MAX_RETRIES,
-                )
-
-            with urllib.request.urlopen(req, timeout=DOWNLOAD_SOCKET_TIMEOUT) as response:
-                # Get total size
-                if downloaded > 0 and response.status == 206:
-                    # Partial content — resume worked
-                    content_range = response.headers.get("Content-Range", "")
-                    total_size = int(content_range.split("/")[-1]) if "/" in content_range else 0
-                elif response.status == 200:
-                    # Full content — server doesn't support Range or fresh start
-                    total_size = int(response.headers.get("Content-Length", 0))
-                    if downloaded > 0:
-                        # Server sent full file, restart download
-                        downloaded = 0
-                        temp_path.unlink(missing_ok=True)
-                else:
-                    total_size = 0
-
-                total_mb = total_size / (1024 * 1024) if total_size else 0
-                last_logged_pct = -1
-
-                mode = "ab" if downloaded > 0 and response.status == 206 else "wb"
-                with open(temp_path, mode) as f:
-                    while True:
-                        chunk = response.read(DOWNLOAD_CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            pct = int(downloaded / total_size * 100)
-                            # Log every 5%
-                            if pct >= last_logged_pct + 5:
-                                last_logged_pct = pct
-                                logger.info(
-                                    "  %d%% (%d / %d МБ)",
-                                    pct, int(downloaded / (1024 * 1024)), int(total_mb),
-                                )
-
-            # Download complete — verify SHA256
-            logger.info("Скачивание завершено. Проверка SHA256...")
-            sha256 = hashlib.sha256()
-            with open(temp_path, "rb") as f:
-                while True:
-                    data = f.read(65536)
-                    if not data:
-                        break
-                    sha256.update(data)
-
-            if sha256.hexdigest() != expected_sha256:
-                logger.error("SHA256 не совпадает! Удаляю файл и начинаю заново.")
-                temp_path.unlink(missing_ok=True)
-                if attempt < DOWNLOAD_MAX_RETRIES:
-                    time.sleep(DOWNLOAD_RETRY_DELAY)
-                    continue
-                raise RuntimeError(
-                    f"SHA256 не совпадает после {DOWNLOAD_MAX_RETRIES} попыток скачивания"
-                )
-
-            # SHA256 OK — move to final location
-            shutil.move(str(temp_path), str(target_path))
-            logger.info("Модель сохранена: %s", target_path)
-            return
-
-        except (urllib.error.URLError, ConnectionError, OSError, TimeoutError) as e:
-            logger.warning(
-                "Ошибка сети при скачивании (попытка %d/%d): %s",
-                attempt, DOWNLOAD_MAX_RETRIES, e,
-            )
-            if attempt < DOWNLOAD_MAX_RETRIES:
-                logger.info("Повтор через %d сек (файл сохранён, докачка)...", DOWNLOAD_RETRY_DELAY)
-                time.sleep(DOWNLOAD_RETRY_DELAY)
-            else:
-                raise RuntimeError(
-                    f"Не удалось скачать модель после {DOWNLOAD_MAX_RETRIES} попыток: {e}"
-                ) from e
-
-
-def _ensure_whisper_model_downloaded(model_name: str) -> str:
-    """Гарантирует что файл модели скачан и валиден. Возвращает путь к файлу."""
-    # Get URL from whisper's model registry
-    model_urls = getattr(whisper_module, "_MODELS", {})
-    url = model_urls.get(model_name)
-    if not url:
-        # Fallback: let whisper handle it (unknown model or new version)
-        return model_name
-
-    # Extract expected SHA256 from URL (second-to-last path segment)
-    expected_sha256 = url.split("/")[-2]
-    cache_dir = _get_whisper_cache_dir()
-    import os
-    model_filename = os.path.basename(url)
-    target_path = cache_dir / model_filename
-
-    # Check if already downloaded and valid
-    if target_path.exists():
-        logger.info("Проверка SHA256 существующего файла %s...", target_path.name)
-        sha256 = hashlib.sha256()
-        with open(target_path, "rb") as f:
-            while True:
-                data = f.read(65536)
-                if not data:
-                    break
-                sha256.update(data)
-        if sha256.hexdigest() == expected_sha256:
-            logger.info("Модель '%s' уже скачана и проверена.", model_name)
-            return model_name
-        else:
-            file_size_mb = target_path.stat().st_size / (1024 * 1024)
-            logger.warning(
-                "Модель '%s' повреждена (%.1f МБ, SHA256 не совпадает). Удаляю и перекачиваю...",
-                model_name, file_size_mb,
-            )
-            target_path.unlink(missing_ok=True)
-
-    # Check if partial .downloading file exists from a previous interrupted attempt
-    temp_path = target_path.with_suffix(".pt.downloading")
-    if temp_path.exists():
-        partial_mb = temp_path.stat().st_size / (1024 * 1024)
-        logger.info("Найден частично скачанный файл (%.1f МБ). Продолжаю докачку...", partial_mb)
-
-    # Download with resume support
-    _download_whisper_model_resumable(url, target_path, expected_sha256)
-    return model_name
+# ==================== Whisper (local, free, via faster-whisper) ====================
 
 
 def get_whisper_model(model_name: str = "medium"):
-    """Загружает и кэширует модель Whisper.
+    """Загружает и кэширует модель faster-whisper (CTranslate2).
 
-    Потокобезопасна (threading.Lock). Скачивает модель с поддержкой
-    докачки (HTTP Range) — при обрыве продолжает с того же места.
-    При ошибке CUDA автоматически переключается на CPU.
+    Потокобезопасна (threading.Lock). Модели скачиваются автоматически
+    через huggingface-hub. INT8 квантизация на CPU — ~4x быстрее openai-whisper.
     """
     global _whisper_model, _whisper_model_name
     if not WHISPER_AVAILABLE:
         raise RuntimeError(
-            "Whisper не установлен. Выполните: pip install openai-whisper"
+            "faster-whisper не установлен. Выполните: pip install faster-whisper"
         )
     # Fast path: model already loaded
     if _whisper_model is not None and _whisper_model_name == model_name:
@@ -416,27 +246,31 @@ def get_whisper_model(model_name: str = "medium"):
         if _whisper_model is not None and _whisper_model_name == model_name:
             return _whisper_model
 
-        # Step 1: Ensure model file is downloaded (resumable)
-        _ensure_whisper_model_downloaded(model_name)
-
-        # Step 2: Load model into memory (try GPU first, fall back to CPU)
-        logger.info("Загрузка модели Whisper '%s' в память...", model_name)
+        logger.info("Загрузка модели faster-whisper '%s' (INT8 CPU)...", model_name)
         try:
-            _whisper_model = whisper_module.load_model(model_name)
+            _whisper_model = WhisperModel(
+                model_name,
+                device="cpu",
+                compute_type="int8",
+            )
         except Exception as e:
-            logger.warning("Ошибка загрузки модели (возможно CUDA): %s. Переключаемся на CPU...", e)
-            _whisper_model = whisper_module.load_model(model_name, device="cpu")
+            logger.warning("INT8 не поддерживается: %s. Пробуем float32...", e)
+            _whisper_model = WhisperModel(
+                model_name,
+                device="cpu",
+                compute_type="float32",
+            )
         _whisper_model_name = model_name
-        logger.info("Модель Whisper '%s' готова.", model_name)
+        logger.info("Модель faster-whisper '%s' готова.", model_name)
         return _whisper_model
 
 
 def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
-    """Распознавание через Whisper (локально, бесплатно).
+    """Распознавание через faster-whisper (CTranslate2, ~4x быстрее).
 
-    Принимает любой аудио/видео файл (Whisper использует ffmpeg внутри).
-    Конвертация в OPUS не нужна.
+    Принимает любой аудио/видео файл.
     Без диаризации — все сегменты с channel_tag=0.
+    vad_filter=True пропускает тишину — ускоряет обработку.
     """
     file_path = Path(file_path)
     if not file_path.exists():
@@ -445,51 +279,45 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
         raise RuntimeError(f"Файл пустой (0 байт): {file_path}")
 
     model = get_whisper_model(model_name)
-    logger.info("[%s] Whisper: распознавание файла %s (%d МБ, модель: %s)...",
-                project_id[:8], file_path.name, file_path.stat().st_size // (1024*1024), model_name)
+    file_size_mb = file_path.stat().st_size // (1024 * 1024)
+    logger.info("[%s] faster-whisper: файл %s (%d МБ, модель: %s)...",
+                project_id[:8], file_path.name, file_size_mb, model_name)
 
-    # fp16=False avoids the FP16 warning on CPU and potential edge cases
-    result = model.transcribe(
+    raw_segments, info = model.transcribe(
         str(file_path),
         language="ru",
         word_timestamps=True,
-        verbose=False,
-        fp16=False,
+        beam_size=5,
+        vad_filter=True,
     )
 
-    if result is None:
-        raise RuntimeError(f"Whisper вернул None для файла {file_path}")
-
-    if "segments" not in result:
-        raise RuntimeError(f"Whisper не вернул segments. Ключи результата: {list(result.keys())}")
-
+    # raw_segments is a generator — transcription happens during iteration
     segments = []
-    for seg in result["segments"]:
-        text = seg["text"].strip()
+    for seg in raw_segments:
+        text = seg.text.strip()
         if not text:
             continue
 
         words = []
-        for w in seg.get("words") or []:
-            if w is None:
-                continue
+        for w in seg.words or []:
             words.append({
-                "text": w["word"].strip(),
-                "start_ms": int(w["start"] * 1000),
-                "end_ms": int(w["end"] * 1000),
+                "text": w.word.strip(),
+                "start_ms": int(w.start * 1000),
+                "end_ms": int(w.end * 1000),
             })
 
         segments.append({
             "text": text,
             "channel_tag": 0,
-            "start_ms": int(seg["start"] * 1000),
-            "end_ms": int(seg["end"] * 1000),
+            "start_ms": int(seg.start * 1000),
+            "end_ms": int(seg.end * 1000),
             "words": words if words else [
-                {"text": text, "start_ms": int(seg["start"] * 1000), "end_ms": int(seg["end"] * 1000)}
+                {"text": text, "start_ms": int(seg.start * 1000), "end_ms": int(seg.end * 1000)}
             ],
         })
 
-    logger.info("[%s] Whisper: %d сегментов", project_id[:8], len(segments))
+    logger.info("[%s] faster-whisper: %d сегментов (аудио: %.0f сек)",
+                project_id[:8], len(segments), info.duration)
     return segments
 
 

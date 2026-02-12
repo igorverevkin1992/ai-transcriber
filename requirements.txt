@@ -10,7 +10,7 @@ slowapi
 aiofiles
 grpcio
 yandexcloud
-openai-whisper
+faster-whisper
 pytest
 httpx
 ruff

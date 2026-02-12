@@ -23,9 +23,9 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # --- Limits ---
 MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
-# Process one file at a time — Whisper on CPU uses ~5GB RAM per transcription,
-# running multiple in parallel causes OOM and kills the server process.
-MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "1"))
+# faster-whisper with INT8 uses ~1-2GB RAM per transcription (vs ~5GB for openai-whisper).
+# 2 concurrent tasks is safe on most machines; override via env var if needed.
+MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "2"))
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".mov", ".mxf", ".mp4", ".wmv", ".avi", ".mkv", ".ogg", ".flac"}
 ALLOWED_URL_HOSTS = {"yadi.sk", "disk.yandex.ru", "disk.yandex.com"}
 
