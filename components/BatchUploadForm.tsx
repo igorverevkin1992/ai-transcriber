@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { UploadCloud, FolderOpen, AlertCircle, X, Cpu, Cloud } from 'lucide-react';
 
 export type EngineType = 'whisper' | 'speechkit';
-export type WhisperModel = 'tiny' | 'base' | 'small' | 'medium' | 'large';
+export type WhisperModel = 'small' | 'medium' | 'large';
 
 interface Props {
   onStartBatch: (files: File[], engine: EngineType, whisperModel: WhisperModel) => void;
@@ -14,11 +14,9 @@ const ALLOWED_EXTENSIONS = new Set([
 ]);
 
 const WHISPER_MODELS: { value: WhisperModel; label: string; desc: string }[] = [
-  { value: 'tiny', label: 'Tiny', desc: '~1 ГБ VRAM, быстро, низкое качество' },
-  { value: 'base', label: 'Base', desc: '~1 ГБ VRAM, быстро, среднее качество' },
-  { value: 'small', label: 'Small', desc: '~2 ГБ VRAM, средне, хорошее качество' },
-  { value: 'medium', label: 'Medium', desc: '~5 ГБ VRAM, медленно, высокое качество' },
-  { value: 'large', label: 'Large', desc: '~10 ГБ VRAM, очень медленно, лучшее качество' },
+  { value: 'small', label: 'Small', desc: '~1 ГБ RAM, ~10 мин/час аудио, хорошее качество' },
+  { value: 'medium', label: 'Medium', desc: '~2 ГБ RAM, ~30 мин/час аудио, высокое качество' },
+  { value: 'large', label: 'Large', desc: '~4 ГБ RAM, ~60 мин/час аудио, лучшее качество' },
 ];
 
 export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingle }) => {
@@ -26,7 +24,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
   const [error, setError] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [engine, setEngine] = useState<EngineType>('whisper');
-  const [whisperModel, setWhisperModel] = useState<WhisperModel>('medium');
+  const [whisperModel, setWhisperModel] = useState<WhisperModel>('small');
   const inputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
 

@@ -71,7 +71,7 @@ const STEP_LABELS: Record<string, string> = {
   error: 'Ошибка',
 };
 
-export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whisperModel = 'medium', onDone, onError }) => {
+export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whisperModel = 'small', onDone, onError }) => {
   const [state, setState] = useState<UploadState>('uploading');
   const [trackers, setTrackers] = useState<FileTracker[]>(() =>
     files.map(f => ({ file: f }))

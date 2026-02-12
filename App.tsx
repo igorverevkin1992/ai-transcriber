@@ -17,7 +17,7 @@ const App: React.FC = () => {
   const [projectData, setProjectData] = useState<ProjectData | null>(null);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [batchEngine, setBatchEngine] = useState<EngineType>('whisper');
-  const [batchWhisperModel, setBatchWhisperModel] = useState<WhisperModel>('medium');
+  const [batchWhisperModel, setBatchWhisperModel] = useState<WhisperModel>('small');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [isDownloadingSaved, setIsDownloadingSaved] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
