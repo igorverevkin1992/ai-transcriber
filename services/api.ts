@@ -174,4 +174,13 @@ export const api = {
     }
     return await response.blob();
   },
+
+  batchDownloadSaved: async (): Promise<Blob> => {
+    const response = await fetch(`${API_BASE_URL}/batch/download-saved`);
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.detail || 'Нет сохранённых файлов');
+    }
+    return await response.blob();
+  },
 };
