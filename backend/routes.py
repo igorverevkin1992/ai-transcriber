@@ -285,6 +285,36 @@ async def download_saved():
     )
 
 
+# ==================== DIAGNOSTICS ====================
+
+
+@router.get("/batch/queue-info")
+async def queue_info():
+    """Диагностика: показывает состояние всех проектов в памяти."""
+    from collections import Counter
+    status_counts = Counter()
+    files_by_status: dict = {}
+
+    for pid, proj in list(projects_db.items()):
+        st = proj.get("status", "unknown")
+        st_val = st.value if hasattr(st, "value") else str(st)
+        status_counts[st_val] += 1
+
+        if st_val not in files_by_status:
+            files_by_status[st_val] = []
+        files_by_status[st_val].append({
+            "id": pid[:8],
+            "filename": proj.get("original_filename", "???"),
+            "error": (proj.get("error") or "")[:200],  # truncate long tracebacks
+        })
+
+    return {
+        "total_projects": len(projects_db),
+        "counts": dict(status_counts),
+        "files": files_by_status,
+    }
+
+
 # ==================== WHISPER MODEL MANAGEMENT ====================
 
 
