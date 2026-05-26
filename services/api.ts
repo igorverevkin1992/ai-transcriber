@@ -1,11 +1,17 @@
-import { API_BASE_URL } from '../config';
+import { API_BASE_URL, API_KEY } from '../config';
 import { ProjectData, MappingDecision, BatchStatus } from '../types';
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...extra };
+  if (API_KEY) h['X-API-Key'] = API_KEY;
+  return h;
+}
 
 export const api = {
   uploadFile: async (link: string): Promise<string> => {
     const response = await fetch(`${API_BASE_URL}/projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ url: link }),
     });
 
@@ -30,7 +36,7 @@ export const api = {
         throw new DOMException('Операция отменена', 'AbortError');
       }
 
-      const response = await fetch(`${API_BASE_URL}/projects/${projectId}/status`, { signal });
+      const response = await fetch(`${API_BASE_URL}/projects/${projectId}/status`, { signal, headers: authHeaders() });
 
       if (!response.ok) {
         throw new Error(`Ошибка проверки статуса: ${response.statusText}`);
@@ -59,7 +65,7 @@ export const api = {
   },
 
   getVerificationData: async (projectId: string): Promise<ProjectData> => {
-    const response = await fetch(`${API_BASE_URL}/projects/${projectId}`);
+    const response = await fetch(`${API_BASE_URL}/projects/${projectId}`, { headers: authHeaders() });
     if (!response.ok) throw new Error('Не удалось получить данные проекта');
 
     const result = await response.json();
@@ -112,7 +118,7 @@ export const api = {
 
     const response = await fetch(`${API_BASE_URL}/projects/${projectId}/export`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         mappings: mappingList,
         filename: 'transcript.docx',
@@ -133,6 +139,7 @@ export const api = {
 
     const response = await fetch(`${API_BASE_URL}/batch/upload`, {
       method: 'POST',
+      headers: authHeaders(),
       body: formData,
     });
 
@@ -146,7 +153,7 @@ export const api = {
   },
 
   batchStatus: async (projectIds: string[]): Promise<BatchStatus> => {
-    const response = await fetch(`${API_BASE_URL}/batch/status?ids=${projectIds.join(',')}`);
+    const response = await fetch(`${API_BASE_URL}/batch/status?ids=${projectIds.join(',')}`, { headers: authHeaders() });
     if (!response.ok) throw new Error('Ошибка получения статуса пакета');
     return await response.json();
   },
@@ -157,6 +164,7 @@ export const api = {
 
     const response = await fetch(`${API_BASE_URL}/whisper/preload`, {
       method: 'POST',
+      headers: authHeaders(),
       body: formData,
     });
 
@@ -167,10 +175,19 @@ export const api = {
   },
 
   batchDownload: async (projectIds: string[]): Promise<Blob> => {
-    const response = await fetch(`${API_BASE_URL}/batch/download?ids=${projectIds.join(',')}`);
+    const response = await fetch(`${API_BASE_URL}/batch/download?ids=${projectIds.join(',')}`, { headers: authHeaders() });
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({}));
       throw new Error(errorBody.detail || 'Ошибка скачивания архива');
+    }
+    return await response.blob();
+  },
+
+  batchDownloadSaved: async (): Promise<Blob> => {
+    const response = await fetch(`${API_BASE_URL}/batch/download-saved`, { headers: authHeaders() });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.detail || 'Нет сохранённых файлов');
     }
     return await response.blob();
   },

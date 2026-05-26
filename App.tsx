@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { UploadForm } from './components/UploadForm';
 import { BatchUploadForm, EngineType, WhisperModel } from './components/BatchUploadForm';
 import { BatchProgress } from './components/BatchProgress';
@@ -7,7 +7,8 @@ import { VerificationDashboard } from './components/VerificationDashboard';
 import { ToastContainer, ToastMessage } from './components/Toast';
 import { ProcessingStatus as StatusType, ProjectData } from './types';
 import { api } from './services/api';
-import { CheckCircle2 } from 'lucide-react';
+import { loadBatchSession, clearBatchSession, BatchSession } from './services/batchSession';
+import { CheckCircle2, Download, RefreshCw } from 'lucide-react';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<StatusType>('IDLE');
@@ -17,9 +18,18 @@ const App: React.FC = () => {
   const [projectData, setProjectData] = useState<ProjectData | null>(null);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [batchEngine, setBatchEngine] = useState<EngineType>('whisper');
-  const [batchWhisperModel, setBatchWhisperModel] = useState<WhisperModel>('medium');
+  const [batchWhisperModel, setBatchWhisperModel] = useState<WhisperModel>('small');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [isDownloadingSaved, setIsDownloadingSaved] = useState(false);
+  const [recoveredSession, setRecoveredSession] = useState<BatchSession | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const session = loadBatchSession();
+    if (session) {
+      setRecoveredSession(session);
+    }
+  }, []);
 
   const addToast = useCallback((type: 'error' | 'success', text: string) => {
     const id = Date.now().toString();
@@ -86,6 +96,26 @@ const App: React.FC = () => {
     setBatchFiles([]);
   };
 
+  const handleDownloadSaved = async () => {
+    setIsDownloadingSaved(true);
+    try {
+      const blob = await api.batchDownloadSaved();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'transcripts.zip';
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      addToast('success', 'Архив скачан');
+    } catch (e: any) {
+      addToast('error', e?.message || 'Ошибка скачивания');
+    } finally {
+      setIsDownloadingSaved(false);
+    }
+  };
+
   return (
     <div className="h-screen bg-gray-50 flex flex-col">
       <ToastContainer messages={toasts} onDismiss={dismissToast} />
@@ -99,10 +129,57 @@ const App: React.FC = () => {
           <span className="text-gray-400 mx-2 hidden sm:inline">/</span>
           <span className="text-sm text-gray-500 hidden sm:inline">Генерация монтажных листов</span>
         </div>
-        <div className="text-xs text-gray-400 font-mono">v1.2.0</div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleDownloadSaved}
+            disabled={isDownloadingSaved}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 hover:text-gray-900 bg-gray-100 hover:bg-gray-200 disabled:bg-gray-100 disabled:text-gray-400 rounded-md transition-colors"
+            title="Скачать все готовые расшифровки из папки completed_docx/"
+          >
+            <Download className="w-3.5 h-3.5" />
+            {isDownloadingSaved ? 'Скачивание...' : 'Скачать готовые'}
+          </button>
+          <div className="text-xs text-gray-400 font-mono">v1.2.0</div>
+        </div>
       </header>
 
       <main className="flex-1 overflow-hidden relative">
+        {/* Recovery banner */}
+        {status === 'IDLE' && recoveredSession && (
+          <div className="mx-4 mt-4 bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <RefreshCw className="w-5 h-5 text-amber-600" />
+              <div>
+                <p className="text-sm font-medium text-amber-900">
+                  Найдена незавершённая обработка ({recoveredSession.projectIds.length} файлов)
+                </p>
+                <p className="text-xs text-amber-600 mt-0.5">Можно продолжить отслеживание прогресса</p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  clearBatchSession();
+                  setRecoveredSession(null);
+                }}
+                className="px-3 py-1.5 text-xs text-gray-600 hover:text-gray-800 bg-white border border-gray-200 rounded-md"
+              >
+                Отклонить
+              </button>
+              <button
+                onClick={() => {
+                  setBatchEngine(recoveredSession.engine as EngineType);
+                  setBatchWhisperModel(recoveredSession.whisperModel as WhisperModel);
+                  setStatus('BATCH_PROCESSING');
+                }}
+                className="px-3 py-1.5 text-xs text-white bg-amber-600 hover:bg-amber-700 rounded-md font-medium"
+              >
+                Продолжить
+              </button>
+            </div>
+          </div>
+        )}
+
         {status === 'IDLE' && mode === 'batch' && (
           <BatchUploadForm
             onStartBatch={handleStartBatch}
@@ -140,13 +217,15 @@ const App: React.FC = () => {
           />
         )}
 
-        {status === 'BATCH_PROCESSING' && batchFiles.length > 0 && (
+        {status === 'BATCH_PROCESSING' && (batchFiles.length > 0 || recoveredSession) && (
           <BatchProgress
             files={batchFiles}
             engine={batchEngine}
             whisperModel={batchWhisperModel}
-            onDone={resetToIdle}
+            onDone={() => { setRecoveredSession(null); resetToIdle(); }}
             onError={(msg) => addToast('error', msg)}
+            recoveredProjectIds={recoveredSession?.projectIds}
+            recoveredFileNames={recoveredSession?.fileNames}
           />
         )}
 

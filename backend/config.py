@@ -14,6 +14,7 @@ logger = logging.getLogger("abtgs")
 
 # --- API Keys ---
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
+API_KEY = os.getenv("API_KEY")  # if set, X-API-Key header required on /api/* requests
 
 # --- Paths ---
 TEMP_DIR = Path("temp_files")
@@ -23,9 +24,14 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # --- Limits ---
 MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
-MAX_CONCURRENT_TASKS = 3
+# faster-whisper with INT8 uses ~1-2GB RAM per transcription (vs ~5GB for openai-whisper).
+# 2 concurrent tasks is safe on most machines; override via env var if needed.
+MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "2"))
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".mov", ".mxf", ".mp4", ".wmv", ".avi", ".mkv", ".ogg", ".flac"}
 ALLOWED_URL_HOSTS = {"yadi.sk", "disk.yandex.ru", "disk.yandex.com"}
+
+# --- CORS ---
+SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "projects.db")
 
 # --- CORS ---
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")

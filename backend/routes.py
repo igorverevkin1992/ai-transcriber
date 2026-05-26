@@ -32,31 +32,33 @@ from backend.services import (
     process_uploaded_file_task,
     process_video_task,
     projects_db,
+    submit_task,
 )
 from backend.utils import sanitize_filename, validate_file_extension, validate_url
 
 router = APIRouter(prefix="/api/v1")
 limiter = Limiter(key_func=get_remote_address)
 
-# In-memory хранилище пакетов
-batches_db: dict = {}
-
 
 @router.post("/projects", response_model=CreateProjectResponse)
 @limiter.limit("5/minute")
-async def create_project(request: Request, req: CreateProjectRequest, background_tasks: BackgroundTasks):
+async def create_project(request: Request, req: CreateProjectRequest):
     """Создает проект и запускает фоновую обработку."""
     url_error = validate_url(req.url)
     if url_error:
         raise HTTPException(status_code=400, detail=url_error)
 
     pid = str(uuid.uuid4())
-    projects_db[pid] = {
+    projects_db.create(pid, {
         "id": pid,
         "status": ProjectStatusEnum.QUEUED,
         "created_at": time.time(),
-    }
-    background_tasks.add_task(process_video_task, pid, req.url)
+        "retry_count": 0,
+        "task_func": "process_video_task",
+        "task_args": (pid, req.url),
+        "task_kwargs": {},
+    })
+    submit_task(process_video_task, pid, req.url, project_id=pid)
     logger.info("Проект создан: %s для URL: %s", pid[:8], req.url[:60])
     return CreateProjectResponse(id=pid)
 
@@ -117,7 +119,6 @@ async def export_docx(pid: str, req: ExportRequest, background_tasks: Background
 @router.post("/batch/upload", response_model=CreateProjectResponse)
 async def upload_file(
     file: UploadFile,
-    background_tasks: BackgroundTasks,
     engine: str = Form("whisper"),
     whisper_model: str = Form("medium"),
 ):
@@ -136,7 +137,9 @@ async def upload_file(
         raise HTTPException(status_code=400, detail=ext_error)
 
     pid = str(uuid.uuid4())
-    local_path = TEMP_DIR / f"{pid}_video"
+    # Preserve original extension — ffmpeg/Whisper need it to detect container format
+    ext = Path(safe_filename).suffix  # e.g. ".wmv", ".mp4"
+    local_path = TEMP_DIR / f"{pid}_video{ext}"
 
     # Потоковая запись на диск с проверкой размера
     total_size = 0
@@ -155,17 +158,21 @@ async def upload_file(
                 )
             await f.write(chunk)
 
-    projects_db[pid] = {
+    projects_db.create(pid, {
         "id": pid,
         "status": ProjectStatusEnum.QUEUED,
         "created_at": time.time(),
         "original_filename": safe_filename,
         "engine": engine,
-    }
+        "retry_count": 0,
+        "task_func": "process_uploaded_file_task",
+        "task_args": (pid, str(local_path), safe_filename),
+        "task_kwargs": {"engine": engine, "whisper_model": whisper_model},
+    })
 
-    background_tasks.add_task(
+    submit_task(
         process_uploaded_file_task, pid, str(local_path), safe_filename,
-        engine=engine, whisper_model=whisper_model,
+        project_id=pid, engine=engine, whisper_model=whisper_model,
     )
     logger.info("Файл загружен: %s -> проект %s (engine=%s)", safe_filename, pid[:8], engine)
     return CreateProjectResponse(id=pid)
@@ -283,6 +290,36 @@ async def download_saved():
     )
 
 
+# ==================== DIAGNOSTICS ====================
+
+
+@router.get("/batch/queue-info")
+async def queue_info():
+    """Диагностика: показывает состояние всех проектов в памяти."""
+    from collections import Counter
+    status_counts = Counter()
+    files_by_status: dict = {}
+
+    for pid, proj in list(projects_db.items()):
+        st = proj.get("status", "unknown")
+        st_val = st.value if hasattr(st, "value") else str(st)
+        status_counts[st_val] += 1
+
+        if st_val not in files_by_status:
+            files_by_status[st_val] = []
+        files_by_status[st_val].append({
+            "id": pid[:8],
+            "filename": proj.get("original_filename", "???"),
+            "error": (proj.get("error") or "")[:200],  # truncate long tracebacks
+        })
+
+    return {
+        "total_projects": len(projects_db),
+        "counts": dict(status_counts),
+        "files": files_by_status,
+    }
+
+
 # ==================== WHISPER MODEL MANAGEMENT ====================
 
 
@@ -298,7 +335,7 @@ async def preload_whisper_model(
     if not WHISPER_AVAILABLE:
         raise HTTPException(
             status_code=400,
-            detail="Whisper не установлен. Выполните: pip install openai-whisper",
+            detail="faster-whisper не установлен. Выполните: pip install faster-whisper",
         )
 
     valid_models = {"tiny", "base", "small", "medium", "large"}

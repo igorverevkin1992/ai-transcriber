@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { UploadCloud, FolderOpen, AlertCircle, X, Cpu, Cloud } from 'lucide-react';
 
 export type EngineType = 'whisper' | 'speechkit';
-export type WhisperModel = 'tiny' | 'base' | 'small' | 'medium' | 'large';
+export type WhisperModel = 'small' | 'medium' | 'large';
 
 interface Props {
   onStartBatch: (files: File[], engine: EngineType, whisperModel: WhisperModel) => void;
@@ -14,11 +14,9 @@ const ALLOWED_EXTENSIONS = new Set([
 ]);
 
 const WHISPER_MODELS: { value: WhisperModel; label: string; desc: string }[] = [
-  { value: 'tiny', label: 'Tiny', desc: '~1 ГБ VRAM, быстро, низкое качество' },
-  { value: 'base', label: 'Base', desc: '~1 ГБ VRAM, быстро, среднее качество' },
-  { value: 'small', label: 'Small', desc: '~2 ГБ VRAM, средне, хорошее качество' },
-  { value: 'medium', label: 'Medium', desc: '~5 ГБ VRAM, медленно, высокое качество' },
-  { value: 'large', label: 'Large', desc: '~10 ГБ VRAM, очень медленно, лучшее качество' },
+  { value: 'small', label: 'Small', desc: '~1 ГБ RAM, ~10 мин/час аудио, хорошее качество' },
+  { value: 'medium', label: 'Medium', desc: '~2 ГБ RAM, ~30 мин/час аудио, высокое качество' },
+  { value: 'large', label: 'Large', desc: '~4 ГБ RAM, ~60 мин/час аудио, лучшее качество' },
 ];
 
 export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingle }) => {
@@ -26,7 +24,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
   const [error, setError] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [engine, setEngine] = useState<EngineType>('whisper');
-  const [whisperModel, setWhisperModel] = useState<WhisperModel>('medium');
+  const [whisperModel, setWhisperModel] = useState<WhisperModel>('small');
   const inputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
 
@@ -111,15 +109,16 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
   };
 
   return (
-    <div className="flex flex-col items-center justify-center h-full max-w-3xl mx-auto px-4">
-      <div className="bg-white p-8 rounded-2xl shadow-xl w-full border border-gray-100">
-        <div className="text-center mb-6">
-          <div className="bg-purple-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-            <FolderOpen className="w-8 h-8 text-purple-600" />
+    <div className="flex flex-col h-full overflow-y-auto">
+      <div className="flex-1 flex items-start justify-center py-6 px-4">
+        <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-3xl border border-gray-100">
+          <div className="text-center mb-6">
+            <div className="bg-purple-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+              <FolderOpen className="w-8 h-8 text-purple-600" />
+            </div>
+            <h1 className="text-2xl font-bold text-gray-900">Пакетная обработка</h1>
+            <p className="text-gray-500 mt-2">Загрузите несколько файлов для автоматической расшифровки</p>
           </div>
-          <h1 className="text-2xl font-bold text-gray-900">Пакетная обработка</h1>
-          <p className="text-gray-500 mt-2">Загрузите несколько файлов для автоматической расшифровки</p>
-        </div>
 
         {/* Engine selector */}
         <div className="mb-5">
@@ -168,6 +167,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
               <select
                 value={whisperModel}
                 onChange={e => setWhisperModel(e.target.value as WhisperModel)}
+                aria-label="Выбор модели Whisper"
                 className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-green-500 focus:border-green-500"
               >
                 {WHISPER_MODELS.map(m => (
@@ -187,6 +187,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
           multiple
           accept=".mp3,.wav,.mov,.mxf,.mp4,.wmv,.avi,.mkv,.ogg,.flac"
           className="hidden"
+          aria-label="Выберите медиафайлы"
           onChange={handleFileSelect}
         />
 
@@ -251,6 +252,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
                     </div>
                     <button
                       onClick={() => handleRemoveFile(i)}
+                      aria-label={`Удалить ${file.name}`}
                       className="ml-2 p-1 text-gray-400 hover:text-red-500"
                     >
                       <X className="w-4 h-4" />
@@ -288,6 +290,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
           >
             Обработать один файл по ссылке
           </button>
+        </div>
         </div>
       </div>
     </div>

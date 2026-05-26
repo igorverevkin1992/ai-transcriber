@@ -45,6 +45,7 @@ export const UploadForm: React.FC<Props> = ({ onUpload }) => {
               </div>
               <input
                 type="text"
+                aria-label="Ссылка на Яндекс.Диск"
                 className="focus:ring-blue-500 focus:border-blue-500 block w-full pl-10 sm:text-sm border-gray-300 rounded-md py-3 border"
                 placeholder="https://yadi.sk/d/..."
                 value={link}
