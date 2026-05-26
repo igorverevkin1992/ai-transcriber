@@ -1,4 +1,4 @@
-export type ProcessingStatus = 'IDLE' | 'PROCESSING' | 'VERIFICATION' | 'COMPLETED' | 'BATCH_PROCESSING';
+export type ProcessingStatus = 'IDLE' | 'PROCESSING' | 'VERIFICATION' | 'COMPLETED' | 'BATCH_PROCESSING' | 'BATCH_VERIFICATION';
 
 export interface ProcessingStep {
   label: string;

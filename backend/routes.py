@@ -13,10 +13,11 @@ from fastapi.responses import FileResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from backend.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_BYTES, OUTPUT_DIR, TEMP_DIR, logger
+from backend.config import MAX_FILE_SIZE_BYTES, OUTPUT_DIR, TEMP_DIR, logger
 from backend.docx_export import generate_docx
 from backend.models import (
     STATUS_LABELS_RU,
+    BatchExportRequest,
     BatchFileStatus,
     BatchStatusResponse,
     CreateProjectRequest,
@@ -25,10 +26,12 @@ from backend.models import (
     ProjectStatusEnum,
     ProjectStatusResponse,
 )
+from backend.security import validate_mime_type
 from backend.services import (
     WHISPER_AVAILABLE,
-    get_whisper_model,
     auto_export_project,
+    cancel_project,
+    get_whisper_model,
     process_uploaded_file_task,
     process_video_task,
     projects_db,
@@ -58,8 +61,9 @@ async def create_project(request: Request, req: CreateProjectRequest):
         "task_args": (pid, req.url),
         "task_kwargs": {},
     })
+    from backend.security import mask_url
     submit_task(process_video_task, pid, req.url, project_id=pid)
-    logger.info("Проект создан: %s для URL: %s", pid[:8], req.url[:60])
+    logger.info("Проект создан: %s для URL: %s", pid[:8], mask_url(req.url))
     return CreateProjectResponse(id=pid)
 
 
@@ -87,6 +91,14 @@ async def get_result(pid: str):
     if proj["status"] != ProjectStatusEnum.COMPLETED:
         raise HTTPException(status_code=400, detail="Обработка ещё не завершена")
     return proj["result"]
+
+
+@router.delete("/projects/{pid}")
+async def delete_project(pid: str):
+    """Отменяет/удаляет проект и связанные temp/output файлы."""
+    if not cancel_project(pid):
+        raise HTTPException(status_code=404, detail="Проект не найден")
+    return {"status": "deleted", "id": pid}
 
 
 @router.post("/projects/{pid}/export")
@@ -117,7 +129,9 @@ async def export_docx(pid: str, req: ExportRequest, background_tasks: Background
 
 
 @router.post("/batch/upload", response_model=CreateProjectResponse)
+@limiter.limit("30/minute")
 async def upload_file(
+    request: Request,
     file: UploadFile,
     engine: str = Form("whisper"),
     whisper_model: str = Form("medium"),
@@ -141,8 +155,10 @@ async def upload_file(
     ext = Path(safe_filename).suffix  # e.g. ".wmv", ".mp4"
     local_path = TEMP_DIR / f"{pid}_video{ext}"
 
-    # Потоковая запись на диск с проверкой размера
+    # Потоковая запись на диск с проверкой размера и MIME-типа
     total_size = 0
+    mime_validated = False
+    first_chunk_buffer = b""
     async with aiofiles.open(str(local_path), "wb") as f:
         while chunk := await file.read(65536):
             total_size += len(chunk)
@@ -156,7 +172,28 @@ async def upload_file(
                     status_code=413,
                     detail=f"Файл слишком большой. Максимум: {MAX_FILE_SIZE_BYTES // (1024**3)} ГБ",
                 )
+            if not mime_validated:
+                first_chunk_buffer += chunk
+                if len(first_chunk_buffer) >= 8192:
+                    mime_err = validate_mime_type(first_chunk_buffer[:8192])
+                    if mime_err:
+                        await f.close()
+                        try:
+                            local_path.unlink()
+                        except OSError:
+                            pass
+                        raise HTTPException(status_code=400, detail=mime_err)
+                    mime_validated = True
             await f.write(chunk)
+
+    if not mime_validated and first_chunk_buffer:
+        mime_err = validate_mime_type(first_chunk_buffer)
+        if mime_err:
+            try:
+                local_path.unlink()
+            except OSError:
+                pass
+            raise HTTPException(status_code=400, detail=mime_err)
 
     projects_db.create(pid, {
         "id": pid,
@@ -226,7 +263,8 @@ async def batch_status(ids: str = Query(..., description="ID проектов ч
 
 
 @router.get("/batch/download")
-async def batch_download(ids: str = Query(..., description="ID проектов через запятую")):
+@limiter.limit("10/minute")
+async def batch_download(request: Request, ids: str = Query(..., description="ID проектов через запятую")):
     """Авто-экспортирует все завершённые проекты и возвращает ZIP-архив."""
     project_ids = [i.strip() for i in ids.split(",") if i.strip()]
 
@@ -282,6 +320,99 @@ async def download_saved():
 
     zip_buffer.seek(0)
     logger.info("Скачивание сохранённых файлов: %d DOCX", len(docx_files))
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
+    )
+
+
+# ==================== BATCH VERIFICATION ====================
+
+
+@router.get("/batch/verification-data")
+async def batch_verification_data(ids: str = Query(..., description="ID проектов через запятую")):
+    """Возвращает данные спикеров для каждого завершённого проекта в батче."""
+    project_ids = [i.strip() for i in ids.split(",") if i.strip()]
+    results = []
+
+    for pid in project_ids:
+        proj = projects_db.get(pid)
+        if not proj or proj.get("status") != ProjectStatusEnum.COMPLETED or "result" not in proj:
+            continue
+
+        result = proj["result"]
+        speakers = result.get("speakers", {})
+        segments = result.get("segments", [])
+
+        speaker_list = []
+        for speaker_id, info in speakers.items():
+            name = info.get("suggested_name", f"Спикер {speaker_id}")
+            words = name.split()
+            abbr = words[0][0].upper() if words and words[0] else f"С{speaker_id}"
+            speaker_list.append({
+                "id": speaker_id,
+                "name": name,
+                "abbr": abbr,
+                "duration_sec": info.get("duration_sec", 0),
+            })
+
+        preview = segments[:5] if segments else []
+
+        results.append({
+            "project_id": pid,
+            "filename": proj.get("original_filename", "???"),
+            "speakers": speaker_list,
+            "preview_segments": preview,
+            "total_segments": len(segments),
+        })
+
+    return {"projects": results}
+
+
+@router.post("/batch/export-with-mappings")
+@limiter.limit("10/minute")
+async def batch_export_with_mappings(request: Request, body: BatchExportRequest):
+    """Экспортирует все проекты с пользовательскими маппингами спикеров."""
+    project_mappings = body.projects
+
+    if not project_mappings:
+        raise HTTPException(status_code=400, detail="Не указаны проекты")
+
+    zip_buffer = BytesIO()
+    exported_count = 0
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for pm in project_mappings:
+            pid = pm.project_id
+            mappings = pm.mappings
+
+            proj = projects_db.get(pid)
+            if not proj or proj.get("status") != ProjectStatusEnum.COMPLETED or "result" not in proj:
+                continue
+
+            final_map = {m.speaker_id: m.name for m in mappings}
+            abbr_map = {m.speaker_id: m.abbr for m in mappings}
+
+            output_path = str(TEMP_DIR / f"batch_verified_{pid}.docx")
+            try:
+                download_name = generate_docx(proj, final_map, abbr_map, output_path)
+                if download_name and os.path.exists(output_path):
+                    zf.write(output_path, download_name)
+                    exported_count += 1
+            finally:
+                try:
+                    if os.path.exists(output_path):
+                        os.unlink(output_path)
+                except OSError:
+                    pass
+
+    if exported_count == 0:
+        raise HTTPException(status_code=400, detail="Нет проектов для экспорта")
+
+    zip_buffer.seek(0)
+    logger.info("Верифицированный экспорт: %d файлов в ZIP", exported_count)
 
     return StreamingResponse(
         zip_buffer,

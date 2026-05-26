@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { UploadForm } from './components/UploadForm';
 import { BatchUploadForm, EngineType, WhisperModel } from './components/BatchUploadForm';
 import { BatchProgress } from './components/BatchProgress';
+import { BatchVerification } from './components/BatchVerification';
 import { ProcessingStatus } from './components/ProcessingStatus';
 import { VerificationDashboard } from './components/VerificationDashboard';
 import { ToastContainer, ToastMessage } from './components/Toast';
@@ -22,6 +23,7 @@ const App: React.FC = () => {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [isDownloadingSaved, setIsDownloadingSaved] = useState(false);
   const [recoveredSession, setRecoveredSession] = useState<BatchSession | null>(null);
+  const [batchProjectIds, setBatchProjectIds] = useState<string[]>([]);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -94,6 +96,7 @@ const App: React.FC = () => {
     setStatus('IDLE');
     setProjectData(null);
     setBatchFiles([]);
+    setBatchProjectIds([]);
   };
 
   const handleDownloadSaved = async () => {
@@ -222,10 +225,22 @@ const App: React.FC = () => {
             files={batchFiles}
             engine={batchEngine}
             whisperModel={batchWhisperModel}
-            onDone={() => { setRecoveredSession(null); resetToIdle(); }}
+            onDone={(projectIds) => {
+              setRecoveredSession(null);
+              setBatchProjectIds(projectIds);
+              setStatus('BATCH_VERIFICATION');
+            }}
             onError={(msg) => addToast('error', msg)}
             recoveredProjectIds={recoveredSession?.projectIds}
             recoveredFileNames={recoveredSession?.fileNames}
+          />
+        )}
+
+        {status === 'BATCH_VERIFICATION' && batchProjectIds.length > 0 && (
+          <BatchVerification
+            projectIds={batchProjectIds}
+            onDone={resetToIdle}
+            onError={(msg) => addToast('error', msg)}
           />
         )}
 

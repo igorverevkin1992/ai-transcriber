@@ -99,3 +99,20 @@ class BatchStatusResponse(BaseModel):
     errors: int
     in_progress: int
     files: List[BatchFileStatus]
+
+
+# --- Batch export with mappings ---
+
+class SpeakerMappingItem(BaseModel):
+    speaker_id: str
+    name: str
+    abbr: str
+
+
+class ProjectMappingItem(BaseModel):
+    project_id: str
+    mappings: List[SpeakerMappingItem]
+
+
+class BatchExportRequest(BaseModel):
+    projects: List[ProjectMappingItem]

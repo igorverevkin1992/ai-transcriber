@@ -1,5 +1,40 @@
 import { API_BASE_URL, API_KEY } from '../config';
-import { ProjectData, MappingDecision, BatchStatus } from '../types';
+import { ProjectData, MappingDecision, BatchStatus, Candidate } from '../types';
+
+interface SpeakerDict {
+  [key: string]: { duration_sec: number; suggested_name: string };
+}
+
+interface Segment {
+  timecode: string;
+  speaker: string;
+  text: string;
+}
+
+interface ProjectResult {
+  speakers: SpeakerDict;
+  segments: Segment[];
+  meta?: { original_filename?: string };
+}
+
+interface SpeakerVerification {
+  id: string;
+  name: string;
+  abbr: string;
+  duration_sec: number;
+}
+
+interface ProjectVerificationData {
+  project_id: string;
+  filename: string;
+  speakers: SpeakerVerification[];
+  preview_segments: Segment[];
+  total_segments: number;
+}
+
+interface BatchVerificationResponse {
+  projects: ProjectVerificationData[];
+}
 
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { ...extra };
@@ -68,12 +103,12 @@ export const api = {
     const response = await fetch(`${API_BASE_URL}/projects/${projectId}`, { headers: authHeaders() });
     if (!response.ok) throw new Error('Не удалось получить данные проекта');
 
-    const result = await response.json();
+    const result: ProjectResult = await response.json();
 
-    const speakersDict = result.speakers || {};
-    const totalDuration = (Object.values(speakersDict) as any[]).reduce(
-      (acc: number, val: any) => acc + val.duration_sec, 0
-    ) as number;
+    const speakersDict: SpeakerDict = result.speakers || {};
+    const totalDuration = Object.values(speakersDict).reduce(
+      (acc, val) => acc + val.duration_sec, 0
+    );
 
     const detected_speakers = Object.keys(speakersDict).map(tagId => {
       const s = speakersDict[tagId];
@@ -87,13 +122,13 @@ export const api = {
       };
     });
 
-    const candidates = detected_speakers.map(s => ({
+    const candidates: Candidate[] = detected_speakers.map(s => ({
       id: s.tag_id,
       name: s.custom_name || `Speaker ${s.tag_id}`,
       abbr: (s.custom_name || `S${s.tag_id}`).substring(0, 3).toUpperCase(),
     }));
 
-    const preview_transcript = result.segments.map((seg: any) => ({
+    const preview_transcript = result.segments.map((seg: Segment) => ({
       timecode: seg.timecode,
       tag_id: seg.speaker,
       text: seg.text,
@@ -179,6 +214,25 @@ export const api = {
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({}));
       throw new Error(errorBody.detail || 'Ошибка скачивания архива');
+    }
+    return await response.blob();
+  },
+
+  batchVerificationData: async (projectIds: string[]): Promise<BatchVerificationResponse> => {
+    const response = await fetch(`${API_BASE_URL}/batch/verification-data?ids=${projectIds.join(',')}`, { headers: authHeaders() });
+    if (!response.ok) throw new Error('Ошибка получения данных верификации');
+    return await response.json();
+  },
+
+  batchExportWithMappings: async (projects: Array<{ project_id: string; mappings: Array<{ speaker_id: string; name: string; abbr: string }> }>): Promise<Blob> => {
+    const response = await fetch(`${API_BASE_URL}/batch/export-with-mappings`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ projects }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.detail || 'Ошибка экспорта');
     }
     return await response.blob();
   },

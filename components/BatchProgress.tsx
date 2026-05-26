@@ -19,7 +19,7 @@ interface Props {
   files: File[];
   engine?: string;
   whisperModel?: string;
-  onDone: () => void;
+  onDone: (projectIds: string[]) => void;
   onError: (msg: string) => void;
   recoveredProjectIds?: string[];
   recoveredFileNames?: string[];
@@ -95,10 +95,12 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   const [startTime] = useState(() => Date.now());
   const [elapsedSec, setElapsedSec] = useState(0);
   const [logMessages, setLogMessages] = useState<string[]>([]);
+  const [pollError, setPollError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval>>();
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const logEndRef = useRef<HTMLDivElement>(null);
   const prevBatchFilesRef = useRef<BatchFileInfo[]>([]);
+  const pollFailCountRef = useRef(0);
 
   const addLog = useCallback((msg: string) => {
     const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -110,8 +112,21 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     timerRef.current = setInterval(() => {
       setElapsedSec(Math.floor((Date.now() - startTime) / 1000));
     }, 1000);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = undefined;
+      }
+    };
   }, [startTime]);
+
+  // Unmount: guarantee both intervals are cleared
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
 
   // Auto-scroll log
   useEffect(() => {
@@ -120,8 +135,11 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
 
   // Phase 1: Preload Whisper model (if needed), then upload files to server
   // Skip entirely in recovery mode — files already uploaded, go straight to polling
+  const uploadStartedRef = useRef(false);
   useEffect(() => {
     if (isRecovery) return;
+    if (uploadStartedRef.current) return;
+    uploadStartedRef.current = true;
     let cancelled = false;
 
     const uploadAll = async () => {
@@ -209,6 +227,8 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     const poll = async () => {
       try {
         const status = await api.batchStatus(projectIds);
+        pollFailCountRef.current = 0;
+        setPollError(null);
         setBatchFiles(prev => {
           // Detect status changes and log them
           const prevMap = new Map(prevBatchFilesRef.current.map(f => [f.id, f]));
@@ -239,7 +259,12 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
           if (timerRef.current) clearInterval(timerRef.current);
         }
       } catch (err) {
-        addLog(`⚠ Ошибка polling: ${err instanceof Error ? err.message : 'сеть недоступна'}`);
+        pollFailCountRef.current += 1;
+        const msg = err instanceof Error ? err.message : 'сеть недоступна';
+        addLog(`⚠ Ошибка polling (${pollFailCountRef.current}): ${msg}`);
+        if (pollFailCountRef.current >= 3) {
+          setPollError(msg);
+        }
       }
     };
 
@@ -327,7 +352,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   return (
     <div className="flex flex-col h-full p-4 lg:p-6 gap-4">
       {/* === TOP: Main progress card === */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5" role="status" aria-live="polite" aria-label="Прогресс обработки">
         {/* Header row */}
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
@@ -439,6 +464,23 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         </div>
       )}
 
+      {pollError && state === 'processing' && (
+        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between" role="alert">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0" />
+            <span className="text-sm text-red-800">
+              Сеть недоступна: <strong>{pollError}</strong>. Опрос продолжится автоматически.
+            </span>
+          </div>
+          <button
+            onClick={() => { pollFailCountRef.current = 0; setPollError(null); }}
+            className="text-xs px-3 py-1 text-red-700 hover:text-red-900 bg-white border border-red-200 rounded-md"
+          >
+            Сбросить
+          </button>
+        </div>
+      )}
+
       {state === 'processing' && activeFiles.length > 0 && (
         <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
           <div className="text-xs font-medium text-blue-700 mb-2 flex items-center gap-1.5">
@@ -533,7 +575,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         </div>
 
         {/* Activity log */}
-        <div className="bg-gray-900 rounded-xl shadow-sm border border-gray-700 overflow-hidden flex flex-col min-h-0">
+        <div className="bg-gray-900 rounded-xl shadow-sm border border-gray-700 overflow-hidden flex flex-col min-h-0" role="log" aria-live="off" aria-label="Журнал обработки">
           <div className="px-4 py-2.5 border-b border-gray-700 bg-gray-800 flex items-center gap-2 flex-shrink-0">
             <Activity className="w-3.5 h-3.5 text-green-400" />
             <span className="text-sm font-medium text-gray-300">Журнал</span>
@@ -568,10 +610,13 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
       {state === 'done' && (
         <div className="flex items-center justify-between">
           <button
-            onClick={onDone}
+            onClick={() => {
+              const ids = trackers.filter(t => t.projectId).map(t => t.projectId!);
+              onDone(ids);
+            }}
             className="text-sm text-gray-500 hover:text-gray-700"
           >
-            Вернуться на главную
+            Проверить и скачать
           </button>
           <span className="text-xs text-gray-400">
             Общее время: {formatTime(elapsedSec)}

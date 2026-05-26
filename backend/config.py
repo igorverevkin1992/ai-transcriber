@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from pathlib import Path
@@ -6,15 +7,37 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+
+class JsonFormatter(logging.Formatter):
+    """Структурированный JSON-вывод для логов (для парсинга в ELK / Cloud Logging)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+LOG_FORMAT = os.getenv("LOG_FORMAT", "text").lower()
+_handler = logging.StreamHandler()
+if LOG_FORMAT == "json":
+    _handler.setFormatter(JsonFormatter())
+else:
+    _handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 logger = logging.getLogger("abtgs")
 
 # --- API Keys ---
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 API_KEY = os.getenv("API_KEY")  # if set, X-API-Key header required on /api/* requests
+HF_TOKEN = os.getenv("HF_TOKEN")  # HuggingFace token for pyannote diarization models
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Gemini API for text post-processing
 
 # --- Paths ---
 TEMP_DIR = Path("temp_files")
@@ -24,9 +47,25 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # --- Limits ---
 MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
-# faster-whisper with INT8 uses ~1-2GB RAM per transcription (vs ~5GB for openai-whisper).
-# 2 concurrent tasks is safe on most machines; override via env var if needed.
-MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "2"))
+
+
+def _auto_detect_concurrent_tasks() -> int:
+    """Автоопределение MAX_CONCURRENT_TASKS на основе VRAM (если есть GPU)."""
+    env_val = os.getenv("MAX_CONCURRENT_TASKS")
+    if env_val:
+        return int(env_val)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            # WhisperX large + pyannote ~8GB per task
+            return max(1, int(vram_gb / 8))
+    except ImportError:
+        pass
+    return 2
+
+
+MAX_CONCURRENT_TASKS = _auto_detect_concurrent_tasks()
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".mov", ".mxf", ".mp4", ".wmv", ".avi", ".mkv", ".ogg", ".flac"}
 ALLOWED_URL_HOSTS = {"yadi.sk", "disk.yandex.ru", "disk.yandex.com"}
 

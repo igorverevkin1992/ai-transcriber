@@ -11,7 +11,12 @@ aiofiles
 grpcio
 yandexcloud
 faster-whisper
+whisperx
+google-generativeai
 psutil
+prometheus-client
+python-magic
+python-json-logger
 pytest
 httpx
 ruff

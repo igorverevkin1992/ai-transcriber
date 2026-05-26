@@ -1,6 +1,4 @@
 """Tests for ProjectStore (SQLite-backed project storage)."""
-import os
-import tempfile
 
 import pytest
 
