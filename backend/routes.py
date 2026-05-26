@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from backend.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_BYTES, OUTPUT_DIR, TEMP_DIR, logger
+from backend.config import MAX_FILE_SIZE_BYTES, OUTPUT_DIR, TEMP_DIR, logger
 from backend.docx_export import generate_docx
 from backend.models import (
     STATUS_LABELS_RU,
@@ -28,13 +28,13 @@ from backend.models import (
 from backend.security import validate_mime_type
 from backend.services import (
     WHISPER_AVAILABLE,
-    get_whisper_model,
     auto_export_project,
+    cancel_project,
+    get_whisper_model,
     process_uploaded_file_task,
     process_video_task,
     projects_db,
     submit_task,
-    cancel_project,
 )
 from backend.utils import sanitize_filename, validate_file_extension, validate_url
 

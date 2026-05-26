@@ -95,10 +95,12 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   const [startTime] = useState(() => Date.now());
   const [elapsedSec, setElapsedSec] = useState(0);
   const [logMessages, setLogMessages] = useState<string[]>([]);
+  const [pollError, setPollError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval>>();
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const logEndRef = useRef<HTMLDivElement>(null);
   const prevBatchFilesRef = useRef<BatchFileInfo[]>([]);
+  const pollFailCountRef = useRef(0);
 
   const addLog = useCallback((msg: string) => {
     const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -225,6 +227,8 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     const poll = async () => {
       try {
         const status = await api.batchStatus(projectIds);
+        pollFailCountRef.current = 0;
+        setPollError(null);
         setBatchFiles(prev => {
           // Detect status changes and log them
           const prevMap = new Map(prevBatchFilesRef.current.map(f => [f.id, f]));
@@ -255,7 +259,12 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
           if (timerRef.current) clearInterval(timerRef.current);
         }
       } catch (err) {
-        addLog(`⚠ Ошибка polling: ${err instanceof Error ? err.message : 'сеть недоступна'}`);
+        pollFailCountRef.current += 1;
+        const msg = err instanceof Error ? err.message : 'сеть недоступна';
+        addLog(`⚠ Ошибка polling (${pollFailCountRef.current}): ${msg}`);
+        if (pollFailCountRef.current >= 3) {
+          setPollError(msg);
+        }
       }
     };
 
@@ -452,6 +461,23 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
           <span className="text-sm text-amber-800 truncate">
             Загружается: <strong>{currentUploadName}</strong>
           </span>
+        </div>
+      )}
+
+      {pollError && state === 'processing' && (
+        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0" />
+            <span className="text-sm text-red-800">
+              Сеть недоступна: <strong>{pollError}</strong>. Опрос продолжится автоматически.
+            </span>
+          </div>
+          <button
+            onClick={() => { pollFailCountRef.current = 0; setPollError(null); }}
+            className="text-xs px-3 py-1 text-red-700 hover:text-red-900 bg-white border border-red-200 rounded-md"
+          >
+            Сбросить
+          </button>
         </div>
       )}
 

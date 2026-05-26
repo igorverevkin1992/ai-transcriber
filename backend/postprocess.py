@@ -1,5 +1,5 @@
-import os
 import re
+import time
 
 from backend.config import GEMINI_API_KEY, logger
 
@@ -43,8 +43,12 @@ def _get_gemini_model():
 _gemini_model = None
 
 
+GEMINI_MAX_RETRIES = 3
+GEMINI_BACKOFF = [2, 5, 10]  # seconds
+
+
 def gemini_polish(text: str) -> str:
-    """Полировка текста через Gemini API."""
+    """Полировка текста через Gemini API с retry на rate-limit/5xx."""
     global _gemini_model
     if _gemini_model is None:
         _gemini_model = _get_gemini_model()
@@ -61,13 +65,24 @@ def gemini_polish(text: str) -> str:
         f"Текст:\n{text}"
     )
 
-    try:
-        response = _gemini_model.generate_content(prompt)
-        result = response.text.strip()
-        if result:
-            return result
-    except Exception as e:
-        logger.warning("Gemini API ошибка: %s", e)
+    for attempt in range(GEMINI_MAX_RETRIES):
+        try:
+            response = _gemini_model.generate_content(prompt)
+            result = response.text.strip()
+            if result:
+                return result
+            return text
+        except Exception as e:
+            err_str = str(e).lower()
+            is_retryable = any(s in err_str for s in ("rate limit", "429", "503", "500", "timeout", "deadline"))
+            if attempt < GEMINI_MAX_RETRIES - 1 and is_retryable:
+                delay = GEMINI_BACKOFF[attempt]
+                logger.warning("Gemini API ошибка (попытка %d/%d): %s. Retry через %dс",
+                               attempt + 1, GEMINI_MAX_RETRIES, e, delay)
+                time.sleep(delay)
+                continue
+            logger.warning("Gemini API окончательная ошибка: %s", e)
+            break
 
     return text
 

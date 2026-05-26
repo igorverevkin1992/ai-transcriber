@@ -8,15 +8,13 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.auth import ApiKeyMiddleware
 from backend.config import API_KEY, CORS_ORIGINS, TEMP_DIR, YANDEX_API_KEY, logger
-from backend.models import HealthResponse
+from backend.models import HealthResponse, ProjectStatusEnum
 from backend.routes import router
-from backend.models import ProjectStatusEnum
 from backend.services import (
-    _maybe_retry,
+    _TASK_REGISTRY,
     projects_db,
     shutdown_executor,
     submit_task,
-    _TASK_REGISTRY,
 )
 
 

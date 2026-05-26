@@ -6,7 +6,6 @@ from docx.shared import Cm, Pt
 
 from backend.utils import strip_extension
 
-
 PARENTHETICAL_RE = re.compile(r"(\([^)]*\))")
 
 

@@ -78,6 +78,7 @@ def _cleanup_gpu_memory():
     """Освобождает CUDA-кеш после транскрипции (если GPU доступна)."""
     try:
         import gc
+
         import torch
         gc.collect()
         if torch.cuda.is_available():
@@ -119,6 +120,17 @@ def _detect_device() -> str:
     except ImportError:
         pass
     return "cpu"
+
+
+def _check_disk_space(required_bytes: int, target_dir: Path = None) -> None:
+    """Проверяет, что в TEMP_DIR хватает места. Бросает RuntimeError если нет."""
+    target = target_dir or TEMP_DIR
+    free = shutil.disk_usage(str(target)).free
+    if free < required_bytes:
+        raise RuntimeError(
+            f"Недостаточно места на диске: требуется {required_bytes / 1024**3:.1f} ГБ, "
+            f"доступно {free / 1024**3:.1f} ГБ"
+        )
 
 
 def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> str:
@@ -519,12 +531,21 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             "suggested_name": suggested,
         }
 
+    speaker_count = len(detected_speakers)
+    low_confidence = speaker_count < 2 or speaker_count > 8
+    if low_confidence:
+        logger.warning(
+            "[%s] Подозрительное число спикеров (%d) — рекомендуется ручная проверка",
+            project_id[:8], speaker_count,
+        )
+
     projects_db.set_result(
         project_id,
         {
             "segments": raw_segments,
             "speakers": detected_speakers,
             "meta": {**meta, "original_filename": original_filename},
+            "low_confidence_diarization": low_confidence,
         },
         fps=fps,
     )
@@ -609,6 +630,9 @@ def process_uploaded_file_task(
     try:
         _cleanup_old_projects()
         projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
+
+        if local_video_path.exists():
+            _check_disk_space(local_video_path.stat().st_size * 2)
 
         if engine == "whisper":
             projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)

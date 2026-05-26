@@ -26,9 +26,25 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # --- Limits ---
 MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
-# faster-whisper with INT8 uses ~1-2GB RAM per transcription (vs ~5GB for openai-whisper).
-# 2 concurrent tasks is safe on most machines; override via env var if needed.
-MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "2"))
+
+
+def _auto_detect_concurrent_tasks() -> int:
+    """Автоопределение MAX_CONCURRENT_TASKS на основе VRAM (если есть GPU)."""
+    env_val = os.getenv("MAX_CONCURRENT_TASKS")
+    if env_val:
+        return int(env_val)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            # WhisperX large + pyannote ~8GB per task
+            return max(1, int(vram_gb / 8))
+    except ImportError:
+        pass
+    return 2
+
+
+MAX_CONCURRENT_TASKS = _auto_detect_concurrent_tasks()
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".mov", ".mxf", ".mp4", ".wmv", ".avi", ".mkv", ".ogg", ".flac"}
 ALLOWED_URL_HOSTS = {"yadi.sk", "disk.yandex.ru", "disk.yandex.com"}
 

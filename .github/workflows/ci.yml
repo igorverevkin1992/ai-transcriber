@@ -22,6 +22,16 @@ jobs:
       - name: Lint with ruff
         run: ruff check backend/ main.py tests/
 
+      - name: Type check with mypy
+        run: |
+          pip install mypy
+          mypy backend/ main.py --ignore-missing-imports --no-strict-optional || true
+
+      - name: Security check with bandit
+        run: |
+          pip install bandit
+          bandit -r backend/ main.py -ll || true
+
       - name: Run tests
         run: python -m pytest tests/ -v
 

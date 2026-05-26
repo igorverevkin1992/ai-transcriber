@@ -123,7 +123,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
         {/* Engine selector */}
         <div className="mb-5">
           <label className="block text-sm font-medium text-gray-700 mb-2">Движок распознавания</label>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <button
               type="button"
               onClick={() => setEngine('whisper')}

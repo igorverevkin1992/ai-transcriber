@@ -28,6 +28,8 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
   const [loading, setLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [hasEdits, setHasEdits] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -44,6 +46,7 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
   }, [projectIds, onError]);
 
   const updateSpeaker = (projectId: string, speakerId: string, field: 'name' | 'abbr', value: string) => {
+    setHasEdits(true);
     setProjects(prev => prev.map(p => {
       if (p.project_id !== projectId) return p;
       return {
@@ -53,6 +56,14 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
         ),
       };
     }));
+  };
+
+  const onExportClick = () => {
+    if (hasEdits) {
+      setShowConfirm(true);
+    } else {
+      handleExport();
+    }
   };
 
   const handleExport = async () => {
@@ -117,7 +128,7 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
               Назад
             </button>
             <button
-              onClick={handleExport}
+              onClick={onExportClick}
               disabled={isExporting || projects.length === 0}
               className="flex items-center gap-2 px-5 py-2.5 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white rounded-lg font-medium transition-colors"
             >
@@ -127,6 +138,32 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
           </div>
         </div>
       </div>
+
+      {showConfirm && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md mx-4 shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900 mb-2">Подтвердите экспорт</h3>
+            <p className="text-sm text-gray-600 mb-5">
+              Вы внесли правки в данные спикеров. Экспортировать сейчас?
+              После экспорта правки нельзя будет вернуть.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowConfirm(false)}
+                className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 bg-gray-100 hover:bg-gray-200 rounded-md"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={() => { setShowConfirm(false); handleExport(); }}
+                className="px-4 py-2 text-sm text-white bg-green-600 hover:bg-green-700 rounded-md font-medium"
+              >
+                Экспортировать
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto space-y-3">
         {projects.map(proj => (

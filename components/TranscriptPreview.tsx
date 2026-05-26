@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { TranscriptSegment, SpeakerInfo, Candidate } from '../types';
 import { FileText, Download, Pencil } from 'lucide-react';
 
@@ -24,11 +24,20 @@ export const TranscriptPreview: React.FC<Props> = ({
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
 
+  const speakerByTag = useMemo(
+    () => new Map(speakers.map(s => [s.tag_id, s])),
+    [speakers]
+  );
+  const candidateById = useMemo(
+    () => new Map(candidates.map(c => [c.id, c])),
+    [candidates]
+  );
+
   const getSpeakerAbbr = (tagId: string) => {
-    const speaker = speakers.find(s => s.tag_id === tagId);
+    const speaker = speakerByTag.get(tagId);
     if (!speaker) return tagId;
     if (speaker.candidate_id) {
-      return candidates.find(c => c.id === speaker.candidate_id)?.abbr || 'UNK';
+      return candidateById.get(speaker.candidate_id)?.abbr || 'UNK';
     }
     return speaker.custom_abbr || `S${tagId}`;
   };
