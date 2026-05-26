@@ -3,6 +3,7 @@
 from backend.utils import (
     frames_to_tc,
     parse_filename_metadata,
+    sanitize_filename,
     strip_extension,
     tc_to_frames,
     validate_file_extension,
@@ -112,6 +113,37 @@ class TestValidateUrl:
     def test_invalid_url(self):
         error = validate_url("not a url at all")
         assert error is not None
+
+
+class TestSanitizeFilename:
+    def test_normal_filename(self):
+        assert sanitize_filename("video.mp4") == "video.mp4"
+
+    def test_path_traversal(self):
+        assert sanitize_filename("../../etc/passwd") == "passwd"
+
+    def test_backslash_stripped(self):
+        result = sanitize_filename("..\\..\\windows\\system32\\cmd.exe")
+        assert "\\" not in result
+        assert "/" not in result
+
+    def test_null_byte(self):
+        assert sanitize_filename("file\x00.mp4") == "file.mp4"
+
+    def test_leading_dots_stripped(self):
+        assert sanitize_filename("...hidden") == "hidden"
+
+    def test_empty_becomes_unnamed(self):
+        assert sanitize_filename("") == "unnamed_file"
+        assert sanitize_filename("...") == "unnamed_file"
+
+    def test_base_dir_check(self, tmp_path):
+        safe = sanitize_filename("video.mp4", base_dir=str(tmp_path))
+        assert safe == "video.mp4"
+
+    def test_base_dir_escape_blocked(self, tmp_path):
+        result = sanitize_filename("../escape.txt", base_dir=str(tmp_path))
+        assert result == "escape.txt"
 
 
 class TestValidateFileExtension:

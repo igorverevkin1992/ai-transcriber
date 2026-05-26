@@ -11,6 +11,7 @@ aiofiles
 grpcio
 yandexcloud
 faster-whisper
+psutil
 pytest
 httpx
 ruff

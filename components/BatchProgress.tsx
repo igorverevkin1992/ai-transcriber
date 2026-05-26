@@ -238,8 +238,8 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
           if (pollRef.current) clearInterval(pollRef.current);
           if (timerRef.current) clearInterval(timerRef.current);
         }
-      } catch {
-        // Ignore polling errors, retry next interval
+      } catch (err) {
+        addLog(`⚠ Ошибка polling: ${err instanceof Error ? err.message : 'сеть недоступна'}`);
       }
     };
 

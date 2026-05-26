@@ -126,5 +126,6 @@ def detect_fps(file_path: str) -> int:
                     logger.info("Определён FPS: %d", fps)
                     return fps
     except Exception as e:
-        logger.warning("Не удалось определить FPS: %s. Используется 25.", e)
+        logger.warning("Не удалось определить FPS: %s", e)
+    logger.warning("FPS не определён, используется значение по умолчанию: 25")
     return 25

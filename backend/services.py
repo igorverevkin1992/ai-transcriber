@@ -391,9 +391,12 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
 # ==================== Task functions ====================
 
 
+_TERMINAL_STATUSES = {ProjectStatusEnum.COMPLETED.value, ProjectStatusEnum.ERROR.value}
+
+
 def _cleanup_old_projects():
     """Удаляет завершённые/ошибочные проекты старше PROJECT_TTL_SECONDS."""
-    deleted = projects_db.cleanup_old(PROJECT_TTL_SECONDS)
+    deleted = projects_db.cleanup_old(PROJECT_TTL_SECONDS, _TERMINAL_STATUSES)
     if deleted:
         logger.info("TTL-очистка: удалено %d старых проектов", deleted)
 
@@ -551,6 +554,27 @@ def _maybe_retry(project_id: str):
     threading.Thread(target=_delayed_retry, daemon=True).start()
 
 
+MIN_RAM_MB = int(os.getenv("MIN_RAM_MB", "500"))
+
+try:
+    import psutil
+    _PSUTIL_AVAILABLE = True
+except ImportError:
+    psutil = None
+    _PSUTIL_AVAILABLE = False
+
+
+def _log_ram(label: str):
+    if not _PSUTIL_AVAILABLE:
+        return
+    mem = psutil.virtual_memory()
+    avail_mb = mem.available // (1024 * 1024)
+    used_pct = mem.percent
+    logger.info("RAM [%s]: %d МБ свободно (%.0f%% занято)", label, avail_mb, used_pct)
+    if avail_mb < MIN_RAM_MB:
+        logger.warning("RAM КРИТИЧНО: осталось %d МБ (порог: %d МБ)", avail_mb, MIN_RAM_MB)
+
+
 def submit_task(func, *args, project_id: str | None = None, **kwargs):
     """Submit a heavy processing task to the dedicated executor.
 
@@ -558,11 +582,13 @@ def submit_task(func, *args, project_id: str | None = None, **kwargs):
     at a time. Extra tasks wait in an internal queue without blocking any threads.
     """
     def _wrapper():
+        _log_ram(f"начало {func.__name__}")
         try:
             func(*args, **kwargs)
         except Exception:
             logger.exception("Необработанная ошибка в фоновой задаче")
         finally:
+            _log_ram(f"конец {func.__name__}")
             if project_id:
                 _maybe_retry(project_id)
 
@@ -570,9 +596,18 @@ def submit_task(func, *args, project_id: str | None = None, **kwargs):
 
 
 def shutdown_executor():
-    """Graceful shutdown of the task executor (called from lifespan)."""
+    """Graceful shutdown: persist in-flight projects, then stop executor."""
     logger.info("Завершение фоновых задач...")
-    _task_executor.shutdown(wait=False)
+    in_flight = (
+        ProjectStatusEnum.DOWNLOADING,
+        ProjectStatusEnum.CONVERTING,
+        ProjectStatusEnum.TRANSCRIBING,
+    )
+    for pid, proj in projects_db.items():
+        if proj.get("status") in in_flight:
+            projects_db.update_status(pid, ProjectStatusEnum.QUEUED)
+            logger.info("[%s] Сохранён как QUEUED для восстановления", pid[:8])
+    _task_executor.shutdown(wait=False, cancel_futures=True)
 
 
 def auto_export_project(project_id: str, output_path: str) -> str | None:

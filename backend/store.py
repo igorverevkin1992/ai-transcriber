@@ -136,14 +136,16 @@ class ProjectStore:
     def items(self) -> list[tuple[str, dict]]:
         return list(self._cache.items())
 
-    def cleanup_old(self, ttl_seconds: float) -> int:
+    def cleanup_old(self, ttl_seconds: float, terminal_statuses: set | None = None) -> int:
         now = time.time()
-        from backend.models import ProjectStatusEnum
+        if terminal_statuses is None:
+            terminal_statuses = {"completed", "error"}
 
         to_delete = []
         for pid, proj in self.items():
             status = proj.get("status")
-            if status in (ProjectStatusEnum.COMPLETED, ProjectStatusEnum.ERROR):
+            status_val = status.value if hasattr(status, "value") else str(status)
+            if status_val in terminal_statuses:
                 created = proj.get("created_at", now)
                 if now - created > ttl_seconds:
                     to_delete.append(pid)
