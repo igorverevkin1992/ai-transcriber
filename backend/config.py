@@ -15,6 +15,8 @@ logger = logging.getLogger("abtgs")
 # --- API Keys ---
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 API_KEY = os.getenv("API_KEY")  # if set, X-API-Key header required on /api/* requests
+HF_TOKEN = os.getenv("HF_TOKEN")  # HuggingFace token for pyannote diarization models
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Gemini API for text post-processing
 
 # --- Paths ---
 TEMP_DIR = Path("temp_files")

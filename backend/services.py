@@ -11,6 +11,7 @@ import grpc
 import requests
 
 from backend.config import (
+    HF_TOKEN,
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
     OUTPUT_DIR,
@@ -50,17 +51,27 @@ SPEECHKIT_GRPC_HOST = "stt.api.cloud.yandex.net:443"
 GRPC_CHUNK_SIZE = 4000  # 4 KB chunks for streaming audio
 GRPC_TIMEOUT = 7200  # 2 hours max for recognition
 
-# --- Whisper (local, via faster-whisper / CTranslate2) ---
+# --- WhisperX (transcription + diarization) / faster-whisper fallback ---
+try:
+    import whisperx
+    WHISPERX_AVAILABLE = True
+except ImportError:
+    whisperx = None
+    WHISPERX_AVAILABLE = False
+
 try:
     from faster_whisper import WhisperModel
     WHISPER_AVAILABLE = True
 except ImportError:
     WhisperModel = None
-    WHISPER_AVAILABLE = False
+    WHISPER_AVAILABLE = WHISPERX_AVAILABLE  # whisperx bundles faster-whisper
 
 _whisper_model = None
 _whisper_model_name = None
 _whisper_lock = threading.Lock()
+_whisperx_align_model = None
+_whisperx_align_meta = None
+_whisperx_diarize_pipeline = None
 
 
 def _detect_device_and_compute() -> tuple[str, str]:
@@ -72,6 +83,16 @@ def _detect_device_and_compute() -> tuple[str, str]:
     except ImportError:
         pass
     return "cpu", "int8"
+
+
+def _detect_device() -> str:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+    except ImportError:
+        pass
+    return "cpu"
 
 
 def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> str:
@@ -273,12 +294,92 @@ def get_whisper_model(model_name: str = "medium"):
         return _whisper_model
 
 
-def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
-    """Распознавание через faster-whisper (CTranslate2, ~4x быстрее).
+def _transcribe_with_whisperx(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
+    """Распознавание через WhisperX: транскрипция + alignment + диаризация pyannote.
 
-    Принимает любой аудио/видео файл.
-    Без диаризации — все сегменты с channel_tag=0.
-    vad_filter=True пропускает тишину — ускоряет обработку.
+    Возвращает сегменты с channel_tag = speaker label (SPEAKER_00, ...).
+    """
+    global _whisperx_align_model, _whisperx_align_meta, _whisperx_diarize_pipeline
+
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise RuntimeError(f"Файл не найден: {file_path}")
+    if file_path.stat().st_size == 0:
+        raise RuntimeError(f"Файл пустой (0 байт): {file_path}")
+
+    device = _detect_device()
+    file_size_mb = file_path.stat().st_size // (1024 * 1024)
+    logger.info("[%s] WhisperX: файл %s (%d МБ, модель: %s, device: %s)...",
+                project_id[:8], file_path.name, file_size_mb, model_name, device)
+
+    compute_type = "float16" if device == "cuda" else "int8"
+    model = whisperx.load_model(model_name, device, compute_type=compute_type, language="ru")
+
+    audio = whisperx.load_audio(str(file_path))
+    result = model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
+    logger.info("[%s] WhisperX: транскрипция завершена, %d сегментов", project_id[:8], len(result["segments"]))
+
+    if _whisperx_align_model is None:
+        logger.info("[%s] Загрузка alignment-модели...", project_id[:8])
+        _whisperx_align_model, _whisperx_align_meta = whisperx.load_align_model(
+            language_code="ru", device=device,
+        )
+    result = whisperx.align(
+        result["segments"], _whisperx_align_model, _whisperx_align_meta,
+        audio, device, return_char_alignments=False,
+    )
+    logger.info("[%s] WhisperX: alignment завершён", project_id[:8])
+
+    if _whisperx_diarize_pipeline is None:
+        hf_token = HF_TOKEN
+        if not hf_token:
+            logger.warning("[%s] HF_TOKEN не задан — диаризация недоступна, все сегменты = speaker 0", project_id[:8])
+        else:
+            logger.info("[%s] Загрузка diarization pipeline...", project_id[:8])
+            _whisperx_diarize_pipeline = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
+
+    if _whisperx_diarize_pipeline is not None:
+        diarize_segments = _whisperx_diarize_pipeline(audio)
+        result = whisperx.assign_word_speakers(diarize_segments, result)
+        logger.info("[%s] WhisperX: диаризация завершена", project_id[:8])
+
+    segments = []
+    for seg in result["segments"]:
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+
+        speaker = seg.get("speaker", "SPEAKER_00")
+
+        words = []
+        for w in seg.get("words", []):
+            if "start" in w and "end" in w:
+                words.append({
+                    "text": w.get("word", "").strip(),
+                    "start_ms": int(w["start"] * 1000),
+                    "end_ms": int(w["end"] * 1000),
+                })
+
+        start_ms = int(seg.get("start", 0) * 1000)
+        end_ms = int(seg.get("end", 0) * 1000)
+
+        segments.append({
+            "text": text,
+            "channel_tag": speaker,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "words": words if words else [{"text": text, "start_ms": start_ms, "end_ms": end_ms}],
+        })
+
+    logger.info("[%s] WhisperX: %d сегментов с диаризацией", project_id[:8], len(segments))
+    return segments
+
+
+def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
+    """Распознавание через faster-whisper (fallback без диаризации).
+
+    Используется когда WhisperX недоступен.
+    Все сегменты с channel_tag=0.
     """
     file_path = Path(file_path)
     if not file_path.exists():
@@ -299,7 +400,6 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
         vad_filter=True,
     )
 
-    # raw_segments is a generator — transcription happens during iteration
     segments = []
     for seg in raw_segments:
         text = seg.text.strip()
@@ -470,8 +570,12 @@ def process_uploaded_file_task(
         if engine == "whisper":
             projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
             projects_db.update_field(project_id, "progress_percent", None)
-            logger.info("[%s] Whisper: модель %s", project_id[:8], whisper_model)
-            segments = _transcribe_with_whisper(project_id, local_video_path, whisper_model)
+            if WHISPERX_AVAILABLE:
+                logger.info("[%s] WhisperX (с диаризацией): модель %s", project_id[:8], whisper_model)
+                segments = _transcribe_with_whisperx(project_id, local_video_path, whisper_model)
+            else:
+                logger.info("[%s] faster-whisper (без диаризации): модель %s", project_id[:8], whisper_model)
+                segments = _transcribe_with_whisper(project_id, local_video_path, whisper_model)
         else:
             projects_db.update_status(project_id, ProjectStatusEnum.CONVERTING)
             projects_db.update_field(project_id, "progress_percent", None)
@@ -481,11 +585,15 @@ def process_uploaded_file_task(
             logger.info("[%s] SpeechKit v3 с диаризацией...", project_id[:8])
             segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
+        from backend.postprocess import postprocess_segments
+        logger.info("[%s] Постобработка текста...", project_id[:8])
+        segments = postprocess_segments(segments)
+
         _process_recognition_result(project_id, segments, original_filename, local_video_path)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
         logger.info("[%s] Файл обработан: %s", project_id[:8], original_filename)
 
-        # 4. АВТОСОХРАНЕНИЕ DOCX НА ДИСК
+        # АВТОСОХРАНЕНИЕ DOCX НА ДИСК
         try:
             docx_path = str(OUTPUT_DIR / f"autosave_{project_id}.docx")
             saved_name = auto_export_project(project_id, docx_path)

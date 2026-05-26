@@ -11,6 +11,8 @@ aiofiles
 grpcio
 yandexcloud
 faster-whisper
+whisperx
+google-generativeai
 psutil
 pytest
 httpx
