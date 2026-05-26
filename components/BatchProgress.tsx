@@ -352,7 +352,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   return (
     <div className="flex flex-col h-full p-4 lg:p-6 gap-4">
       {/* === TOP: Main progress card === */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5" role="status" aria-live="polite" aria-label="Прогресс обработки">
         {/* Header row */}
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
@@ -465,7 +465,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
       )}
 
       {pollError && state === 'processing' && (
-        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between">
+        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between" role="alert">
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0" />
             <span className="text-sm text-red-800">
@@ -575,7 +575,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         </div>
 
         {/* Activity log */}
-        <div className="bg-gray-900 rounded-xl shadow-sm border border-gray-700 overflow-hidden flex flex-col min-h-0">
+        <div className="bg-gray-900 rounded-xl shadow-sm border border-gray-700 overflow-hidden flex flex-col min-h-0" role="log" aria-live="off" aria-label="Журнал обработки">
           <div className="px-4 py-2.5 border-b border-gray-700 bg-gray-800 flex items-center gap-2 flex-shrink-0">
             <Activity className="w-3.5 h-3.5 text-green-400" />
             <span className="text-sm font-medium text-gray-300">Журнал</span>

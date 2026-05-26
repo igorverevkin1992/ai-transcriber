@@ -17,6 +17,7 @@ from backend.config import MAX_FILE_SIZE_BYTES, OUTPUT_DIR, TEMP_DIR, logger
 from backend.docx_export import generate_docx
 from backend.models import (
     STATUS_LABELS_RU,
+    BatchExportRequest,
     BatchFileStatus,
     BatchStatusResponse,
     CreateProjectRequest,
@@ -128,7 +129,9 @@ async def export_docx(pid: str, req: ExportRequest, background_tasks: Background
 
 
 @router.post("/batch/upload", response_model=CreateProjectResponse)
+@limiter.limit("30/minute")
 async def upload_file(
+    request: Request,
     file: UploadFile,
     engine: str = Form("whisper"),
     whisper_model: str = Form("medium"),
@@ -260,7 +263,8 @@ async def batch_status(ids: str = Query(..., description="ID проектов ч
 
 
 @router.get("/batch/download")
-async def batch_download(ids: str = Query(..., description="ID проектов через запятую")):
+@limiter.limit("10/minute")
+async def batch_download(request: Request, ids: str = Query(..., description="ID проектов через запятую")):
     """Авто-экспортирует все завершённые проекты и возвращает ZIP-архив."""
     project_ids = [i.strip() for i in ids.split(",") if i.strip()]
 
@@ -368,10 +372,10 @@ async def batch_verification_data(ids: str = Query(..., description="ID прое
 
 
 @router.post("/batch/export-with-mappings")
-async def batch_export_with_mappings(request: Request):
+@limiter.limit("10/minute")
+async def batch_export_with_mappings(request: Request, body: BatchExportRequest):
     """Экспортирует все проекты с пользовательскими маппингами спикеров."""
-    body = await request.json()
-    project_mappings = body.get("projects", [])
+    project_mappings = body.projects
 
     if not project_mappings:
         raise HTTPException(status_code=400, detail="Не указаны проекты")
@@ -381,15 +385,15 @@ async def batch_export_with_mappings(request: Request):
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for pm in project_mappings:
-            pid = pm.get("project_id")
-            mappings = pm.get("mappings", {})
+            pid = pm.project_id
+            mappings = pm.mappings
 
             proj = projects_db.get(pid)
             if not proj or proj.get("status") != ProjectStatusEnum.COMPLETED or "result" not in proj:
                 continue
 
-            final_map = {m["speaker_id"]: m["name"] for m in mappings}
-            abbr_map = {m["speaker_id"]: m["abbr"] for m in mappings}
+            final_map = {m.speaker_id: m.name for m in mappings}
+            abbr_map = {m.speaker_id: m.abbr for m in mappings}
 
             output_path = str(TEMP_DIR / f"batch_verified_{pid}.docx")
             try:

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from pathlib import Path
@@ -6,10 +7,30 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+
+class JsonFormatter(logging.Formatter):
+    """Структурированный JSON-вывод для логов (для парсинга в ELK / Cloud Logging)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+LOG_FORMAT = os.getenv("LOG_FORMAT", "text").lower()
+_handler = logging.StreamHandler()
+if LOG_FORMAT == "json":
+    _handler.setFormatter(JsonFormatter())
+else:
+    _handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 logger = logging.getLogger("abtgs")
 
 # --- API Keys ---

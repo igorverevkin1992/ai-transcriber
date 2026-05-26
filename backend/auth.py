@@ -4,8 +4,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend.config import API_KEY
 
-# Endpoints that don't require auth (health check, static files)
-_PUBLIC_PATHS = {"/health"}
+# Endpoints that don't require auth (health check, metrics, static files)
+_PUBLIC_PATHS = {"/health", "/metrics"}
 
 
 class ApiKeyMiddleware(BaseHTTPMiddleware):

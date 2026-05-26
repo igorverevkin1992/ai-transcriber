@@ -2,6 +2,7 @@ import re
 import time
 
 from backend.config import GEMINI_API_KEY, logger
+from backend.metrics import gemini_calls
 
 FILLER_WORDS_RE = re.compile(
     r"\b(эээ|ээ|эм+|ммм+|хм+|ну вот|вот так вот|как бы|типа того|короче говоря)\b",
@@ -69,6 +70,7 @@ def gemini_polish(text: str) -> str:
         try:
             response = _gemini_model.generate_content(prompt)
             result = response.text.strip()
+            gemini_calls.labels(outcome="success").inc()
             if result:
                 return result
             return text
@@ -81,6 +83,7 @@ def gemini_polish(text: str) -> str:
                                attempt + 1, GEMINI_MAX_RETRIES, e, delay)
                 time.sleep(delay)
                 continue
+            gemini_calls.labels(outcome="error").inc()
             logger.warning("Gemini API окончательная ошибка: %s", e)
             break
 

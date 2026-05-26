@@ -20,6 +20,13 @@ from backend.config import (
     YANDEX_API_KEY,
     logger,
 )
+from backend.metrics import (
+    active_projects,
+    diarization_speakers,
+    project_errors,
+    projects_total,
+    transcribe_duration,
+)
 from backend.models import ProjectStatusEnum
 from backend.store import ProjectStore
 from backend.utils import (
@@ -532,6 +539,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         }
 
     speaker_count = len(detected_speakers)
+    diarization_speakers.observe(speaker_count)
     low_confidence = speaker_count < 2 or speaker_count > 8
     if low_confidence:
         logger.warning(
@@ -626,6 +634,9 @@ def process_uploaded_file_task(
     """
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
     local_video_path = Path(local_video_path)
+    projects_total.labels(engine=engine).inc()
+    active_projects.inc()
+    task_start = time.time()
 
     try:
         _cleanup_old_projects()
@@ -658,6 +669,7 @@ def process_uploaded_file_task(
 
         _process_recognition_result(project_id, segments, original_filename, local_video_path)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
+        transcribe_duration.labels(engine=engine).observe(time.time() - task_start)
         logger.info("[%s] Файл обработан: %s", project_id[:8], original_filename)
 
         # АВТОСОХРАНЕНИЕ DOCX НА ДИСК
@@ -675,11 +687,13 @@ def process_uploaded_file_task(
 
     except Exception as e:
         tb = traceback.format_exc()
+        project_errors.labels(stage="upload_task").inc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
         projects_db.update_status(project_id, ProjectStatusEnum.ERROR,
                                   error=f"{e}\n\nTraceback:\n{tb}")
 
     finally:
+        active_projects.dec()
         for path in (local_video_path, local_audio_path):
             try:
                 if path.exists():

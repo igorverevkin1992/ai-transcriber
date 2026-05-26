@@ -1,13 +1,16 @@
+import shutil
 import subprocess
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.auth import ApiKeyMiddleware
-from backend.config import API_KEY, CORS_ORIGINS, TEMP_DIR, YANDEX_API_KEY, logger
+from backend.config import API_KEY, CORS_ORIGINS, OUTPUT_DIR, SQLITE_DB_PATH, TEMP_DIR, YANDEX_API_KEY, logger
+from backend.metrics import CONTENT_TYPE_LATEST, generate_latest
 from backend.models import HealthResponse, ProjectStatusEnum
 from backend.routes import router
 from backend.services import (
@@ -16,6 +19,36 @@ from backend.services import (
     shutdown_executor,
     submit_task,
 )
+
+DOCX_TTL_SECONDS = 30 * 24 * 3600  # 30 days
+
+
+def _backup_sqlite():
+    """Создаёт .backup копию SQLite перед запуском."""
+    db_path = Path(SQLITE_DB_PATH)
+    if not db_path.exists():
+        return
+    backup_path = db_path.with_suffix(db_path.suffix + ".backup")
+    try:
+        shutil.copy2(db_path, backup_path)
+        logger.info("SQLite резервная копия создана: %s", backup_path)
+    except OSError as e:
+        logger.warning("Не удалось создать backup SQLite: %s", e)
+
+
+def _cleanup_old_docx():
+    """Удаляет DOCX из OUTPUT_DIR старше DOCX_TTL_SECONDS."""
+    now = time.time()
+    removed = 0
+    for f in OUTPUT_DIR.glob("*.docx"):
+        try:
+            if now - f.stat().st_mtime > DOCX_TTL_SECONDS:
+                f.unlink()
+                removed += 1
+        except OSError:
+            pass
+    if removed:
+        logger.info("Очищено %d старых DOCX-файлов (>%d дней)", removed, DOCX_TTL_SECONDS // 86400)
 
 
 def _recover_inflight_projects():
@@ -64,6 +97,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Ошибка при проверке FFmpeg: %s", e)
 
+    _backup_sqlite()
+    _cleanup_old_docx()
     _recover_inflight_projects()
 
     logger.info("--- ПРОВЕРКИ ЗАВЕРШЕНЫ ---")
@@ -102,6 +137,12 @@ def health_check():
         service="ABTGS Backend",
         message="Сервер работает.",
     )
+
+
+@app.get("/metrics")
+def prometheus_metrics():
+    """Prometheus metrics endpoint (без auth для сборщиков)."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # Serve built frontend in production (Docker copies dist/ to static/)

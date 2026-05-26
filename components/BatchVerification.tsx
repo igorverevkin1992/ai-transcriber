@@ -140,7 +140,7 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
       </div>
 
       {showConfirm && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" role="dialog" aria-modal="true" aria-label="Подтверждение экспорта">
           <div className="bg-white rounded-lg p-6 max-w-md mx-4 shadow-xl">
             <h3 className="text-lg font-bold text-gray-900 mb-2">Подтвердите экспорт</h3>
             <p className="text-sm text-gray-600 mb-5">
@@ -170,6 +170,8 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
           <div key={proj.project_id} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
             <button
               onClick={() => setExpandedId(expandedId === proj.project_id ? null : proj.project_id)}
+              aria-expanded={expandedId === proj.project_id}
+              aria-controls={`panel-${proj.project_id}`}
               className="w-full px-5 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
             >
               <div className="flex items-center gap-3">
@@ -195,7 +197,7 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
             </button>
 
             {expandedId === proj.project_id && (
-              <div className="border-t border-gray-100 px-5 py-4">
+              <div id={`panel-${proj.project_id}`} role="region" aria-label={`Спикеры: ${proj.filename}`} className="border-t border-gray-100 px-5 py-4">
                 <div className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3 flex items-center gap-1.5">
                   <Edit3 className="w-3 h-3" />
                   Спикеры
@@ -208,12 +210,14 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
                         type="text"
                         value={s.name}
                         onChange={e => updateSpeaker(proj.project_id, s.id, 'name', e.target.value)}
+                        aria-label={`Имя спикера ${s.id}`}
                         className="flex-1 text-sm border border-gray-200 rounded-md px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-500"
                       />
                       <input
                         type="text"
                         value={s.abbr}
                         onChange={e => updateSpeaker(proj.project_id, s.id, 'abbr', e.target.value)}
+                        aria-label={`Аббревиатура спикера ${s.id}`}
                         className="w-20 text-sm border border-gray-200 rounded-md px-3 py-1.5 font-mono text-center focus:outline-none focus:ring-1 focus:ring-blue-500"
                       />
                       <span className="text-xs text-gray-400 w-16 text-right flex-shrink-0">
