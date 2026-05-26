@@ -290,6 +290,99 @@ async def download_saved():
     )
 
 
+# ==================== BATCH VERIFICATION ====================
+
+
+@router.get("/batch/verification-data")
+async def batch_verification_data(ids: str = Query(..., description="ID проектов через запятую")):
+    """Возвращает данные спикеров для каждого завершённого проекта в батче."""
+    project_ids = [i.strip() for i in ids.split(",") if i.strip()]
+    results = []
+
+    for pid in project_ids:
+        proj = projects_db.get(pid)
+        if not proj or proj.get("status") != ProjectStatusEnum.COMPLETED or "result" not in proj:
+            continue
+
+        result = proj["result"]
+        speakers = result.get("speakers", {})
+        segments = result.get("segments", [])
+
+        speaker_list = []
+        for speaker_id, info in speakers.items():
+            name = info.get("suggested_name", f"Спикер {speaker_id}")
+            words = name.split()
+            abbr = words[0][0].upper() if words and words[0] else f"С{speaker_id}"
+            speaker_list.append({
+                "id": speaker_id,
+                "name": name,
+                "abbr": abbr,
+                "duration_sec": info.get("duration_sec", 0),
+            })
+
+        preview = segments[:5] if segments else []
+
+        results.append({
+            "project_id": pid,
+            "filename": proj.get("original_filename", "???"),
+            "speakers": speaker_list,
+            "preview_segments": preview,
+            "total_segments": len(segments),
+        })
+
+    return {"projects": results}
+
+
+@router.post("/batch/export-with-mappings")
+async def batch_export_with_mappings(request: Request):
+    """Экспортирует все проекты с пользовательскими маппингами спикеров."""
+    body = await request.json()
+    project_mappings = body.get("projects", [])
+
+    if not project_mappings:
+        raise HTTPException(status_code=400, detail="Не указаны проекты")
+
+    zip_buffer = BytesIO()
+    exported_count = 0
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for pm in project_mappings:
+            pid = pm.get("project_id")
+            mappings = pm.get("mappings", {})
+
+            proj = projects_db.get(pid)
+            if not proj or proj.get("status") != ProjectStatusEnum.COMPLETED or "result" not in proj:
+                continue
+
+            final_map = {m["speaker_id"]: m["name"] for m in mappings}
+            abbr_map = {m["speaker_id"]: m["abbr"] for m in mappings}
+
+            output_path = str(TEMP_DIR / f"batch_verified_{pid}.docx")
+            try:
+                download_name = generate_docx(proj, final_map, abbr_map, output_path)
+                if download_name and os.path.exists(output_path):
+                    zf.write(output_path, download_name)
+                    exported_count += 1
+            finally:
+                try:
+                    if os.path.exists(output_path):
+                        os.unlink(output_path)
+                except OSError:
+                    pass
+
+    if exported_count == 0:
+        raise HTTPException(status_code=400, detail="Нет проектов для экспорта")
+
+    zip_buffer.seek(0)
+    logger.info("Верифицированный экспорт: %d файлов в ZIP", exported_count)
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
+    )
+
+
 # ==================== DIAGNOSTICS ====================
 
 

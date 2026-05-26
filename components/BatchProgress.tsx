@@ -19,7 +19,7 @@ interface Props {
   files: File[];
   engine?: string;
   whisperModel?: string;
-  onDone: () => void;
+  onDone: (projectIds: string[]) => void;
   onError: (msg: string) => void;
   recoveredProjectIds?: string[];
   recoveredFileNames?: string[];
@@ -568,10 +568,13 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
       {state === 'done' && (
         <div className="flex items-center justify-between">
           <button
-            onClick={onDone}
+            onClick={() => {
+              const ids = trackers.filter(t => t.projectId).map(t => t.projectId!);
+              onDone(ids);
+            }}
             className="text-sm text-gray-500 hover:text-gray-700"
           >
-            Вернуться на главную
+            Проверить и скачать
           </button>
           <span className="text-xs text-gray-400">
             Общее время: {formatTime(elapsedSec)}

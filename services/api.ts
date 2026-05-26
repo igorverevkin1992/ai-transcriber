@@ -183,6 +183,25 @@ export const api = {
     return await response.blob();
   },
 
+  batchVerificationData: async (projectIds: string[]): Promise<any> => {
+    const response = await fetch(`${API_BASE_URL}/batch/verification-data?ids=${projectIds.join(',')}`, { headers: authHeaders() });
+    if (!response.ok) throw new Error('Ошибка получения данных верификации');
+    return await response.json();
+  },
+
+  batchExportWithMappings: async (projects: Array<{ project_id: string; mappings: Array<{ speaker_id: string; name: string; abbr: string }> }>): Promise<Blob> => {
+    const response = await fetch(`${API_BASE_URL}/batch/export-with-mappings`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ projects }),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.detail || 'Ошибка экспорта');
+    }
+    return await response.blob();
+  },
+
   batchDownloadSaved: async (): Promise<Blob> => {
     const response = await fetch(`${API_BASE_URL}/batch/download-saved`, { headers: authHeaders() });
     if (!response.ok) {
