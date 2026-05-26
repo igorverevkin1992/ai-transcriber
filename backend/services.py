@@ -630,6 +630,22 @@ def auto_export_project(project_id: str, output_path: str) -> str | None:
     for speaker_id, info in speakers.items():
         name = info.get("suggested_name", f"Спикер {speaker_id}")
         final_map[speaker_id] = name
-        abbr_map[speaker_id] = name[:3].upper() if name else f"С{speaker_id}"
+
+    used_abbrs: dict[str, int] = {}
+    for speaker_id in speakers:
+        name = final_map[speaker_id]
+        words = name.split()
+        base = words[0][0].upper() if words and words[0] else f"С{speaker_id}"
+        count = used_abbrs.get(base, 0)
+        used_abbrs[base] = count + 1
+        abbr_map[speaker_id] = f"{base}{count + 1}" if count > 0 else base
+
+    for base_letter, total in used_abbrs.items():
+        if total > 1:
+            idx = 1
+            for sid in speakers:
+                if abbr_map[sid] == base_letter:
+                    abbr_map[sid] = f"{base_letter}{idx}"
+                    idx += 1
 
     return generate_docx(proj, final_map, abbr_map, output_path)
