@@ -63,6 +63,17 @@ _whisper_model_name = None
 _whisper_lock = threading.Lock()
 
 
+def _detect_device_and_compute() -> tuple[str, str]:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            logger.info("CUDA доступна: %s", torch.cuda.get_device_name(0))
+            return "cuda", "float16"
+    except ImportError:
+        pass
+    return "cpu", "int8"
+
+
 def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> str:
     """Скачивает файл с Яндекс.Диска. Возвращает оригинальное имя файла."""
     api_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
@@ -250,20 +261,13 @@ def get_whisper_model(model_name: str = "medium"):
         if _whisper_model is not None and _whisper_model_name == model_name:
             return _whisper_model
 
-        logger.info("Загрузка модели faster-whisper '%s' (INT8 CPU)...", model_name)
+        device, compute_type = _detect_device_and_compute()
+        logger.info("Загрузка модели faster-whisper '%s' (%s, %s)...", model_name, device, compute_type)
         try:
-            _whisper_model = WhisperModel(
-                model_name,
-                device="cpu",
-                compute_type="int8",
-            )
+            _whisper_model = WhisperModel(model_name, device=device, compute_type=compute_type)
         except Exception as e:
-            logger.warning("INT8 не поддерживается: %s. Пробуем float32...", e)
-            _whisper_model = WhisperModel(
-                model_name,
-                device="cpu",
-                compute_type="float32",
-            )
+            logger.warning("%s/%s не поддерживается: %s. Пробуем cpu/float32...", device, compute_type, e)
+            _whisper_model = WhisperModel(model_name, device="cpu", compute_type="float32")
         _whisper_model_name = model_name
         logger.info("Модель faster-whisper '%s' готова.", model_name)
         return _whisper_model

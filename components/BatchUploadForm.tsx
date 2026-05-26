@@ -167,6 +167,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
               <select
                 value={whisperModel}
                 onChange={e => setWhisperModel(e.target.value as WhisperModel)}
+                aria-label="Выбор модели Whisper"
                 className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-green-500 focus:border-green-500"
               >
                 {WHISPER_MODELS.map(m => (
@@ -186,6 +187,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
           multiple
           accept=".mp3,.wav,.mov,.mxf,.mp4,.wmv,.avi,.mkv,.ogg,.flac"
           className="hidden"
+          aria-label="Выберите медиафайлы"
           onChange={handleFileSelect}
         />
 
@@ -250,6 +252,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
                     </div>
                     <button
                       onClick={() => handleRemoveFile(i)}
+                      aria-label={`Удалить ${file.name}`}
                       className="ml-2 p-1 text-gray-400 hover:text-red-500"
                     >
                       <X className="w-4 h-4" />
