@@ -77,7 +77,12 @@ def generate_docx(project: dict, final_map: dict, abbr_map: dict, output_path: s
     _configure_paragraph(empty1)
 
     speakers_info = project["result"].get("speakers", {})
+    segments = project["result"]["segments"]
+    speakers_in_segments = {seg["speaker"] for seg in segments}
+
     for speaker_id, info in speakers_info.items():
+        if speaker_id not in speakers_in_segments:
+            continue
         name = final_map.get(speaker_id, info.get("suggested_name", f"Спикер {speaker_id}"))
         abbr = abbr_map.get(speaker_id, "")
         legend_text = f"{name} – {abbr}." if abbr else f"{name}."
@@ -88,7 +93,6 @@ def generate_docx(project: dict, final_map: dict, abbr_map: dict, output_path: s
     empty2 = doc.add_paragraph()
     _configure_paragraph(empty2)
 
-    segments = project["result"]["segments"]
     for seg in segments:
         speaker_id = seg["speaker"]
         abbr = abbr_map.get(speaker_id, "")

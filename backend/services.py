@@ -74,6 +74,32 @@ _whisperx_align_meta = None
 _whisperx_diarize_pipeline = None
 
 
+def _cleanup_gpu_memory():
+    """Освобождает CUDA-кеш после транскрипции (если GPU доступна)."""
+    try:
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+def unload_whisper_models():
+    """Полностью выгружает все Whisper/WhisperX модели из памяти."""
+    global _whisper_model, _whisper_model_name
+    global _whisperx_align_model, _whisperx_align_meta, _whisperx_diarize_pipeline
+    with _whisper_lock:
+        _whisper_model = None
+        _whisper_model_name = None
+        _whisperx_align_model = None
+        _whisperx_align_meta = None
+        _whisperx_diarize_pipeline = None
+    _cleanup_gpu_memory()
+    logger.info("Whisper/WhisperX модели выгружены из памяти")
+
+
 def _detect_device_and_compute() -> tuple[str, str]:
     try:
         import torch
@@ -97,15 +123,23 @@ def _detect_device() -> str:
 
 def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> str:
     """Скачивает файл с Яндекс.Диска. Возвращает оригинальное имя файла."""
+    from backend.security import mask_url, validate_external_url
+
     api_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
-    resp = requests.get(api_url, params={"public_key": disk_url}, timeout=30)
+    resp = requests.get(api_url, params={"public_key": disk_url}, timeout=30, allow_redirects=False)
+    if resp.status_code in (301, 302, 303, 307, 308):
+        raise RuntimeError("Я.Диск API вернул редирект — отказано (SSRF protection)")
     resp.raise_for_status()
     download_url = resp.json()["href"]
+
+    ssrf_err = validate_external_url(download_url)
+    if ssrf_err:
+        raise RuntimeError(f"SSRF protection: {ssrf_err}")
 
     original_filename = "video_source.mp4"
     try:
         meta_url = "https://cloud-api.yandex.net/v1/disk/public/resources"
-        meta_resp = requests.get(meta_url, params={"public_key": disk_url}, timeout=15)
+        meta_resp = requests.get(meta_url, params={"public_key": disk_url}, timeout=15, allow_redirects=False)
         if meta_resp.status_code == 200:
             meta_data = meta_resp.json()
             original_filename = meta_data.get("name", original_filename)
@@ -123,7 +157,9 @@ def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> s
         raise ValueError(ext_error)
 
     downloaded_size = 0
-    with requests.get(download_url, stream=True, timeout=600) as r:
+    with requests.get(download_url, stream=True, timeout=600, allow_redirects=False) as r:
+        if r.status_code in (301, 302, 303, 307, 308):
+            raise RuntimeError("Download URL вернул редирект — отказано (SSRF protection)")
         r.raise_for_status()
         content_length = int(r.headers.get("content-length", 0))
         with open(local_video_path, "wb") as f:
@@ -134,7 +170,7 @@ def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> s
                     pct = min(int(downloaded_size / content_length * 100), 100)
                     projects_db.update_field(project_id, "progress_percent", pct)
 
-    logger.info("[%s] Файл скачан: %s", project_id[:8], original_filename)
+    logger.info("[%s] Файл скачан: %s (src=%s)", project_id[:8], original_filename, mask_url(disk_url))
     return original_filename
 
 
@@ -282,6 +318,12 @@ def get_whisper_model(model_name: str = "medium"):
         if _whisper_model is not None and _whisper_model_name == model_name:
             return _whisper_model
 
+        # Освобождаем старую модель перед загрузкой новой
+        if _whisper_model is not None:
+            logger.info("Выгрузка предыдущей модели '%s' перед загрузкой '%s'", _whisper_model_name, model_name)
+            _whisper_model = None
+            _cleanup_gpu_memory()
+
         device, compute_type = _detect_device_and_compute()
         logger.info("Загрузка модели faster-whisper '%s' (%s, %s)...", model_name, device, compute_type)
         try:
@@ -372,6 +414,7 @@ def _transcribe_with_whisperx(project_id: str, file_path, model_name: str = "med
         })
 
     logger.info("[%s] WhisperX: %d сегментов с диаризацией", project_id[:8], len(segments))
+    _cleanup_gpu_memory()
     return segments
 
 
@@ -707,6 +750,37 @@ def submit_task(func, *args, project_id: str | None = None, **kwargs):
     _task_executor.submit(_wrapper)
 
 
+def cancel_project(project_id: str) -> bool:
+    """Отменяет/удаляет проект: убирает из БД, чистит temp/output файлы.
+
+    Возвращает True если проект найден и удалён.
+    """
+    proj = projects_db.get(project_id)
+    if not proj:
+        return False
+
+    # Best-effort cleanup of any temp/output files
+    for prefix in (f"{project_id}_video", f"{project_id}.opus", f"transcript_{project_id}.docx",
+                   f"batch_export_{project_id}.docx", f"batch_verified_{project_id}.docx",
+                   f"autosave_{project_id}.docx"):
+        for p in TEMP_DIR.glob(f"{prefix}*"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+    # Remove autosaved DOCX from output dir if it matches project_id pattern
+    for p in OUTPUT_DIR.glob(f"*_{project_id[:8]}.docx"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+    projects_db.pop(project_id)
+    logger.info("[%s] Проект отменён и удалён", project_id[:8])
+    return True
+
+
 def shutdown_executor():
     """Graceful shutdown: persist in-flight projects, then stop executor."""
     logger.info("Завершение фоновых задач...")
@@ -739,21 +813,37 @@ def auto_export_project(project_id: str, output_path: str) -> str | None:
         name = info.get("suggested_name", f"Спикер {speaker_id}")
         final_map[speaker_id] = name
 
-    used_abbrs: dict[str, int] = {}
-    for speaker_id in speakers:
-        name = final_map[speaker_id]
-        words = name.split()
-        base = words[0][0].upper() if words and words[0] else f"С{speaker_id}"
-        count = used_abbrs.get(base, 0)
-        used_abbrs[base] = count + 1
-        abbr_map[speaker_id] = f"{base}{count + 1}" if count > 0 else base
-
-    for base_letter, total in used_abbrs.items():
-        if total > 1:
-            idx = 1
-            for sid in speakers:
-                if abbr_map[sid] == base_letter:
-                    abbr_map[sid] = f"{base_letter}{idx}"
-                    idx += 1
-
+    abbr_map = _compute_smart_abbreviations(final_map)
     return generate_docx(proj, final_map, abbr_map, output_path)
+
+
+def _compute_smart_abbreviations(name_map: dict) -> dict:
+    """Атомарно вычисляет аббревиатуры: первая буква фамилии, с индексацией коллизий.
+
+    Двухфазный алгоритм:
+    1. Группируем speaker_id → base_letter
+    2. Для групп размера >1 — присваиваем индексы (М1, М2, ...)
+    """
+    base_to_sids: dict[str, list[str]] = {}
+    fallback_map: dict[str, str] = {}
+
+    for speaker_id, name in name_map.items():
+        if not name or not name.strip():
+            fallback_map[speaker_id] = f"С{speaker_id}"
+            continue
+        words = name.strip().split()
+        first_word = words[0]
+        if not first_word or not first_word[0].isalpha():
+            fallback_map[speaker_id] = f"С{speaker_id}"
+            continue
+        base = first_word[0].upper()
+        base_to_sids.setdefault(base, []).append(speaker_id)
+
+    result = dict(fallback_map)
+    for base, sids in base_to_sids.items():
+        if len(sids) == 1:
+            result[sids[0]] = base
+        else:
+            for i, sid in enumerate(sids, start=1):
+                result[sid] = f"{base}{i}"
+    return result

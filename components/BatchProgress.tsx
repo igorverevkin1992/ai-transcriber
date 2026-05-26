@@ -110,8 +110,21 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     timerRef.current = setInterval(() => {
       setElapsedSec(Math.floor((Date.now() - startTime) / 1000));
     }, 1000);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = undefined;
+      }
+    };
   }, [startTime]);
+
+  // Unmount: guarantee both intervals are cleared
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
 
   // Auto-scroll log
   useEffect(() => {
@@ -120,8 +133,11 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
 
   // Phase 1: Preload Whisper model (if needed), then upload files to server
   // Skip entirely in recovery mode — files already uploaded, go straight to polling
+  const uploadStartedRef = useRef(false);
   useEffect(() => {
     if (isRecovery) return;
+    if (uploadStartedRef.current) return;
+    uploadStartedRef.current = true;
     let cancelled = false;
 
     const uploadAll = async () => {

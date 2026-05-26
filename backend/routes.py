@@ -25,6 +25,7 @@ from backend.models import (
     ProjectStatusEnum,
     ProjectStatusResponse,
 )
+from backend.security import validate_mime_type
 from backend.services import (
     WHISPER_AVAILABLE,
     get_whisper_model,
@@ -33,6 +34,7 @@ from backend.services import (
     process_video_task,
     projects_db,
     submit_task,
+    cancel_project,
 )
 from backend.utils import sanitize_filename, validate_file_extension, validate_url
 
@@ -58,8 +60,9 @@ async def create_project(request: Request, req: CreateProjectRequest):
         "task_args": (pid, req.url),
         "task_kwargs": {},
     })
+    from backend.security import mask_url
     submit_task(process_video_task, pid, req.url, project_id=pid)
-    logger.info("Проект создан: %s для URL: %s", pid[:8], req.url[:60])
+    logger.info("Проект создан: %s для URL: %s", pid[:8], mask_url(req.url))
     return CreateProjectResponse(id=pid)
 
 
@@ -87,6 +90,14 @@ async def get_result(pid: str):
     if proj["status"] != ProjectStatusEnum.COMPLETED:
         raise HTTPException(status_code=400, detail="Обработка ещё не завершена")
     return proj["result"]
+
+
+@router.delete("/projects/{pid}")
+async def delete_project(pid: str):
+    """Отменяет/удаляет проект и связанные temp/output файлы."""
+    if not cancel_project(pid):
+        raise HTTPException(status_code=404, detail="Проект не найден")
+    return {"status": "deleted", "id": pid}
 
 
 @router.post("/projects/{pid}/export")
@@ -141,8 +152,10 @@ async def upload_file(
     ext = Path(safe_filename).suffix  # e.g. ".wmv", ".mp4"
     local_path = TEMP_DIR / f"{pid}_video{ext}"
 
-    # Потоковая запись на диск с проверкой размера
+    # Потоковая запись на диск с проверкой размера и MIME-типа
     total_size = 0
+    mime_validated = False
+    first_chunk_buffer = b""
     async with aiofiles.open(str(local_path), "wb") as f:
         while chunk := await file.read(65536):
             total_size += len(chunk)
@@ -156,7 +169,28 @@ async def upload_file(
                     status_code=413,
                     detail=f"Файл слишком большой. Максимум: {MAX_FILE_SIZE_BYTES // (1024**3)} ГБ",
                 )
+            if not mime_validated:
+                first_chunk_buffer += chunk
+                if len(first_chunk_buffer) >= 8192:
+                    mime_err = validate_mime_type(first_chunk_buffer[:8192])
+                    if mime_err:
+                        await f.close()
+                        try:
+                            local_path.unlink()
+                        except OSError:
+                            pass
+                        raise HTTPException(status_code=400, detail=mime_err)
+                    mime_validated = True
             await f.write(chunk)
+
+    if not mime_validated and first_chunk_buffer:
+        mime_err = validate_mime_type(first_chunk_buffer)
+        if mime_err:
+            try:
+                local_path.unlink()
+            except OSError:
+                pass
+            raise HTTPException(status_code=400, detail=mime_err)
 
     projects_db.create(pid, {
         "id": pid,
