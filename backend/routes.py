@@ -39,9 +39,6 @@ from backend.utils import sanitize_filename, validate_file_extension, validate_u
 router = APIRouter(prefix="/api/v1")
 limiter = Limiter(key_func=get_remote_address)
 
-# In-memory хранилище пакетов
-batches_db: dict = {}
-
 
 @router.post("/projects", response_model=CreateProjectResponse)
 @limiter.limit("5/minute")
@@ -52,12 +49,16 @@ async def create_project(request: Request, req: CreateProjectRequest):
         raise HTTPException(status_code=400, detail=url_error)
 
     pid = str(uuid.uuid4())
-    projects_db[pid] = {
+    projects_db.create(pid, {
         "id": pid,
         "status": ProjectStatusEnum.QUEUED,
         "created_at": time.time(),
-    }
-    submit_task(process_video_task, pid, req.url)
+        "retry_count": 0,
+        "task_func": "process_video_task",
+        "task_args": (pid, req.url),
+        "task_kwargs": {},
+    })
+    submit_task(process_video_task, pid, req.url, project_id=pid)
     logger.info("Проект создан: %s для URL: %s", pid[:8], req.url[:60])
     return CreateProjectResponse(id=pid)
 
@@ -157,17 +158,21 @@ async def upload_file(
                 )
             await f.write(chunk)
 
-    projects_db[pid] = {
+    projects_db.create(pid, {
         "id": pid,
         "status": ProjectStatusEnum.QUEUED,
         "created_at": time.time(),
         "original_filename": safe_filename,
         "engine": engine,
-    }
+        "retry_count": 0,
+        "task_func": "process_uploaded_file_task",
+        "task_args": (pid, str(local_path), safe_filename),
+        "task_kwargs": {"engine": engine, "whisper_model": whisper_model},
+    })
 
     submit_task(
         process_uploaded_file_task, pid, str(local_path), safe_filename,
-        engine=engine, whisper_model=whisper_model,
+        project_id=pid, engine=engine, whisper_model=whisper_model,
     )
     logger.info("Файл загружен: %s -> проект %s (engine=%s)", safe_filename, pid[:8], engine)
     return CreateProjectResponse(id=pid)
@@ -330,7 +335,7 @@ async def preload_whisper_model(
     if not WHISPER_AVAILABLE:
         raise HTTPException(
             status_code=400,
-            detail="Whisper не установлен. Выполните: pip install openai-whisper",
+            detail="faster-whisper не установлен. Выполните: pip install faster-whisper",
         )
 
     valid_models = {"tiny", "base", "small", "medium", "large"}

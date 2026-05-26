@@ -12,6 +12,7 @@ import {
   Activity,
 } from 'lucide-react';
 import { api } from '../services/api';
+import { saveBatchSession, clearBatchSession } from '../services/batchSession';
 import { BatchFileInfo } from '../types';
 
 interface Props {
@@ -20,6 +21,8 @@ interface Props {
   whisperModel?: string;
   onDone: () => void;
   onError: (msg: string) => void;
+  recoveredProjectIds?: string[];
+  recoveredFileNames?: string[];
 }
 
 type UploadState = 'uploading' | 'processing' | 'done';
@@ -71,11 +74,18 @@ const STEP_LABELS: Record<string, string> = {
   error: 'Ошибка',
 };
 
-export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whisperModel = 'small', onDone, onError }) => {
-  const [state, setState] = useState<UploadState>('uploading');
-  const [trackers, setTrackers] = useState<FileTracker[]>(() =>
-    files.map(f => ({ file: f }))
-  );
+export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whisperModel = 'small', onDone, onError, recoveredProjectIds, recoveredFileNames }) => {
+  const isRecovery = !!recoveredProjectIds && recoveredProjectIds.length > 0;
+  const [state, setState] = useState<UploadState>(isRecovery ? 'processing' : 'uploading');
+  const [trackers, setTrackers] = useState<FileTracker[]>(() => {
+    if (isRecovery) {
+      return recoveredProjectIds!.map((pid, i) => ({
+        file: new File([], recoveredFileNames?.[i] || `file_${i}`),
+        projectId: pid,
+      }));
+    }
+    return files.map(f => ({ file: f }));
+  });
   const [uploadedCount, setUploadedCount] = useState(0);
   const [currentUploadName, setCurrentUploadName] = useState('');
   const [batchFiles, setBatchFiles] = useState<BatchFileInfo[]>([]);
@@ -109,7 +119,9 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   }, [logMessages]);
 
   // Phase 1: Preload Whisper model (if needed), then upload files to server
+  // Skip entirely in recovery mode — files already uploaded, go straight to polling
   useEffect(() => {
+    if (isRecovery) return;
     let cancelled = false;
 
     const uploadAll = async () => {
@@ -168,6 +180,11 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         setTrackers([...updated]);
         setCurrentUploadName('');
         addLog(`Все файлы загружены на сервер. Начинается обработка...`);
+
+        const ids = updated.filter(t => t.projectId).map(t => t.projectId!);
+        const names = updated.map(t => t.file.name);
+        saveBatchSession({ projectIds: ids, fileNames: names, engine, whisperModel, startedAt: Date.now() });
+
         setState('processing');
       }
     };
@@ -216,6 +233,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
 
         if (status.in_progress === 0) {
           addLog(`Обработка завершена! Готово: ${status.completed}, ошибок: ${status.errors}`);
+          clearBatchSession();
           setState('done');
           if (pollRef.current) clearInterval(pollRef.current);
           if (timerRef.current) clearInterval(timerRef.current);

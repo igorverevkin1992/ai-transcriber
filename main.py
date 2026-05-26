@@ -9,7 +9,41 @@ from fastapi.staticfiles import StaticFiles
 from backend.config import CORS_ORIGINS, TEMP_DIR, YANDEX_API_KEY, logger
 from backend.models import HealthResponse
 from backend.routes import router
-from backend.services import shutdown_executor
+from backend.models import ProjectStatusEnum
+from backend.services import (
+    _maybe_retry,
+    projects_db,
+    shutdown_executor,
+    submit_task,
+    _TASK_REGISTRY,
+)
+
+
+def _recover_inflight_projects():
+    """Mark projects that were in-flight at shutdown and schedule retries."""
+    in_flight_statuses = (
+        ProjectStatusEnum.DOWNLOADING,
+        ProjectStatusEnum.CONVERTING,
+        ProjectStatusEnum.TRANSCRIBING,
+    )
+    recovered = 0
+    for pid, proj in projects_db.items():
+        status = proj.get("status")
+        if status in in_flight_statuses or status == ProjectStatusEnum.QUEUED:
+            task_func_name = proj.get("task_func")
+            task_args = proj.get("task_args")
+            if task_func_name and task_func_name in _TASK_REGISTRY and task_args:
+                func = _TASK_REGISTRY[task_func_name]
+                task_kwargs = proj.get("task_kwargs", {})
+                projects_db.update_status(pid, ProjectStatusEnum.QUEUED)
+                submit_task(func, *task_args, project_id=pid, **task_kwargs)
+                recovered += 1
+                logger.info("[%s] Восстановлен из '%s' → QUEUED", pid[:8], status.value if hasattr(status, "value") else status)
+            else:
+                projects_db.update_status(pid, ProjectStatusEnum.ERROR,
+                                          error="Сервер перезапущен, задача не может быть восстановлена")
+    if recovered:
+        logger.info("Восстановлено %d задач после рестарта", recovered)
 
 
 @asynccontextmanager
@@ -30,6 +64,8 @@ async def lifespan(app: FastAPI):
         logger.error("FFmpeg не найден в PATH. Установите ffmpeg.")
     except Exception as e:
         logger.error("Ошибка при проверке FFmpeg: %s", e)
+
+    _recover_inflight_projects()
 
     logger.info("--- ПРОВЕРКИ ЗАВЕРШЕНЫ ---")
     yield

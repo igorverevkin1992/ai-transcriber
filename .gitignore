@@ -24,3 +24,8 @@ temp_files/
 *.opus
 transcript_*.docx
 video_source.mp4
+
+# SQLite database
+*.db
+*.db-wal
+*.db-shm

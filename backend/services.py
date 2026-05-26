@@ -1,3 +1,4 @@
+import os
 import shutil
 import threading
 import time
@@ -13,11 +14,13 @@ from backend.config import (
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
     OUTPUT_DIR,
+    SQLITE_DB_PATH,
     TEMP_DIR,
     YANDEX_API_KEY,
     logger,
 )
 from backend.models import ProjectStatusEnum
+from backend.store import ProjectStore
 from backend.utils import (
     detect_fps,
     frames_to_tc,
@@ -27,19 +30,20 @@ from backend.utils import (
     validate_file_extension,
 )
 
-# --- In-memory storage ---
-projects_db: dict = {}
+# --- SQLite-backed project storage (in-memory cache + persistence) ---
+projects_db = ProjectStore(db_path=SQLITE_DB_PATH)
 
-# Dedicated thread pool for heavy processing tasks.
-# max_workers=MAX_CONCURRENT_TASKS ensures only N tasks run simultaneously;
-# extra tasks queue internally without blocking any threads.
 _task_executor = ThreadPoolExecutor(
     max_workers=MAX_CONCURRENT_TASKS,
     thread_name_prefix="transcribe",
 )
 
-# TTL for completed projects (seconds) — cleaned up periodically
 PROJECT_TTL_SECONDS = 6 * 3600  # 6 hours
+
+# --- Retry ---
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+RETRY_DELAYS = [10, 30, 60]  # seconds
+_TASK_REGISTRY: dict[str, callable] = {}
 
 # --- SpeechKit gRPC v3 ---
 SPEECHKIT_GRPC_HOST = "stt.api.cloud.yandex.net:443"
@@ -96,7 +100,7 @@ def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> s
                 downloaded_size += len(chunk)
                 if content_length > 0:
                     pct = min(int(downloaded_size / content_length * 100), 100)
-                    projects_db[project_id]["progress_percent"] = pct
+                    projects_db.update_field(project_id, "progress_percent", pct)
 
     logger.info("[%s] Файл скачан: %s", project_id[:8], original_filename)
     return original_filename
@@ -324,7 +328,7 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
 def _process_recognition_result(project_id: str, segments: list[dict], original_filename: str, video_path):
     """Обрабатывает результат распознавания v3 и сохраняет в projects_db."""
     meta = parse_filename_metadata(original_filename)
-    projects_db[project_id]["original_filename"] = original_filename
+    projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
 
     fps = detect_fps(str(video_path)) if video_path.exists() else 25
 
@@ -368,12 +372,15 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             "suggested_name": suggested,
         }
 
-    projects_db[project_id]["result"] = {
-        "segments": raw_segments,
-        "speakers": detected_speakers,
-        "meta": {**meta, "original_filename": original_filename},
-    }
-    projects_db[project_id]["fps"] = fps
+    projects_db.set_result(
+        project_id,
+        {
+            "segments": raw_segments,
+            "speakers": detected_speakers,
+            "meta": {**meta, "original_filename": original_filename},
+        },
+        fps=fps,
+    )
 
     logger.info(
         "[%s] Обработка завершена. Сегментов: %d, Спикеров: %d, FPS: %d",
@@ -386,19 +393,9 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
 
 def _cleanup_old_projects():
     """Удаляет завершённые/ошибочные проекты старше PROJECT_TTL_SECONDS."""
-    now = time.time()
-    to_delete = []
-    # Use list() snapshot to avoid RuntimeError: dictionary changed size during iteration
-    for pid, proj in list(projects_db.items()):
-        status = proj.get("status")
-        if status in (ProjectStatusEnum.COMPLETED, ProjectStatusEnum.ERROR):
-            created = proj.get("created_at", now)
-            if now - created > PROJECT_TTL_SECONDS:
-                to_delete.append(pid)
-    for pid in to_delete:
-        projects_db.pop(pid, None)  # pop avoids KeyError if already deleted by another thread
-    if to_delete:
-        logger.info("TTL-очистка: удалено %d старых проектов", len(to_delete))
+    deleted = projects_db.cleanup_old(PROJECT_TTL_SECONDS)
+    if deleted:
+        logger.info("TTL-очистка: удалено %d старых проектов", deleted)
 
 
 def process_video_task(project_id: str, disk_url: str):
@@ -410,30 +407,30 @@ def process_video_task(project_id: str, disk_url: str):
         _cleanup_old_projects()
 
         # 1. СКАЧИВАНИЕ
-        projects_db[project_id]["status"] = ProjectStatusEnum.DOWNLOADING
-        projects_db[project_id]["progress_percent"] = 0
+        projects_db.update_status(project_id, ProjectStatusEnum.DOWNLOADING)
+        projects_db.update_field(project_id, "progress_percent", 0)
         logger.info("[%s] Скачивание файла с Яндекс.Диска...", project_id[:8])
         original_filename = _download_from_yadisk(project_id, disk_url, local_video_path)
 
         # 2. КОНВЕРТАЦИЯ
-        projects_db[project_id]["status"] = ProjectStatusEnum.CONVERTING
-        projects_db[project_id]["progress_percent"] = None
+        projects_db.update_status(project_id, ProjectStatusEnum.CONVERTING)
+        projects_db.update_field(project_id, "progress_percent", None)
         _convert_to_opus(project_id, local_video_path, local_audio_path)
 
         # 3. РАСПОЗНАВАНИЕ (gRPC v3 с диаризацией)
-        projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
+        projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
         logger.info("[%s] Распознавание с диаризацией...", project_id[:8])
         segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
         # 4. ОБРАБОТКА РЕЗУЛЬТАТА
         _process_recognition_result(project_id, segments, original_filename, local_video_path)
-        projects_db[project_id]["status"] = ProjectStatusEnum.COMPLETED
+        projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
 
     except Exception as e:
         tb = traceback.format_exc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
-        projects_db[project_id]["status"] = ProjectStatusEnum.ERROR
-        projects_db[project_id]["error"] = f"{e}\n\nTraceback:\n{tb}"
+        projects_db.update_status(project_id, ProjectStatusEnum.ERROR,
+                                  error=f"{e}\n\nTraceback:\n{tb}")
 
     finally:
         for path in (local_video_path, local_audio_path):
@@ -461,27 +458,24 @@ def process_uploaded_file_task(
 
     try:
         _cleanup_old_projects()
-        projects_db[project_id]["original_filename"] = original_filename
+        projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
 
         if engine == "whisper":
-            # Whisper: передаём файл напрямую (конвертация не нужна)
-            projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
-            projects_db[project_id]["progress_percent"] = None
+            projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
+            projects_db.update_field(project_id, "progress_percent", None)
             logger.info("[%s] Whisper: модель %s", project_id[:8], whisper_model)
             segments = _transcribe_with_whisper(project_id, local_video_path, whisper_model)
         else:
-            # SpeechKit: конвертация в OPUS, затем gRPC
-            projects_db[project_id]["status"] = ProjectStatusEnum.CONVERTING
-            projects_db[project_id]["progress_percent"] = None
+            projects_db.update_status(project_id, ProjectStatusEnum.CONVERTING)
+            projects_db.update_field(project_id, "progress_percent", None)
             _convert_to_opus(project_id, local_video_path, local_audio_path)
 
-            projects_db[project_id]["status"] = ProjectStatusEnum.TRANSCRIBING
+            projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
             logger.info("[%s] SpeechKit v3 с диаризацией...", project_id[:8])
             segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
-        # 3. ОБРАБОТКА РЕЗУЛЬТАТА
         _process_recognition_result(project_id, segments, original_filename, local_video_path)
-        projects_db[project_id]["status"] = ProjectStatusEnum.COMPLETED
+        projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
         logger.info("[%s] Файл обработан: %s", project_id[:8], original_filename)
 
         # 4. АВТОСОХРАНЕНИЕ DOCX НА ДИСК
@@ -500,8 +494,8 @@ def process_uploaded_file_task(
     except Exception as e:
         tb = traceback.format_exc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
-        projects_db[project_id]["status"] = ProjectStatusEnum.ERROR
-        projects_db[project_id]["error"] = f"{e}\n\nTraceback:\n{tb}"
+        projects_db.update_status(project_id, ProjectStatusEnum.ERROR,
+                                  error=f"{e}\n\nTraceback:\n{tb}")
 
     finally:
         for path in (local_video_path, local_audio_path):
@@ -512,19 +506,65 @@ def process_uploaded_file_task(
                 pass
 
 
-def submit_task(func, *args, **kwargs):
+# ==================== Task registry & retry ====================
+
+def _register_task(func):
+    _TASK_REGISTRY[func.__name__] = func
+    return func
+
+process_video_task = _register_task(process_video_task)
+process_uploaded_file_task = _register_task(process_uploaded_file_task)
+
+
+def _maybe_retry(project_id: str):
+    """Schedule a retry if the project failed and has retries left."""
+    proj = projects_db.get(project_id)
+    if not proj or proj.get("status") != ProjectStatusEnum.ERROR:
+        return
+
+    retry_count = proj.get("retry_count", 0)
+    if retry_count >= MAX_RETRIES:
+        logger.info("[%s] Достигнут лимит повторов (%d). Прекращаем.", project_id[:8], MAX_RETRIES)
+        return
+
+    task_func_name = proj.get("task_func")
+    task_args = proj.get("task_args")
+    if not task_func_name or task_func_name not in _TASK_REGISTRY or not task_args:
+        return
+
+    delay = RETRY_DELAYS[min(retry_count, len(RETRY_DELAYS) - 1)]
+    retry_count += 1
+
+    logger.info("[%s] Повтор %d/%d через %dс...", project_id[:8], retry_count, MAX_RETRIES, delay)
+
+    projects_db.update_field(project_id, "retry_count", retry_count, persist=True)
+    projects_db.update_status(project_id, ProjectStatusEnum.QUEUED)
+    projects_db.update_field(project_id, "error", None)
+
+    func = _TASK_REGISTRY[task_func_name]
+    task_kwargs = proj.get("task_kwargs", {})
+
+    def _delayed_retry():
+        time.sleep(delay)
+        submit_task(func, *task_args, project_id=project_id, **task_kwargs)
+
+    threading.Thread(target=_delayed_retry, daemon=True).start()
+
+
+def submit_task(func, *args, project_id: str | None = None, **kwargs):
     """Submit a heavy processing task to the dedicated executor.
 
     The executor has max_workers=MAX_CONCURRENT_TASKS, so only N tasks run
     at a time. Extra tasks wait in an internal queue without blocking any threads.
-    This keeps the main ASGI thread pool free for serving HTTP requests.
     """
     def _wrapper():
         try:
             func(*args, **kwargs)
         except Exception:
-            # Already logged inside task functions, but catch here as safety net
             logger.exception("Необработанная ошибка в фоновой задаче")
+        finally:
+            if project_id:
+                _maybe_retry(project_id)
 
     _task_executor.submit(_wrapper)
 

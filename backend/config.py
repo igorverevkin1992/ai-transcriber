@@ -30,4 +30,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".mov", ".mxf", ".mp4", ".wmv", ".avi", ".
 ALLOWED_URL_HOSTS = {"yadi.sk", "disk.yandex.ru", "disk.yandex.com"}
 
 # --- CORS ---
+SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "projects.db")
+
+# --- CORS ---
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
