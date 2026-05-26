@@ -60,13 +60,23 @@ def strip_extension(filename: str) -> str:
     return re.sub(r"\.[^.]+$", "", filename)
 
 
-def sanitize_filename(filename: str) -> str:
-    """Очищает имя файла от path traversal и опасных символов."""
+def sanitize_filename(filename: str, base_dir: str | None = None) -> str:
+    """Очищает имя файла от path traversal и опасных символов.
+
+    If base_dir is provided, verifies the resolved path stays within it.
+    """
     import os
     name = os.path.basename(filename)
     name = name.replace("\\", "").replace("/", "")
     name = name.replace("\x00", "")
-    return name if name else "unnamed_file"
+    name = name.strip(". ")
+    if not name:
+        return "unnamed_file"
+    if base_dir:
+        resolved = os.path.realpath(os.path.join(base_dir, name))
+        if not resolved.startswith(os.path.realpath(base_dir)):
+            return "unnamed_file"
+    return name
 
 
 def validate_url(url: str) -> str | None:

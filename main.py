@@ -6,7 +6,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from backend.config import CORS_ORIGINS, TEMP_DIR, YANDEX_API_KEY, logger
+from backend.auth import ApiKeyMiddleware
+from backend.config import API_KEY, CORS_ORIGINS, TEMP_DIR, YANDEX_API_KEY, logger
 from backend.models import HealthResponse
 from backend.routes import router
 from backend.models import ProjectStatusEnum
@@ -84,9 +85,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
+app.add_middleware(ApiKeyMiddleware)
+
+if API_KEY:
+    logger.info("API_KEY задан — аутентификация по X-API-Key включена.")
 
 app.include_router(router)
 

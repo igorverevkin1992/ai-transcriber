@@ -14,6 +14,7 @@ logger = logging.getLogger("abtgs")
 
 # --- API Keys ---
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
+API_KEY = os.getenv("API_KEY")  # if set, X-API-Key header required on /api/* requests
 
 # --- Paths ---
 TEMP_DIR = Path("temp_files")
