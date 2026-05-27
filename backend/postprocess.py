@@ -5,7 +5,7 @@ from backend.config import GEMINI_API_KEY, logger
 from backend.metrics import gemini_calls
 
 FILLER_WORDS_RE = re.compile(
-    r"\b(эээ|ээ|эм+|ммм+|хм+|ну вот|вот так вот|как бы|типа того|короче говоря)\b",
+    r"\b(эээ|ээ|эм+|ммм+|хм+|ну вот|вот так вот|как бы(?! то ни было)|типа того|короче говоря)\b",
     re.IGNORECASE,
 )
 REPEATED_WORDS_RE = re.compile(r"\b(\w+)(?:\s+\1\b)+", re.IGNORECASE)

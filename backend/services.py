@@ -847,12 +847,17 @@ def auto_export_project(project_id: str, output_path: str) -> str | None:
     final_map = {}
     abbr_map = {}
 
+    _TECH_SPEAKER_NAMES = {"АЗК", "ГЗК"}
+    legend_exclude: set[str] = set()
+
     for speaker_id, info in speakers.items():
         name = info.get("suggested_name", f"Спикер {speaker_id}")
         final_map[speaker_id] = name
+        if name.strip().upper() in _TECH_SPEAKER_NAMES:
+            legend_exclude.add(speaker_id)
 
     abbr_map = _compute_smart_abbreviations(final_map)
-    return generate_docx(proj, final_map, abbr_map, output_path)
+    return generate_docx(proj, final_map, abbr_map, output_path, legend_exclude=legend_exclude)
 
 
 def _compute_smart_abbreviations(name_map: dict) -> dict:

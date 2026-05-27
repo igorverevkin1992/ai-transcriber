@@ -40,21 +40,14 @@ def _add_text_with_italics(paragraph, text: str):
         _add_run(paragraph, part, italic=is_parenthetical)
 
 
-def generate_docx(project: dict, final_map: dict, abbr_map: dict, output_path: str) -> str:
-    """Генерирует DOCX с расшифровкой в формате, идентичном ручному.
-
-    Формат:
-        <original_filename>
-        <пустая строка>
-        <Имя Фамилия> – <АББР>.
-        ...
-        <пустая строка>
-        <таймкод> <АББР>: <текст>
-        ...
-
-    Все абзацы: 14pt, JUSTIFY, line_spacing=1.0, space_after=0.
-    Фрагменты в (...) — курсивом.
-    """
+def generate_docx(
+    project: dict,
+    final_map: dict,
+    abbr_map: dict,
+    output_path: str,
+    legend_exclude: set[str] | None = None,
+) -> str:
+    """Генерирует DOCX с расшифровкой в формате, идентичном ручному."""
     doc = Document()
 
     style = doc.styles["Normal"]
@@ -67,10 +60,11 @@ def generate_docx(project: dict, final_map: dict, abbr_map: dict, output_path: s
         section.right_margin = Cm(1.5)
 
     original_filename = project.get("original_filename", "transcript")
+    download_name = strip_extension(original_filename) + ".docx"
 
     header_para = doc.add_paragraph()
     _configure_paragraph(header_para)
-    _add_run(header_para, original_filename)
+    _add_run(header_para, download_name)
 
     empty1 = doc.add_paragraph()
     _configure_paragraph(empty1)
@@ -78,9 +72,12 @@ def generate_docx(project: dict, final_map: dict, abbr_map: dict, output_path: s
     speakers_info = project["result"].get("speakers", {})
     segments = project["result"]["segments"]
     speakers_in_segments = {seg["speaker"] for seg in segments}
+    exclude = legend_exclude or set()
 
     for speaker_id, info in speakers_info.items():
         if speaker_id not in speakers_in_segments:
+            continue
+        if speaker_id in exclude:
             continue
         name = final_map.get(speaker_id, info.get("suggested_name", f"Спикер {speaker_id}"))
         abbr = abbr_map.get(speaker_id, "")
@@ -96,13 +93,17 @@ def generate_docx(project: dict, final_map: dict, abbr_map: dict, output_path: s
         speaker_id = seg["speaker"]
         abbr = abbr_map.get(speaker_id, "")
         display_name = abbr or final_map.get(speaker_id, f"Спикер {speaker_id}")
+        text = seg["text"]
 
         p = doc.add_paragraph()
         _configure_paragraph(p)
-        _add_run(p, f"{seg['timecode']} {display_name}: ")
-        _add_text_with_italics(p, seg["text"])
+
+        if text.startswith("("):
+            _add_run(p, f"{seg['timecode']} ")
+            _add_text_with_italics(p, text)
+        else:
+            _add_run(p, f"{seg['timecode']} {display_name}: ")
+            _add_text_with_italics(p, text)
 
     doc.save(output_path)
-
-    download_name = strip_extension(original_filename) + ".docx"
     return download_name
