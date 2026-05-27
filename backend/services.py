@@ -496,7 +496,11 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     meta = parse_filename_metadata(original_filename)
     projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
 
-    fps = detect_fps(str(video_path)) if video_path.exists() else 25
+    if video_path.exists():
+        fps = detect_fps(str(video_path))
+    else:
+        fps = 25
+        logger.warning("[%s] Видеофайл не найден для определения FPS, используется 25", project_id[:8])
 
     speaker_durations: dict[str, float] = {}
     raw_segments = []
@@ -528,6 +532,12 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     sorted_voices = sorted(speaker_durations.items(), key=lambda x: x[1], reverse=True)
     file_names = meta["speakers"]
 
+    if file_names and len(file_names) != len(sorted_voices):
+        logger.warning(
+            "[%s] Несовпадение: %d имён в файле, %d голосов обнаружено — маппинг может быть неточным",
+            project_id[:8], len(file_names), len(sorted_voices),
+        )
+
     for i, (voice_id, dur) in enumerate(sorted_voices):
         suggested = f"Спикер {voice_id}"
         if i < len(file_names):
@@ -541,7 +551,12 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     speaker_count = len(detected_speakers)
     diarization_speakers.observe(speaker_count)
     low_confidence = speaker_count < 2 or speaker_count > 8
-    if low_confidence:
+    if speaker_count == 1:
+        logger.warning(
+            "[%s] Обнаружен только 1 спикер — возможно диаризация не сработала (проверьте HF_TOKEN)",
+            project_id[:8],
+        )
+    elif low_confidence:
         logger.warning(
             "[%s] Подозрительное число спикеров (%d) — рекомендуется ручная проверка",
             project_id[:8], speaker_count,
