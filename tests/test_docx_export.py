@@ -112,3 +112,19 @@ class TestGenerateDocx:
         out = tmp_path / "out.docx"
         name = generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
         assert name == "test_interview.docx"
+
+    def test_segments_override_replaces_original(self, tmp_path, sample_project):
+        edited = [
+            {"timecode": "11:04:15:00", "speaker": "0", "text": "Исправленный текст."},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(
+            sample_project,
+            {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"},
+            str(out), segments_override=edited,
+        )
+        doc = Document(str(out))
+        all_text = "\n".join(p.text for p in doc.paragraphs)
+        assert "Исправленный текст." in all_text
+        assert "Привет всем." not in all_text
+        assert "Хорошо, давайте." not in all_text

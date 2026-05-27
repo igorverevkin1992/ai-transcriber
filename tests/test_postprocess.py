@@ -7,9 +7,15 @@ class TestRegexCleanup:
         assert regex_cleanup("ну вот хорошо") == "Хорошо"
         assert regex_cleanup("мммм да") == "Да"
 
-    def test_collapses_repeated_words(self):
+    def test_collapses_triple_repeated_words(self):
         assert regex_cleanup("слово слово слово") == "Слово"
-        assert regex_cleanup("привет привет мир") == "Привет мир"
+
+    def test_preserves_double_repeated_words(self):
+        assert regex_cleanup("привет привет мир") == "Привет привет мир"
+        assert regex_cleanup("очень очень важно") == "Очень очень важно"
+
+    def test_preserves_kak_by_to_ni_bylo(self):
+        assert "как бы то ни было" in regex_cleanup("как бы то ни было").lower()
 
     def test_capitalizes_after_punctuation(self):
         assert regex_cleanup("привет. как дела") == "Привет. Как дела"

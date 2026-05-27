@@ -29,6 +29,7 @@ from backend.models import (
 from backend.security import validate_mime_type
 from backend.services import (
     WHISPER_AVAILABLE,
+    _compute_smart_abbreviations,
     auto_export_project,
     cancel_project,
     get_whisper_model,
@@ -41,6 +42,13 @@ from backend.utils import sanitize_filename, validate_file_extension, validate_u
 
 router = APIRouter(prefix="/api/v1")
 limiter = Limiter(key_func=get_remote_address)
+
+_TECH_SPEAKER_NAMES = {"АЗК", "ГЗК"}
+
+
+def _compute_legend_exclude(name_map: dict[str, str]) -> set[str]:
+    """Возвращает speaker_id тех спикеров, которых нужно исключить из легенды."""
+    return {sid for sid, name in name_map.items() if name.strip().upper() in _TECH_SPEAKER_NAMES}
 
 
 @router.post("/projects", response_model=CreateProjectResponse)
@@ -113,8 +121,17 @@ async def export_docx(pid: str, req: ExportRequest, background_tasks: Background
     final_map = {m.speaker_label: m.mapped_name for m in req.mappings}
     abbr_map = {m.speaker_label: m.abbreviation for m in req.mappings}
 
+    legend_exclude = _compute_legend_exclude(final_map)
+    segments_override = None
+    if req.edited_segments:
+        segments_override = [s.model_dump() for s in req.edited_segments]
+
     output_path = str(TEMP_DIR / f"transcript_{pid}.docx")
-    download_name = generate_docx(proj, final_map, abbr_map, output_path)
+    download_name = generate_docx(
+        proj, final_map, abbr_map, output_path,
+        legend_exclude=legend_exclude,
+        segments_override=segments_override,
+    )
 
     background_tasks.add_task(os.unlink, output_path)
 
@@ -346,11 +363,13 @@ async def batch_verification_data(ids: str = Query(..., description="ID прое
         speakers = result.get("speakers", {})
         segments = result.get("segments", [])
 
+        name_map = {sid: info.get("suggested_name", f"Спикер {sid}") for sid, info in speakers.items()}
+        abbr_map = _compute_smart_abbreviations(name_map)
+
         speaker_list = []
         for speaker_id, info in speakers.items():
-            name = info.get("suggested_name", f"Спикер {speaker_id}")
-            words = name.split()
-            abbr = words[0][0].upper() if words and words[0] else f"С{speaker_id}"
+            name = name_map[speaker_id]
+            abbr = abbr_map.get(speaker_id, f"С{speaker_id}")
             speaker_list.append({
                 "id": speaker_id,
                 "name": name,
@@ -394,10 +413,11 @@ async def batch_export_with_mappings(request: Request, body: BatchExportRequest)
 
             final_map = {m.speaker_id: m.name for m in mappings}
             abbr_map = {m.speaker_id: m.abbr for m in mappings}
+            legend_exclude = _compute_legend_exclude(final_map)
 
             output_path = str(TEMP_DIR / f"batch_verified_{pid}.docx")
             try:
-                download_name = generate_docx(proj, final_map, abbr_map, output_path)
+                download_name = generate_docx(proj, final_map, abbr_map, output_path, legend_exclude=legend_exclude)
                 if download_name and os.path.exists(output_path):
                     zf.write(output_path, download_name)
                     exported_count += 1

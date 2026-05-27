@@ -90,7 +90,13 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
         return acc;
       }, {} as any);
 
-      const blob = await api.confirmMapping(data.id, mapping);
+      const editedSegments = segments.map(seg => ({
+        timecode: seg.timecode,
+        speaker: seg.tag_id,
+        text: seg.text,
+      }));
+
+      const blob = await api.confirmMapping(data.id, mapping, editedSegments);
 
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');

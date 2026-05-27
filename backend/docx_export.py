@@ -46,6 +46,7 @@ def generate_docx(
     abbr_map: dict,
     output_path: str,
     legend_exclude: set[str] | None = None,
+    segments_override: list[dict] | None = None,
 ) -> str:
     """Генерирует DOCX с расшифровкой в формате, идентичном ручному."""
     doc = Document()
@@ -70,7 +71,7 @@ def generate_docx(
     _configure_paragraph(empty1)
 
     speakers_info = project["result"].get("speakers", {})
-    segments = project["result"]["segments"]
+    segments = segments_override if segments_override is not None else project["result"]["segments"]
     speakers_in_segments = {seg["speaker"] for seg in segments}
     exclude = legend_exclude or set()
 

@@ -11,6 +11,11 @@ FILENAME_STOP_WORDS = {
 }
 
 
+_FILE_CODE_RE = re.compile(r"^[fф]\d+(-\d+)?$", re.IGNORECASE)
+_DATE_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$|^\d{4}\.\d{2}\.\d{2}$")
+_PURE_DIGITS_RE = re.compile(r"^\d+$")
+
+
 def parse_filename_metadata(filename: str) -> dict:
     """Извлекает имена спикеров и стартовый таймкод из названия файла."""
     result = {"speakers": [], "start_tc": "00:00:00:00"}
@@ -28,7 +33,9 @@ def parse_filename_metadata(filename: str) -> dict:
         if (
             word
             and word.lower() not in FILENAME_STOP_WORDS
-            and not re.match(r"\d{2}\.\d{2}\.\d{4}", word)
+            and not _DATE_RE.match(word)
+            and not _FILE_CODE_RE.match(word)
+            and not _PURE_DIGITS_RE.match(word)
         ):
             result["speakers"].append(word)
 

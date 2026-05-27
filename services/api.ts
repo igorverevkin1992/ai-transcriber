@@ -144,20 +144,29 @@ export const api = {
     };
   },
 
-  confirmMapping: async (projectId: string, mapping: MappingDecision): Promise<Blob> => {
+  confirmMapping: async (
+    projectId: string,
+    mapping: MappingDecision,
+    editedSegments?: Array<{ timecode: string; speaker: string; text: string }>,
+  ): Promise<Blob> => {
     const mappingList = Object.keys(mapping).map(tagId => ({
       speaker_label: tagId,
       mapped_name: mapping[tagId].name,
       abbreviation: mapping[tagId].abbreviation,
     }));
 
+    const body: Record<string, unknown> = {
+      mappings: mappingList,
+      filename: 'transcript.docx',
+    };
+    if (editedSegments) {
+      body.edited_segments = editedSegments;
+    }
+
     const response = await fetch(`${API_BASE_URL}/projects/${projectId}/export`, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({
-        mappings: mappingList,
-        filename: 'transcript.docx',
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) throw new Error('Не удалось сгенерировать документ');

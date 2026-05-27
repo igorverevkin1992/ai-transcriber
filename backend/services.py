@@ -506,7 +506,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         channel = str(seg["channel_tag"])
         text = seg["text"]
         words = seg["words"]
-        if not words:
+        if not words or not text.strip():
             continue
 
         start_s = words[0]["start_ms"] / 1000.0
@@ -515,7 +515,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         dur = end_s - start_s
         speaker_durations[channel] = speaker_durations.get(channel, 0) + dur
 
-        abs_frames = start_frames + int(start_s * fps)
+        abs_frames = start_frames + round(start_s * fps)
         tc_formatted = frames_to_tc(abs_frames, fps)
 
         raw_segments.append({

@@ -82,6 +82,26 @@ class TestParseFilenameMetadata:
         result = parse_filename_metadata("f8.mp3")
         assert result["speakers"] == []
 
+    def test_filters_russian_file_codes(self):
+        result = parse_filename_metadata("2026.02.03_Антипенко_ф5.mp4")
+        assert result["speakers"] == ["Антипенко"]
+
+    def test_filters_f_codes_any_number(self):
+        result = parse_filename_metadata("02.02.2026_f7.mp4")
+        assert result["speakers"] == []
+
+    def test_filters_multi_file_codes(self):
+        result = parse_filename_metadata("Гайнутдинов_2026.01.24_ф14-15.mp4")
+        assert result["speakers"] == ["Гайнутдинов"]
+
+    def test_filters_yyyy_mm_dd_dates(self):
+        result = parse_filename_metadata("2026.02.03_Антипенко.mp4")
+        assert result["speakers"] == ["Антипенко"]
+
+    def test_filters_pure_digits(self):
+        result = parse_filename_metadata("Имя_15.mp4")
+        assert result["speakers"] == ["Имя"]
+
 
 class TestStripExtension:
     def test_basic(self):
