@@ -161,6 +161,14 @@ async def upload_file(
     if not file.filename:
         raise HTTPException(status_code=400, detail="Имя файла не указано")
 
+    valid_engines = {"whisper", "speechkit"}
+    if engine not in valid_engines:
+        raise HTTPException(status_code=400, detail=f"Неверный engine: {engine}. Допустимые: {', '.join(valid_engines)}")
+
+    valid_models = {"tiny", "base", "small", "medium", "large", "large-v2", "large-v3"}
+    if whisper_model not in valid_models:
+        raise HTTPException(status_code=400, detail=f"Неверная модель: {whisper_model}. Допустимые: {', '.join(sorted(valid_models))}")
+
     safe_filename = sanitize_filename(file.filename)
 
     ext_error = validate_file_extension(safe_filename)
@@ -236,6 +244,8 @@ async def upload_file(
 async def batch_status(ids: str = Query(..., description="ID проектов через запятую")):
     """Возвращает статус всех проектов в пакете."""
     project_ids = [i.strip() for i in ids.split(",") if i.strip()]
+    if len(project_ids) > 200:
+        raise HTTPException(status_code=400, detail="Максимум 200 проектов за запрос")
     files: List[BatchFileStatus] = []
     completed = 0
     errors = 0
@@ -352,6 +362,8 @@ async def download_saved():
 async def batch_verification_data(ids: str = Query(..., description="ID проектов через запятую")):
     """Возвращает данные спикеров для каждого завершённого проекта в батче."""
     project_ids = [i.strip() for i in ids.split(",") if i.strip()]
+    if len(project_ids) > 200:
+        raise HTTPException(status_code=400, detail="Максимум 200 проектов за запрос")
     results = []
 
     for pid in project_ids:

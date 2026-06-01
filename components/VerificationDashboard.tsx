@@ -22,8 +22,8 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
     if (s1Index === -1 || s2Index === -1) return;
 
     const newSpeakers = [...speakers];
-    const s1 = newSpeakers[s1Index];
-    const s2 = newSpeakers[s2Index];
+    const s1 = { ...newSpeakers[s1Index] };
+    const s2 = { ...newSpeakers[s2Index] };
 
     const tempCand = s1.candidate_id;
     const tempName = s1.custom_name;
@@ -37,6 +37,8 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
     s2.custom_name = tempName;
     s2.custom_abbr = tempAbbr;
 
+    newSpeakers[s1Index] = s1;
+    newSpeakers[s2Index] = s2;
     setSpeakers(newSpeakers);
   };
 

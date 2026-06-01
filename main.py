@@ -125,6 +125,8 @@ app.add_middleware(ApiKeyMiddleware)
 
 if API_KEY:
     logger.info("API_KEY задан — аутентификация по X-API-Key включена.")
+else:
+    logger.warning("API_KEY не задан — все /api/* эндпоинты открыты без аутентификации!")
 
 app.include_router(router)
 

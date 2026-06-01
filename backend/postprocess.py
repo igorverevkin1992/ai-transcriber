@@ -1,4 +1,5 @@
 import re
+import threading
 import time
 
 from backend.config import GEMINI_API_KEY, logger
@@ -44,6 +45,7 @@ def _get_gemini_model():
 
 
 _gemini_model = None
+_gemini_lock = threading.Lock()
 
 
 GEMINI_MAX_RETRIES = 3
@@ -54,7 +56,9 @@ def gemini_polish(text: str) -> str:
     """Полировка текста через Gemini API с retry на rate-limit/5xx."""
     global _gemini_model
     if _gemini_model is None:
-        _gemini_model = _get_gemini_model()
+        with _gemini_lock:
+            if _gemini_model is None:
+                _gemini_model = _get_gemini_model()
     if _gemini_model is None:
         return text
 

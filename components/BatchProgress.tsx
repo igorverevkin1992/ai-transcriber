@@ -296,8 +296,8 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     }
   }, [trackers, onError]);
 
-  const totalFiles = files.length;
-  const uploadPercent = Math.round((uploadedCount / totalFiles) * 100);
+  const totalFiles = trackers.length || files.length;
+  const uploadPercent = totalFiles > 0 ? Math.round((uploadedCount / totalFiles) * 100) : 0;
   const doneTotal = completedCount + errorCount;
   const processPercent = totalFiles > 0 ? Math.round((doneTotal / totalFiles) * 100) : 0;
 

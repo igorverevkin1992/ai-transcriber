@@ -185,6 +185,10 @@ def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> s
             for chunk in r.iter_content(chunk_size=65536):
                 f.write(chunk)
                 downloaded_size += len(chunk)
+                if downloaded_size > MAX_FILE_SIZE_BYTES:
+                    raise ValueError(
+                        f"Файл слишком большой (>{MAX_FILE_SIZE_BYTES / (1024**3):.0f} ГБ). Скачивание прервано."
+                    )
                 if content_length > 0:
                     pct = min(int(downloaded_size / content_length * 100), 100)
                     projects_db.update_field(project_id, "progress_percent", pct)
@@ -374,30 +378,33 @@ def _transcribe_with_whisperx(project_id: str, file_path, model_name: str = "med
                 project_id[:8], file_path.name, file_size_mb, model_name, device)
 
     compute_type = "float16" if device == "cuda" else "int8"
-    model = whisperx.load_model(model_name, device, compute_type=compute_type, language="ru")
+    with _whisper_lock:
+        model = whisperx.load_model(model_name, device, compute_type=compute_type, language="ru")
 
     audio = whisperx.load_audio(str(file_path))
     result = model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
     logger.info("[%s] WhisperX: транскрипция завершена, %d сегментов", project_id[:8], len(result["segments"]))
 
-    if _whisperx_align_model is None:
-        logger.info("[%s] Загрузка alignment-модели...", project_id[:8])
-        _whisperx_align_model, _whisperx_align_meta = whisperx.load_align_model(
-            language_code="ru", device=device,
-        )
+    with _whisper_lock:
+        if _whisperx_align_model is None:
+            logger.info("[%s] Загрузка alignment-модели...", project_id[:8])
+            _whisperx_align_model, _whisperx_align_meta = whisperx.load_align_model(
+                language_code="ru", device=device,
+            )
     result = whisperx.align(
         result["segments"], _whisperx_align_model, _whisperx_align_meta,
         audio, device, return_char_alignments=False,
     )
     logger.info("[%s] WhisperX: alignment завершён", project_id[:8])
 
-    if _whisperx_diarize_pipeline is None:
-        hf_token = HF_TOKEN
-        if not hf_token:
-            logger.warning("[%s] HF_TOKEN не задан — диаризация недоступна, все сегменты = speaker 0", project_id[:8])
-        else:
-            logger.info("[%s] Загрузка diarization pipeline...", project_id[:8])
-            _whisperx_diarize_pipeline = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
+    with _whisper_lock:
+        if _whisperx_diarize_pipeline is None:
+            hf_token = HF_TOKEN
+            if not hf_token:
+                logger.warning("[%s] HF_TOKEN не задан — диаризация недоступна, все сегменты = speaker 0", project_id[:8])
+            else:
+                logger.info("[%s] Загрузка diarization pipeline...", project_id[:8])
+                _whisperx_diarize_pipeline = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
 
     if _whisperx_diarize_pipeline is not None:
         diarize_segments = _whisperx_diarize_pipeline(audio)
@@ -621,10 +628,9 @@ def process_video_task(project_id: str, disk_url: str):
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
 
     except Exception as e:
-        tb = traceback.format_exc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
         projects_db.update_status(project_id, ProjectStatusEnum.ERROR,
-                                  error=f"{e}\n\nTraceback:\n{tb}")
+                                  error=str(e))
 
     finally:
         for path in (local_video_path, local_audio_path):
@@ -701,11 +707,10 @@ def process_uploaded_file_task(
             logger.warning("[%s] Не удалось автосохранить DOCX: %s", project_id[:8], e)
 
     except Exception as e:
-        tb = traceback.format_exc()
         project_errors.labels(stage="upload_task").inc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
         projects_db.update_status(project_id, ProjectStatusEnum.ERROR,
-                                  error=f"{e}\n\nTraceback:\n{tb}")
+                                  error=str(e))
 
     finally:
         active_projects.dec()
