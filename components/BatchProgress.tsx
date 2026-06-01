@@ -101,6 +101,8 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   const logEndRef = useRef<HTMLDivElement>(null);
   const prevBatchFilesRef = useRef<BatchFileInfo[]>([]);
   const pollFailCountRef = useRef(0);
+  const trackersRef = useRef<FileTracker[]>(trackers);
+  trackersRef.current = trackers;
 
   const addLog = useCallback((msg: string) => {
     const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -215,7 +217,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   useEffect(() => {
     if (state !== 'processing') return;
 
-    const projectIds = trackers
+    const projectIds = trackersRef.current
       .filter(t => t.projectId)
       .map(t => t.projectId!);
 
@@ -271,7 +273,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     poll();
     pollRef.current = setInterval(poll, 2000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [state, trackers, addLog]);
+  }, [state, addLog]);
 
   const handleDownload = useCallback(async () => {
     setIsDownloading(true);

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { CheckCircle2, Download, Edit3, ChevronDown, ChevronUp, ArrowLeft } from 'lucide-react';
 import { api } from '../services/api';
 
@@ -31,19 +31,22 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
   const [hasEdits, setHasEdits] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
 
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+
   useEffect(() => {
     const load = async () => {
       try {
         const data = await api.batchVerificationData(projectIds);
         setProjects(data.projects);
-      } catch (e: any) {
-        onError(e?.message || 'Ошибка загрузки данных верификации');
+      } catch (e: unknown) {
+        onErrorRef.current(e instanceof Error ? e.message : 'Ошибка загрузки данных верификации');
       } finally {
         setLoading(false);
       }
     };
     load();
-  }, [projectIds, onError]);
+  }, [projectIds]);
 
   const updateSpeaker = (projectId: string, speakerId: string, field: 'name' | 'abbr', value: string) => {
     setHasEdits(true);

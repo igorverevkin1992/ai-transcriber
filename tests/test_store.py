@@ -122,6 +122,23 @@ class TestProjectStorePersistence:
         s2 = ProjectStore(db_path=db_path)
         assert s2["p1"].get("progress_percent") is None
 
+    def test_status_restored_as_enum_after_reload(self, tmp_path):
+        """Recovery relies on status being a ProjectStatusEnum, not a bare str."""
+        from backend.models import ProjectStatusEnum
+
+        db_path = str(tmp_path / "persist.db")
+        s1 = ProjectStore(db_path=db_path)
+        s1.create("p1", {"id": "p1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 100.0})
+        del s1
+
+        s2 = ProjectStore(db_path=db_path)
+        assert s2["p1"]["status"] is ProjectStatusEnum.TRANSCRIBING
+        assert s2["p1"]["status"] in (
+            ProjectStatusEnum.DOWNLOADING,
+            ProjectStatusEnum.CONVERTING,
+            ProjectStatusEnum.TRANSCRIBING,
+        )
+
 
 class TestProjectStoreCleanup:
     def test_cleanup_old_removes_completed(self, store):

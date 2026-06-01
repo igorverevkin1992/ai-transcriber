@@ -13,6 +13,12 @@ services:
       - torch_cache:/home/transcriber/.cache/torch
     environment:
       - SQLITE_DB_PATH=/app/data/projects.db
+    deploy:
+      resources:
+        limits:
+          # Tune to host capacity and chosen Whisper model size.
+          memory: 8G
+          cpus: "4.0"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -38,6 +44,9 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
     deploy:
       resources:
+        limits:
+          # Tune to host capacity; GPU work also uses system RAM for audio/model loading.
+          memory: 12G
         reservations:
           devices:
             - driver: nvidia
@@ -60,7 +69,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - .:/app
+      - .:/app:ro
       - node_modules:/app/node_modules
     depends_on:
       backend:

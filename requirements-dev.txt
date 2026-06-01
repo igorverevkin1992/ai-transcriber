@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Testing & linting (not installed in production image)
+pytest
+httpx
+ruff

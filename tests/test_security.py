@@ -1,4 +1,14 @@
-from backend.security import is_private_ip, mask_url, validate_external_url
+from backend.security import ALLOWED_MIME_TYPES, is_private_ip, mask_url, validate_external_url
+
+
+class TestAllowedMimeTypes:
+    def test_octet_stream_not_allowed(self):
+        # Catch-all type must be rejected so unknown binaries can't bypass the check
+        assert "application/octet-stream" not in ALLOWED_MIME_TYPES
+
+    def test_common_media_allowed(self):
+        assert "audio/mpeg" in ALLOWED_MIME_TYPES
+        assert "video/mp4" in ALLOWED_MIME_TYPES
 
 
 class TestIsPrivateIp:

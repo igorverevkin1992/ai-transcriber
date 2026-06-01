@@ -73,4 +73,4 @@ ALLOWED_URL_HOSTS = {"yadi.sk", "disk.yandex.ru", "disk.yandex.com"}
 SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "projects.db")
 
 # --- CORS ---
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]

@@ -33,8 +33,9 @@ const App: React.FC = () => {
     }
   }, []);
 
+  const toastIdRef = useRef(0);
   const addToast = useCallback((type: 'error' | 'success', text: string) => {
-    const id = Date.now().toString();
+    const id = `toast-${toastIdRef.current++}`;
     setToasts(prev => [...prev, { id, type, text }]);
   }, []);
 

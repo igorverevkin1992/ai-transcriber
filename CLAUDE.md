@@ -50,8 +50,9 @@ docker compose --profile dev up   # dev: separate Vite dev server
 
 ## Testing
 ```bash
+pip install -r requirements-dev.txt   # pytest/httpx/ruff (not in prod image)
 pytest tests/ -v
-npx tsc --noEmit --skipLibCheck   # TS type check
+npx tsc --noEmit --skipLibCheck       # TS type check
 ```
 
 ## Architecture notes

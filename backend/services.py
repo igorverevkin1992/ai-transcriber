@@ -603,6 +603,9 @@ def process_video_task(project_id: str, disk_url: str):
     """Фоновая задача: скачивание -> конвертация -> распознавание с диаризацией."""
     local_video_path = TEMP_DIR / f"{project_id}_video"
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
+    projects_total.labels(engine="speechkit").inc()
+    active_projects.inc()
+    task_start = time.time()
 
     try:
         _cleanup_old_projects()
@@ -626,13 +629,16 @@ def process_video_task(project_id: str, disk_url: str):
         # 4. ОБРАБОТКА РЕЗУЛЬТАТА
         _process_recognition_result(project_id, segments, original_filename, local_video_path)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
+        transcribe_duration.labels(engine="speechkit").observe(time.time() - task_start)
 
     except Exception as e:
+        project_errors.labels(stage="video_task").inc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
         projects_db.update_status(project_id, ProjectStatusEnum.ERROR,
                                   error=str(e))
 
     finally:
+        active_projects.dec()
         for path in (local_video_path, local_audio_path):
             try:
                 if path.exists():
