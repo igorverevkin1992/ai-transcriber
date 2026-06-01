@@ -30,6 +30,11 @@ class TestRegexCleanup:
     def test_clean_text_unchanged(self):
         assert regex_cleanup("Привет, мир.") == "Привет, мир."
 
+    def test_fixes_hyphen_spacing(self):
+        assert regex_cleanup("что -то") == "Что-то"
+        assert regex_cleanup("какой -нибудь") == "Какой-нибудь"
+        assert regex_cleanup("из -за") == "Из-за"
+
     def test_multi_space_collapse(self):
         assert regex_cleanup("слово    другое") == "Слово другое"
 

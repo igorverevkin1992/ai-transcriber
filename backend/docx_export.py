@@ -2,11 +2,11 @@ import re
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
-from docx.shared import Cm, Pt
+from docx.shared import Cm, Mm, Pt
 
 from backend.utils import strip_extension
 
-PARENTHETICAL_RE = re.compile(r"(\([^)]*\))")
+PARENTHETICAL_RE = re.compile(r"(\((?:[^()]*|\([^()]*\))*\))")
 
 
 def _configure_paragraph(paragraph):
@@ -14,7 +14,6 @@ def _configure_paragraph(paragraph):
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     fmt = paragraph.paragraph_format
     fmt.space_after = Pt(0)
-    fmt.space_before = Pt(0)
     fmt.line_spacing_rule = WD_LINE_SPACING.SINGLE
     fmt.line_spacing = 1.0
 
@@ -55,6 +54,8 @@ def generate_docx(
     style.font.size = Pt(14)
 
     for section in doc.sections:
+        section.page_width = Mm(210)
+        section.page_height = Mm(297)
         section.top_margin = Cm(2)
         section.bottom_margin = Cm(2)
         section.left_margin = Cm(3)

@@ -4,6 +4,7 @@ import time
 from backend.config import GEMINI_API_KEY, logger
 from backend.metrics import gemini_calls
 
+HYPHEN_SPACE_RE = re.compile(r"(\w)\s+-\s*(\w)")
 FILLER_WORDS_RE = re.compile(
     r"\b(эээ|ээ|эм+|ммм+|хм+|ну вот|вот так вот|как бы(?! то ни было)|типа того|короче говоря)\b",
     re.IGNORECASE,
@@ -15,6 +16,7 @@ CAPITALIZE_RE = re.compile(r"([.!?])\s+([а-яa-z])")
 
 def regex_cleanup(text: str) -> str:
     """Базовая чистка текста: filler-слова, повторы, капитализация."""
+    text = HYPHEN_SPACE_RE.sub(r"\1-\2", text)
     text = FILLER_WORDS_RE.sub("", text)
     text = REPEATED_WORDS_RE.sub(r"\1", text)
     text = MULTI_SPACE_RE.sub(" ", text)
@@ -63,7 +65,8 @@ def gemini_polish(text: str) -> str:
         "3. НЕ меняй порядок слов, НЕ переформулируй, НЕ добавляй слова\n"
         "4. НЕ трогай имена собственные, числа, даты, аббревиатуры\n"
         "5. Сохрани разговорный стиль речи\n"
-        "6. Верни ТОЛЬКО текст, без комментариев\n\n"
+        "6. Убери пробелы вокруг дефисов внутри слов: «что -то» → «что-то»\n"
+        "7. Верни ТОЛЬКО текст, без комментариев\n\n"
         "Пример:\n"
         "Вход: Ну вот эээ мы значит пришли и типа начали работать\n"
         "Выход: Мы пришли и начали работать.\n\n"

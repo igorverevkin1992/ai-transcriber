@@ -124,7 +124,7 @@ async def export_docx(pid: str, req: ExportRequest, background_tasks: Background
     legend_exclude = _compute_legend_exclude(final_map)
     segments_override = None
     if req.edited_segments:
-        segments_override = [s.model_dump() for s in req.edited_segments]
+        segments_override = [s.model_dump() for s in req.edited_segments if s.text.strip()]
 
     output_path = str(TEMP_DIR / f"transcript_{pid}.docx")
     download_name = generate_docx(

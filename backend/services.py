@@ -279,7 +279,7 @@ def _transcribe_with_speechkit(project_id: str, audio_path) -> list[dict]:
                 if not alts:
                     continue
                 alt = alts[0]
-                text = alt.text
+                text = alt.text.strip()
                 words = list(alt.words)
                 if not words:
                     continue

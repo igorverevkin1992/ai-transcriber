@@ -1,6 +1,6 @@
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Cm, Pt
+from docx.shared import Cm, Mm, Pt
 
 from backend.docx_export import generate_docx
 
@@ -112,6 +112,35 @@ class TestGenerateDocx:
         out = tmp_path / "out.docx"
         name = generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
         assert name == "test_interview.docx"
+
+    def test_page_size_is_a4(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        section = doc.sections[0]
+        assert abs(section.page_width - Mm(210)) < 1000
+        assert abs(section.page_height - Mm(297)) < 1000
+
+    def test_space_before_not_forced_to_zero(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        for para in doc.paragraphs:
+            assert para.paragraph_format.space_before is None
+
+    def test_nested_parenthetical_fully_italic(self, tmp_path, sample_project):
+        sample_project["result"]["segments"] = [
+            {"timecode": "11:04:15:00", "speaker": "0",
+             "text": "(Технические моменты (перерыв).)"},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
+        doc = Document(str(out))
+        paren_paras = [p for p in doc.paragraphs if "Технические моменты" in p.text]
+        assert len(paren_paras) == 1
+        paren_runs = [r for r in paren_paras[0].runs if "Технические" in r.text]
+        assert len(paren_runs) == 1
+        assert paren_runs[0].italic
 
     def test_segments_override_replaces_original(self, tmp_path, sample_project):
         edited = [
