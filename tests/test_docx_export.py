@@ -128,6 +128,34 @@ class TestGenerateDocx:
         for para in doc.paragraphs:
             assert para.paragraph_format.space_before is None
 
+    def test_normal_style_keeps_11pt_default(self, tmp_path, sample_project):
+        # Human reference keeps the 11pt doc default (blank separator lines are
+        # 11pt); 14pt is applied only per run.
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        assert doc.styles["Normal"].font.size is None
+
+    def test_body_font_is_calibri(self, tmp_path, sample_project):
+        # Reference body font is Calibri; python-docx default theme is Cambria.
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        assert doc.styles["Normal"].font.name == "Calibri"
+
+    def test_parenthetical_trailing_period_is_italic(self, tmp_path, sample_project):
+        # Reference italicizes the whole "(...)." including the trailing dot.
+        sample_project["result"]["segments"] = [
+            {"timecode": "11:04:15:00", "speaker": "0", "text": "(Технические моменты)."},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
+        doc = Document(str(out))
+        para = next(p for p in doc.paragraphs if "Технические" in p.text)
+        italic_run = next(r for r in para.runs if "Технические" in r.text)
+        assert italic_run.italic
+        assert italic_run.text.endswith(").")
+
     def test_nested_parenthetical_fully_italic(self, tmp_path, sample_project):
         sample_project["result"]["segments"] = [
             {"timecode": "11:04:15:00", "speaker": "0",

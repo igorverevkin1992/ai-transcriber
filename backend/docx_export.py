@@ -6,7 +6,9 @@ from docx.shared import Cm, Mm, Pt
 
 from backend.utils import strip_extension
 
-PARENTHETICAL_RE = re.compile(r"(\((?:[^()]*|\([^()]*\))*\))")
+# Parenthetical remark, optionally followed by sentence punctuation that the
+# human reference also italicizes (e.g. the whole "(...)." including the dot).
+PARENTHETICAL_RE = re.compile("(\\((?:[^()]*|\\([^()]*\\))*\\)[.!?…]*)")
 
 
 def _configure_paragraph(paragraph):
@@ -35,7 +37,7 @@ def _add_text_with_italics(paragraph, text: str):
     for part in parts:
         if not part:
             continue
-        is_parenthetical = part.startswith("(") and part.endswith(")")
+        is_parenthetical = part.startswith("(") and ")" in part
         _add_run(paragraph, part, italic=is_parenthetical)
 
 
@@ -50,8 +52,12 @@ def generate_docx(
     """Генерирует DOCX с расшифровкой в формате, идентичном ручному."""
     doc = Document()
 
-    style = doc.styles["Normal"]
-    style.font.size = Pt(14)
+    # The human reference renders in Calibri (theme minor font), while
+    # python-docx's default template resolves the minor font to Cambria.
+    # Pin Normal to Calibri so body text and blank lines match the reference.
+    # We deliberately do NOT set a Normal size: the 11pt document default is
+    # kept (blank separator lines are 11pt); 14pt is applied only per run.
+    doc.styles["Normal"].font.name = "Calibri"
 
     for section in doc.sections:
         section.page_width = Mm(210)
