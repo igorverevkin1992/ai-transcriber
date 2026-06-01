@@ -44,6 +44,26 @@ _task_executor = ThreadPoolExecutor(
     max_workers=MAX_CONCURRENT_TASKS,
     thread_name_prefix="transcribe",
 )
+_executor_lock = threading.Lock()
+_executor_alive = True
+
+
+def _ensure_executor() -> ThreadPoolExecutor:
+    """Return a live executor, recreating it if a previous shutdown closed it.
+
+    Keeps the app (and tests that run the lifespan more than once) able to
+    submit tasks after a shutdown instead of raising 'cannot schedule new
+    futures after shutdown'.
+    """
+    global _task_executor, _executor_alive
+    with _executor_lock:
+        if not _executor_alive:
+            _task_executor = ThreadPoolExecutor(
+                max_workers=MAX_CONCURRENT_TASKS,
+                thread_name_prefix="transcribe",
+            )
+            _executor_alive = True
+        return _task_executor
 
 PROJECT_TTL_SECONDS = 6 * 3600  # 6 hours
 
@@ -813,7 +833,7 @@ def submit_task(func, *args, project_id: str | None = None, **kwargs):
             if project_id:
                 _maybe_retry(project_id)
 
-    _task_executor.submit(_wrapper)
+    _ensure_executor().submit(_wrapper)
 
 
 def cancel_project(project_id: str) -> bool:
@@ -859,7 +879,10 @@ def shutdown_executor():
         if proj.get("status") in in_flight:
             projects_db.update_status(pid, ProjectStatusEnum.QUEUED)
             logger.info("[%s] Сохранён как QUEUED для восстановления", pid[:8])
-    _task_executor.shutdown(wait=False, cancel_futures=True)
+    global _executor_alive
+    with _executor_lock:
+        _task_executor.shutdown(wait=False, cancel_futures=True)
+        _executor_alive = False
 
 
 def auto_export_project(project_id: str, output_path: str) -> str | None:
