@@ -584,7 +584,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
             <Activity className="w-3.5 h-3.5 text-green-400" />
             <span className="text-sm font-medium text-gray-300">Журнал</span>
             {state !== 'done' && (
-              <span className="ml-auto flex h-2 w-2">
+              <span className="ml-auto relative flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-green-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
               </span>

@@ -116,10 +116,11 @@ export const SpeakerMatrix: React.FC<Props> = ({
               {/* Swap Button Connector */}
               {isNextAvailable && nextSpeaker && (
                 <div className="flex justify-center -my-3 relative z-10">
-                  <button 
+                  <button
                     onClick={() => onSwap(speaker.tag_id, nextSpeaker.tag_id)}
                     className="bg-white border border-gray-200 p-1.5 rounded-full shadow-sm hover:bg-gray-50 hover:text-blue-600 hover:border-blue-300 transition-all group"
                     title="Поменять местами"
+                    aria-label="Поменять спикеров местами"
                   >
                     <ArrowUpDown className="w-4 h-4 text-gray-400 group-hover:text-blue-500" />
                   </button>
