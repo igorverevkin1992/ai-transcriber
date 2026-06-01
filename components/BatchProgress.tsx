@@ -239,25 +239,23 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         const status = await api.batchStatus(projectIds);
         pollFailCountRef.current = 0;
         setPollError(null);
-        setBatchFiles(prev => {
-          // Detect status changes and log them
-          const prevMap = new Map(prevBatchFilesRef.current.map(f => [f.id, f]));
-          for (const file of status.files) {
-            const prevFile = prevMap.get(file.id);
-            if (prevFile && prevFile.status !== file.status) {
-              if (file.status === 'completed') {
-                addLog(`✓ Обработан: ${file.filename}`);
-              } else if (file.status === 'error') {
-                addLog(`✗ Ошибка: ${file.filename} — ${file.error || 'неизвестная ошибка'}`);
-              } else {
-                const label = STEP_LABELS[file.status] || file.status_label;
-                addLog(`${file.filename} → ${label}`);
-              }
+        // Detect status changes and log them (outside the state updater)
+        const prevMap = new Map(prevBatchFilesRef.current.map(f => [f.id, f]));
+        for (const file of status.files) {
+          const prevFile = prevMap.get(file.id);
+          if (prevFile && prevFile.status !== file.status) {
+            if (file.status === 'completed') {
+              addLog(`✓ Обработан: ${file.filename}`);
+            } else if (file.status === 'error') {
+              addLog(`✗ Ошибка: ${file.filename} — ${file.error || 'неизвестная ошибка'}`);
+            } else {
+              const label = STEP_LABELS[file.status] || file.status_label;
+              addLog(`${file.filename} → ${label}`);
             }
           }
-          prevBatchFilesRef.current = status.files;
-          return status.files;
-        });
+        }
+        prevBatchFilesRef.current = status.files;
+        setBatchFiles(status.files);
         setCompletedCount(status.completed);
         setErrorCount(status.errors);
 
