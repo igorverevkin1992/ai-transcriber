@@ -3,13 +3,12 @@ import os
 import time
 import uuid
 import zipfile
-from io import BytesIO
 from pathlib import Path
 from typing import List
 
 import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -44,6 +43,14 @@ router = APIRouter(prefix="/api/v1")
 limiter = Limiter(key_func=get_remote_address)
 
 _TECH_SPEAKER_NAMES = {"АЗК", "ГЗК"}
+
+
+def _safe_unlink(path: str) -> None:
+    """Удаляет файл, игнорируя ошибки (для background-cleanup ZIP-архивов)."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def _compute_legend_exclude(name_map: dict[str, str]) -> set[str]:
@@ -291,7 +298,11 @@ async def batch_status(ids: str = Query(..., description="ID проектов ч
 
 @router.get("/batch/download")
 @limiter.limit("10/minute")
-async def batch_download(request: Request, ids: str = Query(..., description="ID проектов через запятую")):
+async def batch_download(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    ids: str = Query(..., description="ID проектов через запятую"),
+):
     """Авто-экспортирует все завершённые проекты и возвращает ZIP-архив."""
     project_ids = [i.strip() for i in ids.split(",") if i.strip()]
 
@@ -300,10 +311,11 @@ async def batch_download(request: Request, ids: str = Query(..., description="ID
     if len(project_ids) > 200:
         raise HTTPException(status_code=400, detail="Максимум 200 проектов за запрос")
 
-    zip_buffer = BytesIO()
+    # Stream the archive to a temp file instead of holding it all in memory
+    zip_path = TEMP_DIR / f"batch_{uuid.uuid4().hex}.zip"
     exported_count = 0
 
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
         for pid in project_ids:
             proj = projects_db.get(pid)
             if not proj or proj.get("status") != ProjectStatusEnum.COMPLETED:
@@ -323,37 +335,39 @@ async def batch_download(request: Request, ids: str = Query(..., description="ID
                     pass
 
     if exported_count == 0:
+        try:
+            zip_path.unlink()
+        except OSError:
+            pass
         raise HTTPException(status_code=400, detail="Нет завершённых проектов для экспорта")
 
-    zip_buffer.seek(0)
     logger.info("Пакетный экспорт: %d файлов в ZIP", exported_count)
-
-    return StreamingResponse(
-        zip_buffer,
+    background_tasks.add_task(_safe_unlink, str(zip_path))
+    return FileResponse(
+        path=str(zip_path),
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
+        filename="transcripts.zip",
     )
 
 
 @router.get("/batch/download-saved")
-async def download_saved():
+async def download_saved(background_tasks: BackgroundTasks):
     """Скачивает все автосохранённые DOCX из папки completed_docx/ как ZIP."""
     docx_files = list(OUTPUT_DIR.glob("*.docx"))
     if not docx_files:
         raise HTTPException(status_code=400, detail="Нет сохранённых файлов в completed_docx/")
 
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    zip_path = TEMP_DIR / f"saved_{uuid.uuid4().hex}.zip"
+    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
         for f in docx_files:
             zf.write(str(f), f.name)
 
-    zip_buffer.seek(0)
     logger.info("Скачивание сохранённых файлов: %d DOCX", len(docx_files))
-
-    return StreamingResponse(
-        zip_buffer,
+    background_tasks.add_task(_safe_unlink, str(zip_path))
+    return FileResponse(
+        path=str(zip_path),
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
+        filename="transcripts.zip",
     )
 
 
@@ -406,17 +420,19 @@ async def batch_verification_data(ids: str = Query(..., description="ID прое
 
 @router.post("/batch/export-with-mappings")
 @limiter.limit("10/minute")
-async def batch_export_with_mappings(request: Request, body: BatchExportRequest):
+async def batch_export_with_mappings(
+    request: Request, body: BatchExportRequest, background_tasks: BackgroundTasks
+):
     """Экспортирует все проекты с пользовательскими маппингами спикеров."""
     project_mappings = body.projects
 
     if not project_mappings:
         raise HTTPException(status_code=400, detail="Не указаны проекты")
 
-    zip_buffer = BytesIO()
+    zip_path = TEMP_DIR / f"verified_{uuid.uuid4().hex}.zip"
     exported_count = 0
 
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
         for pm in project_mappings:
             pid = pm.project_id
             mappings = pm.mappings
@@ -443,15 +459,18 @@ async def batch_export_with_mappings(request: Request, body: BatchExportRequest)
                     pass
 
     if exported_count == 0:
+        try:
+            zip_path.unlink()
+        except OSError:
+            pass
         raise HTTPException(status_code=400, detail="Нет проектов для экспорта")
 
-    zip_buffer.seek(0)
     logger.info("Верифицированный экспорт: %d файлов в ZIP", exported_count)
-
-    return StreamingResponse(
-        zip_buffer,
+    background_tasks.add_task(_safe_unlink, str(zip_path))
+    return FileResponse(
+        path=str(zip_path),
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
+        filename="transcripts.zip",
     )
 
 
