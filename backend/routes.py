@@ -297,6 +297,8 @@ async def batch_download(request: Request, ids: str = Query(..., description="ID
 
     if not project_ids:
         raise HTTPException(status_code=400, detail="Не указаны ID проектов")
+    if len(project_ids) > 200:
+        raise HTTPException(status_code=400, detail="Максимум 200 проектов за запрос")
 
     zip_buffer = BytesIO()
     exported_count = 0

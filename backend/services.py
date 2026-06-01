@@ -2,7 +2,6 @@ import os
 import shutil
 import threading
 import time
-import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -766,11 +765,14 @@ def _maybe_retry(project_id: str):
     func = _TASK_REGISTRY[task_func_name]
     task_kwargs = proj.get("task_kwargs", {})
 
-    def _delayed_retry():
-        time.sleep(delay)
-        submit_task(func, *task_args, project_id=project_id, **task_kwargs)
-
-    threading.Thread(target=_delayed_retry, daemon=True).start()
+    # threading.Timer holds a single sleeping thread per retry that exits
+    # right after firing — cheaper than a raw Thread doing time.sleep.
+    timer = threading.Timer(
+        delay, submit_task, args=(func, *task_args),
+        kwargs={"project_id": project_id, **task_kwargs},
+    )
+    timer.daemon = True
+    timer.start()
 
 
 MIN_RAM_MB = int(os.getenv("MIN_RAM_MB", "500"))

@@ -36,6 +36,10 @@ class TestFramesToTc:
         assert frames_to_tc(24) == "00:00:00:24"
         assert frames_to_tc(25) == "00:00:01:00"
 
+    def test_negative_clamped_to_zero(self):
+        assert frames_to_tc(-1) == "00:00:00:00"
+        assert frames_to_tc(-1000) == "00:00:00:00"
+
 
 class TestTcToFrames:
     def test_zero(self):
@@ -149,6 +153,13 @@ class TestSanitizeFilename:
 
     def test_null_byte(self):
         assert sanitize_filename("file\x00.mp4") == "file.mp4"
+
+    def test_strips_zero_width_and_bidi(self):
+        # zero-width space + right-to-left override must be removed
+        assert sanitize_filename("a​b‮c.mp4") == "abc.mp4"
+
+    def test_strips_control_chars(self):
+        assert sanitize_filename("na\x07me\x1f.mp4") == "name.mp4"
 
     def test_leading_dots_stripped(self):
         assert sanitize_filename("...hidden") == "hidden"

@@ -5,6 +5,11 @@ from urllib.parse import urlparse
 
 from backend.config import ALLOWED_EXTENSIONS, ALLOWED_URL_HOSTS, logger
 
+# Control chars (C0/C1), zero-width and bidi-override chars used for filename spoofing
+_FILENAME_BAD_CHARS_RE = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\ufeff]"
+)
+
 FILENAME_STOP_WORDS = {
     "лайф", "лайфы", "интер", "синхрон", "снх", "бз",
     "f8", "wav", "mp3", "mp4", "mov", "wmv", "mxf",
@@ -44,6 +49,8 @@ def parse_filename_metadata(filename: str) -> dict:
 
 def frames_to_tc(frames: int, fps: int = 25) -> str:
     """Конвертирует кадры в SMPTE таймкод."""
+    if frames < 0:
+        frames = 0
     h = frames // (fps * 3600)
     rem = frames % (fps * 3600)
     m = rem // (fps * 60)
@@ -75,7 +82,8 @@ def sanitize_filename(filename: str, base_dir: str | None = None) -> str:
     import os
     name = os.path.basename(filename)
     name = name.replace("\\", "").replace("/", "")
-    name = name.replace("\x00", "")
+    # Strip control, zero-width and bidi-override chars (filename spoofing)
+    name = _FILENAME_BAD_CHARS_RE.sub("", name)
     name = name.strip(". ")
     if not name:
         return "unnamed_file"
