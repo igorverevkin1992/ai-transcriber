@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { CheckCircle2, Download, Edit3, ChevronDown, ChevronUp, ArrowLeft } from 'lucide-react';
 import { api } from '../services/api';
+import { downloadBlob } from '../services/download';
 
 interface SpeakerData {
   id: string;
@@ -33,6 +34,16 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
 
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+
+  // Allow Escape to dismiss the confirmation modal
+  useEffect(() => {
+    if (!showConfirm) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowConfirm(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showConfirm]);
 
   useEffect(() => {
     const load = async () => {
@@ -82,16 +93,9 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
       }));
 
       const blob = await api.batchExportWithMappings(exportData);
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'transcripts.zip';
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-    } catch (e: any) {
-      onError(e?.message || 'Ошибка экспорта');
+      downloadBlob(blob, 'transcripts.zip');
+    } catch (e: unknown) {
+      onError(e instanceof Error ? e.message : 'Ошибка экспорта');
     } finally {
       setIsExporting(false);
     }

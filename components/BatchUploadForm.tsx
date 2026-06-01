@@ -245,7 +245,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
               {/* File list (scrollable) */}
               <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
                 {files.map((file, i) => (
-                  <div key={i} className="flex items-center justify-between px-3 py-2 hover:bg-gray-50">
+                  <div key={`${file.name}_${file.size}_${file.lastModified}`} className="flex items-center justify-between px-3 py-2 hover:bg-gray-50">
                     <div className="flex-1 min-w-0">
                       <p className="text-sm text-gray-700 truncate">{file.name}</p>
                       <p className="text-xs text-gray-400">{formatSize(file.size)}</p>

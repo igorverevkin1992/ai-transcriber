@@ -9,6 +9,7 @@ import { ToastContainer, ToastMessage } from './components/Toast';
 import { ProcessingStatus as StatusType, ProjectData } from './types';
 import { api } from './services/api';
 import { loadBatchSession, clearBatchSession, BatchSession } from './services/batchSession';
+import { downloadBlob } from './services/download';
 import { CheckCircle2, Download, RefreshCw } from 'lucide-react';
 
 const App: React.FC = () => {
@@ -104,17 +105,10 @@ const App: React.FC = () => {
     setIsDownloadingSaved(true);
     try {
       const blob = await api.batchDownloadSaved();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'transcripts.zip';
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
+      downloadBlob(blob, 'transcripts.zip');
       addToast('success', 'Архив скачан');
-    } catch (e: any) {
-      addToast('error', e?.message || 'Ошибка скачивания');
+    } catch (e: unknown) {
+      addToast('error', e instanceof Error ? e.message : 'Ошибка скачивания');
     } finally {
       setIsDownloadingSaved(false);
     }

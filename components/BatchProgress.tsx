@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 import { saveBatchSession, clearBatchSession } from '../services/batchSession';
+import { downloadBlob } from '../services/download';
 import { BatchFileInfo } from '../types';
 
 interface Props {
@@ -99,6 +100,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   const pollRef = useRef<ReturnType<typeof setInterval>>();
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const logEndRef = useRef<HTMLDivElement>(null);
+  const logScrollRef = useRef<HTMLDivElement>(null);
   const prevBatchFilesRef = useRef<BatchFileInfo[]>([]);
   const pollFailCountRef = useRef(0);
   const trackersRef = useRef<FileTracker[]>(trackers);
@@ -130,9 +132,15 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     };
   }, []);
 
-  // Auto-scroll log
+  // Auto-scroll log only when the user is already near the bottom,
+  // so manual scroll-up to read earlier entries isn't interrupted.
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = logScrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    if (nearBottom) {
+      logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [logMessages]);
 
   // Phase 1: Preload Whisper model (if needed), then upload files to server
@@ -283,16 +291,9 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         .map(t => t.projectId!);
 
       const blob = await api.batchDownload(projectIds);
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'transcripts.zip';
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-    } catch (e: any) {
-      onError(e?.message || 'Ошибка скачивания архива');
+      downloadBlob(blob, 'transcripts.zip');
+    } catch (e: unknown) {
+      onError(e instanceof Error ? e.message : 'Ошибка скачивания архива');
     } finally {
       setIsDownloading(false);
     }
@@ -329,26 +330,27 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   );
 
   // Build unified file status list
-  const fileStatuses = trackers.map(t => {
+  const fileStatuses = trackers.map((t, idx) => {
+    const key = t.projectId || `${t.file.name}_${idx}`;
     if (t.uploadError) {
-      return { name: t.file.name, status: 'error', label: 'Ошибка загрузки', error: t.uploadError, step: -1 };
+      return { key, name: t.file.name, status: 'error', label: 'Ошибка загрузки', error: t.uploadError, step: -1 };
     }
     if (!t.projectId) {
       if (state === 'uploading') {
-        return { name: t.file.name, status: 'waiting', label: 'Ожидание...', step: 0 };
+        return { key, name: t.file.name, status: 'waiting', label: 'Ожидание...', step: 0 };
       }
-      return { name: t.file.name, status: 'error', label: 'Не загружен', step: -1 };
+      return { key, name: t.file.name, status: 'error', label: 'Не загружен', step: -1 };
     }
     const batchFile = batchFiles.find(bf => bf.id === t.projectId);
     if (batchFile) {
       const step = STEP_ORDER[batchFile.status] ?? 0;
       const label = STEP_LABELS[batchFile.status] || batchFile.status_label;
-      return { name: t.file.name, status: batchFile.status, label, error: batchFile.error, step };
+      return { key, name: t.file.name, status: batchFile.status, label, error: batchFile.error, step };
     }
     if (state === 'uploading') {
-      return { name: t.file.name, status: 'uploaded', label: 'Загружен на сервер', step: 0 };
+      return { key, name: t.file.name, status: 'uploaded', label: 'Загружен на сервер', step: 0 };
     }
-    return { name: t.file.name, status: 'queued', label: 'В очереди', step: 0 };
+    return { key, name: t.file.name, status: 'queued', label: 'В очереди', step: 0 };
   });
 
   return (
@@ -525,8 +527,8 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
             </div>
           </div>
           <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
-            {fileStatuses.map((fs, i) => (
-              <div key={i} className={`flex items-center px-4 py-2 ${
+            {fileStatuses.map((fs) => (
+              <div key={fs.key} className={`flex items-center px-4 py-2 ${
                 fs.status === 'completed' ? 'bg-green-50/50' :
                 fs.status === 'error' ? 'bg-red-50/50' : ''
               }`}>
@@ -588,7 +590,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
               </span>
             )}
           </div>
-          <div className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-relaxed">
+          <div ref={logScrollRef} className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-relaxed">
             {logMessages.length === 0 ? (
               <p className="text-gray-600">Ожидание...</p>
             ) : (

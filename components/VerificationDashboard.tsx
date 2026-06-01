@@ -3,6 +3,7 @@ import { ProjectData, SpeakerInfo, TranscriptSegment } from '../types';
 import { SpeakerMatrix } from './SpeakerMatrix';
 import { TranscriptPreview } from './TranscriptPreview';
 import { api } from '../services/api';
+import { downloadBlob } from '../services/download';
 
 interface Props {
   data: ProjectData;
@@ -99,19 +100,10 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
       }));
 
       const blob = await api.confirmMapping(data.id, mapping, editedSegments);
-
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = data.original_filename.replace(/\.[^.]+$/, '.docx');
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-
+      downloadBlob(blob, data.original_filename.replace(/\.[^.]+$/, '.docx'));
       onFinish();
-    } catch (e: any) {
-      onError(e?.message || 'Ошибка генерации документа');
+    } catch (e: unknown) {
+      onError(e instanceof Error ? e.message : 'Ошибка генерации документа');
     } finally {
       setIsDownloading(false);
     }
