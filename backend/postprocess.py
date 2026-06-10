@@ -10,13 +10,36 @@ from backend.metrics import gemini_calls
 HYPHEN_SPACE_RE = re.compile(r"(\w) +-(\w)")
 # Эталонные стенограммы почти дословные: «ну», «вот», «как бы», «типа»,
 # «короче» в них СОХРАНЯЮТСЯ. Удаляем только нечленораздельные звуки,
-# которые человек никогда не переносит в текст.
-FILLER_WORDS_RE = re.compile(r"\b(э{2,}|эм+|ммм+|хм+)\b", re.IGNORECASE)
+# которые человек никогда не переносит в текст. Дефисные варианты («э-э»,
+# «м-м-м») — частая запись мычания у Whisper. «Хм» НЕ удаляем: эталон ф5
+# сохраняет «Хм…» как осмысленную реплику.
+FILLER_WORDS_RE = re.compile(r"\b(э(?:-э)+|м(?:-м)+|а(?:-а)+|э{2,}|эм+|ммм+)\b", re.IGNORECASE)
 REPEATED_WORDS_RE = re.compile(r"\b([а-яА-ЯёЁa-zA-Z]+)(?:\s+\1\b){2,}", re.IGNORECASE)
-# Em/en-dash без пробелов (или с одним) → " – "; только Unicode-тире, не дефис
-SPACELESS_DASH_RE = re.compile(r"(\w)[—–](\w)")
+# Запятая, за которой идёт другой знак, — артефакт удаления филлера
+# («ну, эээ, давай» → «ну,, давай»). В эталонах ",," и ",." — 0 случаев.
+DUP_PUNCT_RE = re.compile(r",\s*([,.;:!?])")
+# Em/en-dash без пробелов между БУКВАМИ → " – ". Между цифрами не трогаем:
+# диапазоны в эталонах пишутся дефисом без пробелов («49-50», «2002-2003»).
+SPACELESS_DASH_RE = re.compile(r"([а-яА-ЯёЁa-zA-Z])[—–]([а-яА-ЯёЁa-zA-Z])")
+# Цифровой диапазон через en/em-тире (с пробелами или без) → дефис
+DIGIT_RANGE_RE = re.compile(r"(\d) ?[—–] ?(\d)")
 # Дефис(ы) или en/em-тире с пробелами вокруг → " – " (en-dash, 146:0 в эталонах)
 DASH_RE = re.compile(r"(?<=\S)[ \t]+(?:-+|[—–])[ \t]+(?=\S)")
+
+# Эталоны НИКОГДА не используют «т.е./т.д./т.п.» — всегда полные слова
+# (цензус: 0 случаев на 4 файла). Точку не сохраняем: пунктуацию по смыслу
+# восстанавливает Gemini-полировка.
+_ABBR_EXPANSIONS = [
+    (re.compile(r"\b[тТ]\.\s?е\."), "то есть"),
+    (re.compile(r"\b[тТ]\.\s?д\."), "так далее"),
+    (re.compile(r"\b[тТ]\.\s?п\."), "тому подобное"),
+]
+
+
+def _expand_abbreviations(text: str) -> str:
+    for rx, repl in _ABBR_EXPANSIONS:
+        text = rx.sub(lambda m, r=repl: r.capitalize() if m.group(0)[0] == "Т" else r, text)
+    return text
 # Эталоны используют "..." (451 случай), а не "…" (74, один файл)
 ELLIPSIS_CHAR_RE = re.compile(r"…")
 MANY_DOTS_RE = re.compile(r"\.{4,}")
@@ -29,13 +52,21 @@ MULTI_SPACE_RE = re.compile(r" {2,}")
 # которого эталоны продолжают со строчной («Мне это было... это была...»)
 _CAPITALIZE_BASE_RE = re.compile(r"(?<!\.)([.!?])\s+([а-яa-z])")
 
+# Сокращения, после точки которых НЕ начинается новое предложение.
+# Эталоны всегда капитализируют после «да.», «нет.», «так.», «вот.»
+# (89 из 90 случаев в цензусе), поэтому защищаем только однобуквенные
+# («г. москва», инициалы) и явный белый список единиц измерения.
+_NO_CAPITALIZE_AFTER = {"тыс", "руб", "млн", "млрд", "см", "кг", "км", "гг", "др", "пр", "напр", "ок"}
+
 
 def _capitalize_after_sentence(m: re.Match) -> str:
     if m.group(1) == ".":
         before = m.string[:m.start()]
         word_match = re.search(r"(\w+)$", before)
-        if word_match and len(word_match.group(1)) <= 4 and word_match.group(1).islower():
-            return m.group(0)
+        if word_match:
+            word = word_match.group(1)
+            if word.islower() and (len(word) == 1 or word in _NO_CAPITALIZE_AFTER):
+                return m.group(0)
     return m.group(1) + " " + m.group(2).upper()
 
 
@@ -47,9 +78,16 @@ def regex_cleanup(text: str) -> str:
     backend.turns при склейке.
     """
     text = HYPHEN_SPACE_RE.sub(r"\1-\2", text)
+    text = _expand_abbreviations(text)
     text = FILLER_WORDS_RE.sub("", text)
     text = REPEATED_WORDS_RE.sub(r"\1", text)
+    # Дубли пунктуации после удаления филлеров; до 2 проходов («, , ,»)
+    for _ in range(2):
+        text, n = DUP_PUNCT_RE.subn(r"\1", text)
+        if not n:
+            break
     text = SPACELESS_DASH_RE.sub(r"\1 – \2", text)
+    text = DIGIT_RANGE_RE.sub(r"\1-\2", text)
     text = DASH_RE.sub(" – ", text)
     text = ELLIPSIS_CHAR_RE.sub("...", text)
     text = MANY_DOTS_RE.sub("...", text)
