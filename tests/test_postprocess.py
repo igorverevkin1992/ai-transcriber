@@ -5,7 +5,16 @@ class TestRegexCleanup:
     def test_removes_hesitation_sounds(self):
         assert regex_cleanup("эээ давай") == "давай"
         assert regex_cleanup("мммм да") == "да"
-        assert regex_cleanup("хм понятно") == "понятно"
+
+    def test_removes_hyphenated_hesitations(self):
+        # Whisper часто пишет мычание через дефис: «э-э», «м-м-м»
+        assert regex_cleanup("э-э, ну вот") == "ну вот"
+        assert regex_cleanup("м-м-м, наверное") == "наверное"
+        assert regex_cleanup("а-а-а, понял") == "понял"
+
+    def test_keeps_hm_as_meaningful_reply(self):
+        # Эталон ф5 сохраняет «Хм…» как осмысленную реплику
+        assert regex_cleanup("хм понятно") == "хм понятно"
 
     def test_preserves_discourse_words(self):
         # Эталонные стенограммы почти дословные: ну/вот/как бы/короче сохраняются
@@ -33,13 +42,34 @@ class TestRegexCleanup:
             "Мне это было... это была другая история"
 
     def test_no_capitalize_after_abbreviation(self):
-        assert regex_cleanup("т.е. мы поехали") == "т.е. мы поехали"
-        assert regex_cleanup("и т.д. потом") == "и т.д. потом"
-        assert regex_cleanup("и т.п. далее") == "и т.п. далее"
+        # Однобуквенные сокращения и единицы измерения — строчная сохраняется
         assert regex_cleanup("г. москву") == "г. москву"
+        assert regex_cleanup("5 тыс. рублей в месяц") == "5 тыс. рублей в месяц"
+        assert regex_cleanup("в 90-х гг. началось") == "в 90-х гг. началось"
+
+    def test_capitalize_after_short_words(self):
+        # Эталоны: после «да.», «нет.», «так.», «вот.» — всегда заглавная (89/90)
+        assert regex_cleanup("да. потом мы поехали") == "да. Потом мы поехали"
+        assert regex_cleanup("нет. но мы решили") == "нет. Но мы решили"
+        assert regex_cleanup("так. и вот тогда") == "так. И вот тогда"
+        assert regex_cleanup("вот. и началось") == "вот. И началось"
+
+    def test_abbreviations_expanded(self):
+        # Эталоны никогда не пишут «т.е./т.д./т.п.» — всегда полные слова
+        assert regex_cleanup("т.е. мы поехали") == "то есть мы поехали"
+        assert regex_cleanup("Т.е. мы поехали") == "То есть мы поехали"
+        assert regex_cleanup("вещи и т.д. собрали") == "вещи и так далее собрали"
+        assert regex_cleanup("вещи и т.п. собрали") == "вещи и тому подобное собрали"
+        assert regex_cleanup("т. е. мы") == "то есть мы"
 
     def test_number_repetition_preserved(self):
         assert regex_cleanup("2024 2024 2024 год") == "2024 2024 2024 год"
+
+    def test_no_double_punctuation_after_filler_removal(self):
+        # В эталонах «,,» и «,.» — 0 случаев
+        assert regex_cleanup("ну, эээ, давай") == "ну, давай"
+        assert regex_cleanup("я думаю, эээ. что мы") == "я думаю. Что мы"
+        assert regex_cleanup("слушай, эээ, ммм, погоди") == "слушай, погоди"
 
     def test_preserves_first_letter_case(self):
         # ASR-сегмент может начинаться с середины предложения; заглавную букву
@@ -109,6 +139,13 @@ class TestTypography:
     def test_spaceless_em_dash_normalized(self):
         assert regex_cleanup("слово—другое") == "слово – другое"
         assert regex_cleanup("слово–другое") == "слово – другое"
+
+    def test_digit_ranges_become_hyphen(self):
+        # Эталоны: диапазоны только дефисом без пробелов («49-50», «2002-2003»)
+        assert regex_cleanup("1941–1945 годы") == "1941-1945 годы"
+        assert regex_cleanup("2002—2003 год") == "2002-2003 год"
+        assert regex_cleanup("20 – 30 лет") == "20-30 лет"
+        assert regex_cleanup("песен 20-25 за вечер") == "песен 20-25 за вечер"
 
     def test_spaceless_hyphen_not_dashed(self):
         assert regex_cleanup("как-то раз") == "как-то раз"

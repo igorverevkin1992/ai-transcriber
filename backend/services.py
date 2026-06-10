@@ -38,6 +38,7 @@ from backend.store import ProjectStore
 from backend.turns import build_turns
 from backend.utils import (
     detect_fps,
+    detect_start_timecode,
     frames_to_tc,
     parse_filename_metadata,
     strip_extension,
@@ -590,6 +591,19 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         fps = 25
         logger.warning("[%s] Видеофайл не найден для определения FPS, используется 25", project_id[:8])
 
+    # Стартовый таймкод: явный TC в имени файла приоритетнее; иначе —
+    # встроенный SMPTE-таймкод контейнера (эталоны начинаются именно с него).
+    if meta["start_tc"] == "00:00:00:00" and video_path.exists():
+        embedded_tc = detect_start_timecode(str(video_path))
+        if embedded_tc:
+            meta["start_tc"] = embedded_tc
+            logger.info("[%s] Стартовый таймкод из контейнера: %s", project_id[:8], embedded_tc)
+        else:
+            logger.warning(
+                "[%s] Стартовый таймкод не найден ни в имени файла, ни в контейнере — отсчёт с 00:00:00:00",
+                project_id[:8],
+            )
+
     speaker_durations: dict[str, float] = {}
     start_frames = tc_to_frames(meta["start_tc"], fps)
 
@@ -976,7 +990,7 @@ def shutdown_executor():
 def auto_export_project(project_id: str, output_path: str) -> str | None:
     """Автоматически экспортирует проект в DOCX используя имена спикеров из метаданных файла.
     Возвращает имя файла для скачивания или None при ошибке."""
-    from backend.docx_export import generate_docx
+    from backend.docx_export import generate_docx, is_legend_excluded_name
 
     proj = projects_db.get(project_id)
     if not proj or "result" not in proj:
@@ -986,13 +1000,12 @@ def auto_export_project(project_id: str, output_path: str) -> str | None:
     final_map = {}
     abbr_map = {}
 
-    _TECH_SPEAKER_NAMES = {"АЗК", "ГЗК"}
     legend_exclude: set[str] = set()
 
     for speaker_id, info in speakers.items():
         name = info.get("suggested_name", f"Спикер {speaker_id}")
         final_map[speaker_id] = name
-        if name.strip().upper() in _TECH_SPEAKER_NAMES:
+        if is_legend_excluded_name(name):
             legend_exclude.add(speaker_id)
 
     abbr_map = _compute_smart_abbreviations(final_map)
