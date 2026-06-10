@@ -43,3 +43,54 @@ class TestComputeSmartAbbreviations:
         result = _compute_smart_abbreviations({"0": "ёлкина Анна"})
         # ё uppercase should work
         assert result["0"] in ("Ё", "ё".upper())
+
+
+class TestHallucinationFilter:
+    def _seg(self, text):
+        return {"text": text, "channel_tag": 0, "start_ms": 0, "end_ms": 1000, "words": []}
+
+    def test_known_hallucinations_dropped(self):
+        from backend.services import _is_hallucination
+        assert _is_hallucination("Субтитры сделал DimaTorzok")
+        assert _is_hallucination("Редактор субтитров А.Семкин")
+        assert _is_hallucination("Продолжение следует...")
+        assert _is_hallucination("Спасибо за просмотр!")
+        assert _is_hallucination("ПОДПИШИСЬ НА КАНАЛ")
+
+    def test_long_speech_about_subtitles_kept(self):
+        from backend.services import _is_hallucination
+        text = ("Мы тогда долго спорили о том, нужны ли субтитры в этом фильме, "
+                "потому что зритель привык к дубляжу, и в итоге решили оставить оба варианта")
+        assert not _is_hallucination(text)
+
+    def test_prompt_echo_dropped(self):
+        from backend.services import _is_hallucination
+        prompt = "Интервью на русском языке. Участники: Денис Майданов."
+        assert _is_hallucination("Интервью на русском языке.", prompt)
+        assert not _is_hallucination("Мы поехали на гастроли.", prompt)
+
+    def test_filter_keeps_normal_speech(self):
+        from backend.services import _filter_hallucinated_segments
+        segs = [self._seg("Обычная речь."), self._seg("Субтитры сделал DimaTorzok")]
+        result = _filter_hallucinated_segments("test-project", segs)
+        assert len(result) == 1
+        assert result[0]["text"] == "Обычная речь."
+
+
+class TestResolveWhisperText:
+    def test_normal_segment_kept(self):
+        from backend.services import _resolve_whisper_text
+        assert _resolve_whisper_text("Привет.", -0.3, 0.1) == "Привет."
+
+    def test_no_speech_dropped(self):
+        from backend.services import _resolve_whisper_text
+        assert _resolve_whisper_text("шум", -0.5, 0.95) is None
+
+    def test_low_confidence_becomes_unclear(self):
+        from backend.services import _resolve_whisper_text
+        from backend.turns import UNCLEAR_TEXT
+        assert _resolve_whisper_text("выдуманный текст", -2.0, 0.2) == UNCLEAR_TEXT
+
+    def test_missing_metrics_kept(self):
+        from backend.services import _resolve_whisper_text
+        assert _resolve_whisper_text("Текст.", None, None) == "Текст."

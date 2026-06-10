@@ -20,6 +20,9 @@ import re
 from backend.utils import frames_to_tc
 
 TECH_BREAK_TEXT = "(Технические моменты)."
+# Замена неуверенных ASR-сегментов; эталоны пишут её ВНУТРИ реплики
+# («...текст (неразборчиво) текст»), поэтому склеивается как обычная речь.
+UNCLEAR_TEXT = "(неразборчиво)"
 
 # Символы, которыми может законно заканчиваться завершённое предложение.
 _SENTENCE_FINAL_CHARS = tuple('.!?…»)"')
@@ -102,13 +105,16 @@ def build_turns(
             })
         prev_end = ev["end_s"]
 
-        if _FULL_PARENTHETICAL_RE.match(ev["text"]):
+        # "(неразборчиво)" — НЕ отдельная ремарка: склеивается в реплику ниже.
+        if _FULL_PARENTHETICAL_RE.match(ev["text"]) and ev["text"] != UNCLEAR_TEXT:
             close_turn()
-            out.append({
-                "timecode": tc(ev["start_s"]),
-                "speaker": ev["speaker"],
-                "text": ev["text"],
-            })
+            # Подряд идущие одинаковые ремарки не дублируем
+            if not (out and out[-1]["text"] == ev["text"]):
+                out.append({
+                    "timecode": tc(ev["start_s"]),
+                    "speaker": ev["speaker"],
+                    "text": ev["text"],
+                })
             continue
 
         if cur is not None and ev["speaker"] != cur["speaker"]:
@@ -124,8 +130,11 @@ def build_turns(
             continue
 
         # Продолжение текущей реплики.
-        tail_final = _ends_sentence(cur["parts"][-1])
         part = ev["text"]
+        # Серия неуверенных сегментов → одно "(неразборчиво)" в реплике
+        if part == UNCLEAR_TEXT and cur["parts"][-1].endswith(UNCLEAR_TEXT):
+            continue
+        tail_final = _ends_sentence(cur["parts"][-1])
         if tail_final and part and part[0].islower():
             part = part[0].upper() + part[1:]
         # Инлайн-таймкод только на границе предложений; если хвост на запятой,

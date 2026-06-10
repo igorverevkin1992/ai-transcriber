@@ -4,6 +4,7 @@ import time
 
 from backend.config import GEMINI_API_KEY, GEMINI_MODEL, logger
 from backend.metrics import gemini_calls
+from backend.turns import UNCLEAR_TEXT
 
 # «что -то» → «что-то»: пробел ПЕРЕД дефисом, но не после.
 # Пробелы с обеих сторон — это тире, его обрабатывает DASH_RE ниже.
@@ -215,7 +216,8 @@ def postprocess_segments(segments: list[dict], use_gemini: bool = True) -> list[
 
     for i, seg in enumerate(segments):
         text = seg["text"]
-        if not text:
+        # "(неразборчиво)" — служебная замена, Gemini её не полирует
+        if not text or text == UNCLEAR_TEXT:
             continue
         if current_batch and len(current_batch) + len(SEPARATOR) + len(text) > MAX_BATCH_CHARS:
             batch_texts.append(current_batch)

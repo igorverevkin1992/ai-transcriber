@@ -1,6 +1,6 @@
 """Тесты сборки реплик (backend.turns) — структура как в эталонных стенограммах."""
 
-from backend.turns import TECH_BREAK_TEXT, build_turns
+from backend.turns import TECH_BREAK_TEXT, UNCLEAR_TEXT, build_turns
 from backend.utils import tc_to_frames
 
 
@@ -125,3 +125,40 @@ class TestFinalization:
         assert len(out) == 3
         assert out[1] == {"timecode": "00:00:06:00", "speaker": "0", "text": "(смех)"}
         assert out[2]["timecode"] == "00:00:09:00"
+
+    def test_consecutive_identical_remarks_deduped(self):
+        out = _build([
+            _ev("0", "(звучит песня)", 0, 5),
+            _ev("0", "(звучит песня)", 6, 10),
+            _ev("0", "Дальше речь.", 11, 14),
+        ])
+        assert len(out) == 2
+        assert out[0]["text"] == "(звучит песня)"
+        assert out[1]["text"] == "Дальше речь."
+
+
+class TestUnclearText:
+    def test_unclear_merges_inline_into_turn(self):
+        # Эталон ф14-15: «(неразборчиво)» — внутри реплики, не отдельный абзац
+        out = _build([
+            _ev("0", "мы начали говорить", 0, 3),
+            _ev("0", UNCLEAR_TEXT, 4, 6),
+            _ev("0", "и закончили хорошо.", 7, 10),
+        ])
+        assert len(out) == 1
+        assert UNCLEAR_TEXT in out[0]["text"]
+        assert out[0]["text"].startswith("Мы начали")
+
+    def test_consecutive_unclear_collapsed(self):
+        out = _build([
+            _ev("0", "речь шла", 0, 3),
+            _ev("0", UNCLEAR_TEXT, 4, 6),
+            _ev("0", UNCLEAR_TEXT, 7, 9),
+            _ev("0", UNCLEAR_TEXT, 10, 12),
+        ])
+        assert len(out) == 1
+        assert out[0]["text"].count(UNCLEAR_TEXT) == 1
+
+    def test_unclear_alone_is_own_turn(self):
+        out = _build([_ev("0", UNCLEAR_TEXT, 0, 3)])
+        assert out == [{"timecode": "00:00:00:00", "speaker": "0", "text": UNCLEAR_TEXT}]

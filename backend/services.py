@@ -11,9 +11,11 @@ import grpc
 import requests
 
 from backend.config import (
+    HALLUCINATION_BLACKLIST,
     HF_TOKEN,
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
+    NO_SPEECH_PROB_THRESHOLD,
     OUTPUT_DIR,
     SPEECHKIT_LITERATURE_TEXT,
     SQLITE_DB_PATH,
@@ -21,6 +23,7 @@ from backend.config import (
     TEMP_DIR,
     TURN_INLINE_TC_SECONDS,
     TURN_MERGE_ENABLED,
+    UNCLEAR_LOGPROB_THRESHOLD,
     WHISPER_BEAM_SIZE,
     WHISPER_INITIAL_PROMPT,
     YANDEX_API_KEY,
@@ -35,7 +38,7 @@ from backend.metrics import (
 )
 from backend.models import ProjectStatusEnum
 from backend.store import ProjectStore
-from backend.turns import build_turns
+from backend.turns import UNCLEAR_TEXT, build_turns
 from backend.utils import (
     detect_fps,
     detect_start_timecode,
@@ -406,6 +409,47 @@ def _build_whisper_prompt(original_filename: str) -> str:
 
 _WHISPERX_SPEAKER_RE = re.compile(r"^SPEAKER_0*(\d+)$")
 
+# Галлюцинации Whisper почти всегда короткие standalone-сегменты;
+# длинная живая речь, где упомянуты «субтитры», не отбрасывается.
+_HALLUCINATION_MAX_LEN = 100
+
+
+def _is_hallucination(text: str, initial_prompt: str | None = None) -> bool:
+    """True для известных Whisper-галлюцинаций на музыке/тишине и эха промпта."""
+    lowered = text.strip().lower()
+    if len(lowered) <= _HALLUCINATION_MAX_LEN:
+        if any(phrase in lowered for phrase in HALLUCINATION_BLACKLIST):
+            return True
+    if initial_prompt and len(lowered) > 10 and lowered.strip(" .") in initial_prompt.lower():
+        return True
+    return False
+
+
+def _filter_hallucinated_segments(
+    project_id: str, segments: list[dict], initial_prompt: str | None = None,
+) -> list[dict]:
+    """Отбрасывает сегменты-галлюцинации, логируя каждый."""
+    kept = []
+    for seg in segments:
+        if _is_hallucination(seg["text"], initial_prompt):
+            logger.info("[%s] Отброшена галлюцинация ASR: %r", project_id[:8], seg["text"][:80])
+            continue
+        kept.append(seg)
+    return kept
+
+
+def _resolve_whisper_text(text: str, avg_logprob: float | None, no_speech_prob: float | None) -> str | None:
+    """Решает судьбу сегмента по уверенности ASR.
+
+    None — отбросить (не речь); UNCLEAR_TEXT — человек пишет "(неразборчиво)"
+    вместо выдуманного текста (цензус: 8 случаев в эталонах); иначе исходный текст.
+    """
+    if no_speech_prob is not None and no_speech_prob > NO_SPEECH_PROB_THRESHOLD:
+        return None
+    if avg_logprob is not None and avg_logprob < UNCLEAR_LOGPROB_THRESHOLD:
+        return UNCLEAR_TEXT
+    return text
+
 
 def _normalize_speaker_id(raw: str) -> str:
     m = _WHISPERX_SPEAKER_RE.match(raw)
@@ -515,6 +559,7 @@ def _transcribe_with_whisperx(
             "words": words if words else [{"text": text, "start_ms": start_ms, "end_ms": end_ms}],
         })
 
+    segments = _filter_hallucinated_segments(project_id, segments, initial_prompt)
     logger.info("[%s] WhisperX: %d сегментов с диаризацией", project_id[:8], len(segments))
     _cleanup_gpu_memory()
     return segments
@@ -549,6 +594,10 @@ def _transcribe_with_whisper(
         beam_size=WHISPER_BEAM_SIZE,
         vad_filter=True,
         initial_prompt=initial_prompt,
+        # Антигаллюцинации: без условия на предыдущий текст (петли повторов
+        # на длинных интервью) и с детектором галлюцинаций на тишине.
+        condition_on_previous_text=False,
+        hallucination_silence_threshold=2.0,
     )
 
     segments = []
@@ -557,8 +606,23 @@ def _transcribe_with_whisper(
         if not text:
             continue
 
+        resolved = _resolve_whisper_text(
+            text, getattr(seg, "avg_logprob", None), getattr(seg, "no_speech_prob", None),
+        )
+        if resolved is None:
+            logger.info("[%s] Сегмент отброшен (no_speech_prob=%.2f): %r",
+                        project_id[:8], seg.no_speech_prob, text[:60])
+            continue
+        if resolved == UNCLEAR_TEXT:
+            logger.info("[%s] Сегмент неразборчив (avg_logprob=%.2f): %r",
+                        project_id[:8], seg.avg_logprob, text[:60])
+            text = resolved
+            seg_words = []
+        else:
+            seg_words = seg.words or []
+
         words = []
-        for w in seg.words or []:
+        for w in seg_words:
             words.append({
                 "text": w.word.strip(),
                 "start_ms": int(w.start * 1000),
@@ -575,6 +639,7 @@ def _transcribe_with_whisper(
             ],
         })
 
+    segments = _filter_hallucinated_segments(project_id, segments, initial_prompt)
     logger.info("[%s] faster-whisper: %d сегментов (аудио: %.0f сек)",
                 project_id[:8], len(segments), info.duration)
     return segments
