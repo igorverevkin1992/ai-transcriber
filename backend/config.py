@@ -60,6 +60,12 @@ WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 # добавляются автоматически (см. services._build_whisper_prompt)
 WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "Интервью на русском языке.")
 
+# --- SpeechKit tuning ---
+SPEECHKIT_LITERATURE_TEXT = os.getenv("SPEECHKIT_LITERATURE_TEXT", "false").lower() in ("1", "true", "yes")
+
+# --- Gemini tuning ---
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
 
 def _auto_detect_concurrent_tasks() -> int:
     """Автоопределение MAX_CONCURRENT_TASKS на основе VRAM (если есть GPU)."""

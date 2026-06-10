@@ -15,6 +15,7 @@ from backend.config import (
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
     OUTPUT_DIR,
+    SPEECHKIT_LITERATURE_TEXT,
     SQLITE_DB_PATH,
     TECH_BREAK_GAP_SECONDS,
     TEMP_DIR,
@@ -259,7 +260,7 @@ def _generate_recognition_requests(audio_path):
             text_normalization=stt_pb2.TextNormalizationOptions(
                 text_normalization=stt_pb2.TextNormalizationOptions.TEXT_NORMALIZATION_ENABLED,
                 profanity_filter=False,
-                literature_text=True,
+                literature_text=SPEECHKIT_LITERATURE_TEXT,
             ),
             language_restriction=stt_pb2.LanguageRestrictionOptions(
                 restriction_type=stt_pb2.LanguageRestrictionOptions.WHITELIST,

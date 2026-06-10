@@ -2,7 +2,7 @@ import re
 import threading
 import time
 
-from backend.config import GEMINI_API_KEY, logger
+from backend.config import GEMINI_API_KEY, GEMINI_MODEL, logger
 from backend.metrics import gemini_calls
 
 # «что -то» → «что-то»: пробел ПЕРЕД дефисом, но не после.
@@ -74,7 +74,7 @@ def _get_gemini_model():
         return None
 
     genai.configure(api_key=GEMINI_API_KEY)
-    return genai.GenerativeModel("gemini-2.0-flash")
+    return genai.GenerativeModel(GEMINI_MODEL)
 
 
 _gemini_model = None
@@ -110,7 +110,9 @@ def gemini_polish(text: str) -> str:
         "7. НЕ меняй порядок слов и НЕ переформулируй.\n"
         "8. НЕ меняй первую букву фрагмента: фрагмент может начинаться "
         "с середины предложения.\n"
-        "9. Верни ТОЛЬКО текст, без комментариев.\n\n"
+        "9. Если текст содержит разделитель ---SEGMENT_BREAK---, "
+        "сохрани его без изменений на отдельной строке.\n"
+        "10. Верни ТОЛЬКО текст, без комментариев.\n\n"
         "Пример:\n"
         "Вход: ну вот мы эээ и поехали на масс -фильм снимать вечную любовь\n"
         "Выход: ну вот мы и поехали на «Мосфильм» снимать «Вечную любовь»\n\n"
@@ -155,6 +157,8 @@ def postprocess_segments(segments: list[dict], use_gemini: bool = True) -> list[
 
     for seg in segments:
         seg["text"] = regex_cleanup(seg["text"])
+
+    segments = [seg for seg in segments if seg["text"].strip()]
 
     if not use_gemini or not GEMINI_API_KEY:
         return segments
