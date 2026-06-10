@@ -1,12 +1,12 @@
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Cm, Pt
+from docx.shared import Cm, Mm, Pt
 
 from backend.docx_export import generate_docx
 
 
 class TestGenerateDocx:
-    def test_header_is_filename_no_bold(self, tmp_path, sample_project):
+    def test_header_is_download_name_with_docx_extension(self, tmp_path, sample_project):
         out = tmp_path / "out.docx"
         generate_docx(
             sample_project,
@@ -16,13 +16,12 @@ class TestGenerateDocx:
         )
         doc = Document(str(out))
         first_para = doc.paragraphs[0]
-        assert first_para.text == "test_interview.mp4"
+        assert first_para.text == "test_interview.docx"
         for run in first_para.runs:
             assert not run.bold
         assert first_para.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
 
     def test_legend_only_for_speakers_in_segments(self, tmp_path, sample_project):
-        # Add a phantom speaker (not in segments)
         sample_project["result"]["speakers"]["99"] = {
             "duration_sec": 5.0, "suggested_name": "Призрак",
         }
@@ -38,6 +37,37 @@ class TestGenerateDocx:
         assert "Призрак" not in text
         assert "Денис" in text
         assert "Григорий" in text
+
+    def test_legend_exclude_hides_speaker_from_legend(self, tmp_path, sample_project):
+        sample_project["result"]["speakers"]["2"] = {
+            "duration_sec": 10.0, "suggested_name": "АЗК",
+        }
+        sample_project["result"]["segments"].append(
+            {"timecode": "11:04:30:00", "speaker": "2", "text": "Ещё раз."}
+        )
+        out = tmp_path / "out.docx"
+        generate_docx(
+            sample_project,
+            final_map={"0": "Денис", "1": "Григорий", "2": "АЗК"},
+            abbr_map={"0": "М", "1": "А", "2": "АЗК"},
+            output_path=str(out),
+            legend_exclude={"2"},
+        )
+        doc = Document(str(out))
+        legend_texts = [p.text for p in doc.paragraphs if "–" in p.text]
+        assert not any("АЗК" in t for t in legend_texts)
+        segment_texts = [p.text for p in doc.paragraphs if "11:04:30:00" in p.text]
+        assert len(segment_texts) == 1
+        assert "АЗК:" in segment_texts[0]
+
+    def test_parenthetical_segment_no_speaker_prefix(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        tech_paras = [p for p in doc.paragraphs if "(Технические моменты.)" in p.text]
+        assert len(tech_paras) == 1
+        assert "М:" not in tech_paras[0].text
+        assert tech_paras[0].text.startswith("11:04:15:00 (")
 
     def test_parenthetical_is_italic(self, tmp_path, sample_project):
         out = tmp_path / "out.docx"
@@ -82,3 +112,76 @@ class TestGenerateDocx:
         out = tmp_path / "out.docx"
         name = generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
         assert name == "test_interview.docx"
+
+    def test_page_size_is_a4(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        section = doc.sections[0]
+        assert abs(section.page_width - Mm(210)) < 1000
+        assert abs(section.page_height - Mm(297)) < 1000
+
+    def test_space_before_not_forced_to_zero(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        for para in doc.paragraphs:
+            assert para.paragraph_format.space_before is None
+
+    def test_normal_style_keeps_11pt_default(self, tmp_path, sample_project):
+        # Human reference keeps the 11pt doc default (blank separator lines are
+        # 11pt); 14pt is applied only per run.
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        assert doc.styles["Normal"].font.size is None
+
+    def test_body_font_is_calibri(self, tmp_path, sample_project):
+        # Reference body font is Calibri; python-docx default theme is Cambria.
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        assert doc.styles["Normal"].font.name == "Calibri"
+
+    def test_parenthetical_trailing_period_is_italic(self, tmp_path, sample_project):
+        # Reference italicizes the whole "(...)." including the trailing dot.
+        sample_project["result"]["segments"] = [
+            {"timecode": "11:04:15:00", "speaker": "0", "text": "(Технические моменты)."},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
+        doc = Document(str(out))
+        para = next(p for p in doc.paragraphs if "Технические" in p.text)
+        italic_run = next(r for r in para.runs if "Технические" in r.text)
+        assert italic_run.italic
+        assert italic_run.text.endswith(").")
+
+    def test_nested_parenthetical_fully_italic(self, tmp_path, sample_project):
+        sample_project["result"]["segments"] = [
+            {"timecode": "11:04:15:00", "speaker": "0",
+             "text": "(Технические моменты (перерыв).)"},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
+        doc = Document(str(out))
+        paren_paras = [p for p in doc.paragraphs if "Технические моменты" in p.text]
+        assert len(paren_paras) == 1
+        paren_runs = [r for r in paren_paras[0].runs if "Технические" in r.text]
+        assert len(paren_runs) == 1
+        assert paren_runs[0].italic
+
+    def test_segments_override_replaces_original(self, tmp_path, sample_project):
+        edited = [
+            {"timecode": "11:04:15:00", "speaker": "0", "text": "Исправленный текст."},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(
+            sample_project,
+            {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"},
+            str(out), segments_override=edited,
+        )
+        doc = Document(str(out))
+        all_text = "\n".join(p.text for p in doc.paragraphs)
+        assert "Исправленный текст." in all_text
+        assert "Привет всем." not in all_text
+        assert "Хорошо, давайте." not in all_text

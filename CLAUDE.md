@@ -47,11 +47,17 @@ docker compose --profile dev up   # dev: separate Vite dev server
 - `MAX_RETRIES` — retry failed tasks (default: 3)
 - `SQLITE_DB_PATH` — database location (default: projects.db)
 - `MIN_RAM_MB` — low-RAM warning threshold (default: 500)
+- `TURN_MERGE_ENABLED` — merge same-speaker segments into turn paragraphs (default: true)
+- `TURN_INLINE_TC_SECONDS` / `TECH_BREAK_GAP_SECONDS` — inline timecode interval / tech-break gap (60 / 30)
+- `WHISPER_BEAM_SIZE` / `WHISPER_INITIAL_PROMPT` — ASR accuracy tuning
+- `SPEECHKIT_LITERATURE_TEXT` — SpeechKit literary mode (default: false, better for interviews)
+- `GEMINI_MODEL` — Gemini model for text polishing (default: gemini-2.0-flash)
 
 ## Testing
 ```bash
+pip install -r requirements-dev.txt   # pytest/httpx/ruff (not in prod image)
 pytest tests/ -v
-npx tsc --noEmit --skipLibCheck   # TS type check
+npx tsc --noEmit --skipLibCheck       # TS type check
 ```
 
 ## Architecture notes

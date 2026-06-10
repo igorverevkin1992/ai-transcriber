@@ -1,0 +1,139 @@
+"""Сборка реплик (turns) из ASR-сегментов в стиле эталонных стенограмм.
+
+Правила выведены из четырёх эталонных DOCX:
+- одна реплика спикера = один абзац;
+- внутри длинной реплики раз в ~60 секунд вставляется инлайн-таймкод,
+  строго после конца предложения (все 33 инлайн-таймкода эталона f7
+  стоят после ". " или "? ");
+- пауза в записи >= порога даёт отдельную ремарку "(Технические моменты)."
+  — в том числе перед первой репликой, если речь начинается заметно позже
+  стартового таймкода файла; метка спикера после ремарки повторяется;
+- незавершённая (прерванная) реплика заканчивается "...".
+
+Ограничения: сегменты без конечной пунктуации склеиваются без искусственной
+точки (пунктуацию по смыслу добавляет Gemini-полировка); ремарки, вставленные
+человеком при паузах меньше порога, алгоритм не воспроизводит.
+"""
+
+import re
+
+from backend.utils import frames_to_tc
+
+TECH_BREAK_TEXT = "(Технические моменты)."
+
+# Символы, которыми может законно заканчиваться завершённое предложение.
+_SENTENCE_FINAL_CHARS = tuple('.!?…»)"')
+# Хвост, отбрасываемый перед добавлением "..." прерванной реплики.
+_TRAILING_TRIM = " ,;:–—-"
+_FULL_PARENTHETICAL_RE = re.compile(r"^\([^)]+\)[.!?…]*$")
+
+
+def _ends_sentence(text: str) -> bool:
+    return text.rstrip().endswith(_SENTENCE_FINAL_CHARS)
+
+
+def _finalize_turn_text(text: str) -> str:
+    """Финализирует реплику: заглавная первая буква, "..." для прерванных."""
+    text = text.strip()
+    if not text:
+        return text
+    if text[0].islower():
+        text = text[0].upper() + text[1:]
+    if not text.endswith(_SENTENCE_FINAL_CHARS):
+        text = text.rstrip(_TRAILING_TRIM) + "..."
+    return text
+
+
+def build_turns(
+    events: list[dict],
+    start_frames: int,
+    fps: int,
+    *,
+    inline_tc_seconds: float = 60.0,
+    tech_break_gap_seconds: float = 30.0,
+) -> list[dict]:
+    """Склеивает события [{speaker, text, start_s, end_s}] в реплики.
+
+    Возвращает сегменты {timecode, speaker, text}: по одному на реплику,
+    плюс ремарки технических пауз. Капитализация не понижает регистр
+    (имена собственные в середине склейки не портятся).
+    """
+    out: list[dict] = []
+    events = sorted(events, key=lambda e: e["start_s"])
+    if not events:
+        return out
+
+    def tc(seconds: float) -> str:
+        return frames_to_tc(start_frames + round(seconds * fps), fps)
+
+    cur: dict | None = None
+
+    def close_turn():
+        nonlocal cur
+        if cur is not None:
+            text = _finalize_turn_text(" ".join(cur["parts"]))
+            if text:
+                out.append({
+                    "timecode": tc(cur["start_s"]),
+                    "speaker": cur["speaker"],
+                    "text": text,
+                })
+            cur = None
+
+    # Речь начинается заметно позже стартового таймкода файла —
+    # эталоны открываются ремаркой с таймкодом начала записи.
+    if events[0]["start_s"] >= tech_break_gap_seconds:
+        out.append({
+            "timecode": frames_to_tc(start_frames, fps),
+            "speaker": events[0]["speaker"],
+            "text": TECH_BREAK_TEXT,
+        })
+
+    prev_end = None
+    for ev in events:
+        # Длинная пауза закрывает реплику даже у того же спикера;
+        # таймкод ремарки = конец предыдущей речи.
+        if prev_end is not None and ev["start_s"] - prev_end >= tech_break_gap_seconds:
+            close_turn()
+            out.append({
+                "timecode": tc(prev_end),
+                "speaker": ev["speaker"],
+                "text": TECH_BREAK_TEXT,
+            })
+        prev_end = ev["end_s"]
+
+        if _FULL_PARENTHETICAL_RE.match(ev["text"]):
+            close_turn()
+            out.append({
+                "timecode": tc(ev["start_s"]),
+                "speaker": ev["speaker"],
+                "text": ev["text"],
+            })
+            continue
+
+        if cur is not None and ev["speaker"] != cur["speaker"]:
+            close_turn()
+
+        if cur is None:
+            cur = {
+                "speaker": ev["speaker"],
+                "start_s": ev["start_s"],
+                "parts": [ev["text"]],
+                "last_tc_s": ev["start_s"],
+            }
+            continue
+
+        # Продолжение текущей реплики.
+        tail_final = _ends_sentence(cur["parts"][-1])
+        part = ev["text"]
+        if tail_final and part and part[0].islower():
+            part = part[0].upper() + part[1:]
+        # Инлайн-таймкод только на границе предложений; если хвост на запятой,
+        # вставка откладывается до следующей границы (last_tc_s не двигаем).
+        if tail_final and ev["start_s"] - cur["last_tc_s"] >= inline_tc_seconds:
+            part = f"{tc(ev['start_s'])} {part}"
+            cur["last_tc_s"] = ev["start_s"]
+        cur["parts"].append(part)
+
+    close_turn()
+    return out

@@ -17,6 +17,3 @@ psutil
 prometheus-client
 python-magic
 python-json-logger
-pytest
-httpx
-ruff

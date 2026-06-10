@@ -17,17 +17,35 @@ export function saveBatchSession(session: BatchSession): void {
   }
 }
 
+const VALID_ENGINES = ['whisper', 'speechkit'];
+const VALID_MODELS = ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3'];
+
 export function loadBatchSession(): BatchSession | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const session = JSON.parse(raw) as BatchSession;
-    if (!Array.isArray(session.projectIds) || session.projectIds.length === 0) return null;
-    if (Date.now() - session.startedAt > SESSION_TTL_MS) {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const s = parsed as Record<string, unknown>;
+
+    if (!Array.isArray(s.projectIds) || s.projectIds.length === 0) return null;
+    if (!s.projectIds.every(id => typeof id === 'string')) return null;
+    if (!Array.isArray(s.fileNames) || !s.fileNames.every(n => typeof n === 'string')) return null;
+    if (typeof s.startedAt !== 'number') return null;
+    if (typeof s.engine !== 'string' || !VALID_ENGINES.includes(s.engine)) return null;
+    if (typeof s.whisperModel !== 'string' || !VALID_MODELS.includes(s.whisperModel)) return null;
+
+    if (Date.now() - s.startedAt > SESSION_TTL_MS) {
       clearBatchSession();
       return null;
     }
-    return session;
+    return {
+      projectIds: s.projectIds as string[],
+      fileNames: s.fileNames as string[],
+      engine: s.engine,
+      whisperModel: s.whisperModel,
+      startedAt: s.startedAt,
+    };
   } catch {
     return null;
   }

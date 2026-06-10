@@ -3,13 +3,12 @@ import os
 import time
 import uuid
 import zipfile
-from io import BytesIO
 from pathlib import Path
 from typing import List
 
 import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -29,6 +28,7 @@ from backend.models import (
 from backend.security import validate_mime_type
 from backend.services import (
     WHISPER_AVAILABLE,
+    _compute_smart_abbreviations,
     auto_export_project,
     cancel_project,
     get_whisper_model,
@@ -41,6 +41,21 @@ from backend.utils import sanitize_filename, validate_file_extension, validate_u
 
 router = APIRouter(prefix="/api/v1")
 limiter = Limiter(key_func=get_remote_address)
+
+_TECH_SPEAKER_NAMES = {"АЗК", "ГЗК"}
+
+
+def _safe_unlink(path: str) -> None:
+    """Удаляет файл, игнорируя ошибки (для background-cleanup ZIP-архивов)."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _compute_legend_exclude(name_map: dict[str, str]) -> set[str]:
+    """Возвращает speaker_id тех спикеров, которых нужно исключить из легенды."""
+    return {sid for sid, name in name_map.items() if name.strip().upper() in _TECH_SPEAKER_NAMES}
 
 
 @router.post("/projects", response_model=CreateProjectResponse)
@@ -113,8 +128,17 @@ async def export_docx(pid: str, req: ExportRequest, background_tasks: Background
     final_map = {m.speaker_label: m.mapped_name for m in req.mappings}
     abbr_map = {m.speaker_label: m.abbreviation for m in req.mappings}
 
+    legend_exclude = _compute_legend_exclude(final_map)
+    segments_override = None
+    if req.edited_segments:
+        segments_override = [s.model_dump() for s in req.edited_segments if s.text.strip()]
+
     output_path = str(TEMP_DIR / f"transcript_{pid}.docx")
-    download_name = generate_docx(proj, final_map, abbr_map, output_path)
+    download_name = generate_docx(
+        proj, final_map, abbr_map, output_path,
+        legend_exclude=legend_exclude,
+        segments_override=segments_override,
+    )
 
     background_tasks.add_task(os.unlink, output_path)
 
@@ -143,6 +167,14 @@ async def upload_file(
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="Имя файла не указано")
+
+    valid_engines = {"whisper", "speechkit"}
+    if engine not in valid_engines:
+        raise HTTPException(status_code=400, detail=f"Неверный engine: {engine}. Допустимые: {', '.join(valid_engines)}")
+
+    valid_models = {"tiny", "base", "small", "medium", "large", "large-v2", "large-v3"}
+    if whisper_model not in valid_models:
+        raise HTTPException(status_code=400, detail=f"Неверная модель: {whisper_model}. Допустимые: {', '.join(sorted(valid_models))}")
 
     safe_filename = sanitize_filename(file.filename)
 
@@ -219,6 +251,8 @@ async def upload_file(
 async def batch_status(ids: str = Query(..., description="ID проектов через запятую")):
     """Возвращает статус всех проектов в пакете."""
     project_ids = [i.strip() for i in ids.split(",") if i.strip()]
+    if len(project_ids) > 200:
+        raise HTTPException(status_code=400, detail="Максимум 200 проектов за запрос")
     files: List[BatchFileStatus] = []
     completed = 0
     errors = 0
@@ -264,17 +298,24 @@ async def batch_status(ids: str = Query(..., description="ID проектов ч
 
 @router.get("/batch/download")
 @limiter.limit("10/minute")
-async def batch_download(request: Request, ids: str = Query(..., description="ID проектов через запятую")):
+async def batch_download(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    ids: str = Query(..., description="ID проектов через запятую"),
+):
     """Авто-экспортирует все завершённые проекты и возвращает ZIP-архив."""
     project_ids = [i.strip() for i in ids.split(",") if i.strip()]
 
     if not project_ids:
         raise HTTPException(status_code=400, detail="Не указаны ID проектов")
+    if len(project_ids) > 200:
+        raise HTTPException(status_code=400, detail="Максимум 200 проектов за запрос")
 
-    zip_buffer = BytesIO()
+    # Stream the archive to a temp file instead of holding it all in memory
+    zip_path = TEMP_DIR / f"batch_{uuid.uuid4().hex}.zip"
     exported_count = 0
 
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
         for pid in project_ids:
             proj = projects_db.get(pid)
             if not proj or proj.get("status") != ProjectStatusEnum.COMPLETED:
@@ -294,37 +335,39 @@ async def batch_download(request: Request, ids: str = Query(..., description="ID
                     pass
 
     if exported_count == 0:
+        try:
+            zip_path.unlink()
+        except OSError:
+            pass
         raise HTTPException(status_code=400, detail="Нет завершённых проектов для экспорта")
 
-    zip_buffer.seek(0)
     logger.info("Пакетный экспорт: %d файлов в ZIP", exported_count)
-
-    return StreamingResponse(
-        zip_buffer,
+    background_tasks.add_task(_safe_unlink, str(zip_path))
+    return FileResponse(
+        path=str(zip_path),
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
+        filename="transcripts.zip",
     )
 
 
 @router.get("/batch/download-saved")
-async def download_saved():
+async def download_saved(background_tasks: BackgroundTasks):
     """Скачивает все автосохранённые DOCX из папки completed_docx/ как ZIP."""
     docx_files = list(OUTPUT_DIR.glob("*.docx"))
     if not docx_files:
         raise HTTPException(status_code=400, detail="Нет сохранённых файлов в completed_docx/")
 
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    zip_path = TEMP_DIR / f"saved_{uuid.uuid4().hex}.zip"
+    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
         for f in docx_files:
             zf.write(str(f), f.name)
 
-    zip_buffer.seek(0)
     logger.info("Скачивание сохранённых файлов: %d DOCX", len(docx_files))
-
-    return StreamingResponse(
-        zip_buffer,
+    background_tasks.add_task(_safe_unlink, str(zip_path))
+    return FileResponse(
+        path=str(zip_path),
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
+        filename="transcripts.zip",
     )
 
 
@@ -335,6 +378,8 @@ async def download_saved():
 async def batch_verification_data(ids: str = Query(..., description="ID проектов через запятую")):
     """Возвращает данные спикеров для каждого завершённого проекта в батче."""
     project_ids = [i.strip() for i in ids.split(",") if i.strip()]
+    if len(project_ids) > 200:
+        raise HTTPException(status_code=400, detail="Максимум 200 проектов за запрос")
     results = []
 
     for pid in project_ids:
@@ -346,11 +391,13 @@ async def batch_verification_data(ids: str = Query(..., description="ID прое
         speakers = result.get("speakers", {})
         segments = result.get("segments", [])
 
+        name_map = {sid: info.get("suggested_name", f"Спикер {sid}") for sid, info in speakers.items()}
+        abbr_map = _compute_smart_abbreviations(name_map)
+
         speaker_list = []
         for speaker_id, info in speakers.items():
-            name = info.get("suggested_name", f"Спикер {speaker_id}")
-            words = name.split()
-            abbr = words[0][0].upper() if words and words[0] else f"С{speaker_id}"
+            name = name_map[speaker_id]
+            abbr = abbr_map.get(speaker_id, f"С{speaker_id}")
             speaker_list.append({
                 "id": speaker_id,
                 "name": name,
@@ -373,17 +420,19 @@ async def batch_verification_data(ids: str = Query(..., description="ID прое
 
 @router.post("/batch/export-with-mappings")
 @limiter.limit("10/minute")
-async def batch_export_with_mappings(request: Request, body: BatchExportRequest):
+async def batch_export_with_mappings(
+    request: Request, body: BatchExportRequest, background_tasks: BackgroundTasks
+):
     """Экспортирует все проекты с пользовательскими маппингами спикеров."""
     project_mappings = body.projects
 
     if not project_mappings:
         raise HTTPException(status_code=400, detail="Не указаны проекты")
 
-    zip_buffer = BytesIO()
+    zip_path = TEMP_DIR / f"verified_{uuid.uuid4().hex}.zip"
     exported_count = 0
 
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
         for pm in project_mappings:
             pid = pm.project_id
             mappings = pm.mappings
@@ -394,10 +443,11 @@ async def batch_export_with_mappings(request: Request, body: BatchExportRequest)
 
             final_map = {m.speaker_id: m.name for m in mappings}
             abbr_map = {m.speaker_id: m.abbr for m in mappings}
+            legend_exclude = _compute_legend_exclude(final_map)
 
             output_path = str(TEMP_DIR / f"batch_verified_{pid}.docx")
             try:
-                download_name = generate_docx(proj, final_map, abbr_map, output_path)
+                download_name = generate_docx(proj, final_map, abbr_map, output_path, legend_exclude=legend_exclude)
                 if download_name and os.path.exists(output_path):
                     zf.write(output_path, download_name)
                     exported_count += 1
@@ -409,15 +459,18 @@ async def batch_export_with_mappings(request: Request, body: BatchExportRequest)
                     pass
 
     if exported_count == 0:
+        try:
+            zip_path.unlink()
+        except OSError:
+            pass
         raise HTTPException(status_code=400, detail="Нет проектов для экспорта")
 
-    zip_buffer.seek(0)
     logger.info("Верифицированный экспорт: %d файлов в ZIP", exported_count)
-
-    return StreamingResponse(
-        zip_buffer,
+    background_tasks.add_task(_safe_unlink, str(zip_path))
+    return FileResponse(
+        path=str(zip_path),
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=transcripts.zip"},
+        filename="transcripts.zip",
     )
 
 

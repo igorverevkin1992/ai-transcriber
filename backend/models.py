@@ -35,9 +35,16 @@ class SpeakerMapping(BaseModel):
     abbreviation: str = ""
 
 
+class EditedSegment(BaseModel):
+    timecode: str
+    speaker: str
+    text: str
+
+
 class ExportRequest(BaseModel):
     mappings: List[SpeakerMapping]
     filename: str
+    edited_segments: Optional[List[EditedSegment]] = None
 
 
 # --- Response models ---

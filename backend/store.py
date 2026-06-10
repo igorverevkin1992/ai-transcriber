@@ -4,6 +4,8 @@ import threading
 import time
 from typing import Any
 
+from backend.models import ProjectStatusEnum
+
 
 class _EnumEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -54,7 +56,14 @@ class ProjectStore:
         rows = conn.execute("SELECT id, data FROM projects").fetchall()
         for pid, data_json in rows:
             try:
-                self._cache[pid] = json.loads(data_json)
+                data = json.loads(data_json)
+                status = data.get("status")
+                if isinstance(status, str):
+                    try:
+                        data["status"] = ProjectStatusEnum(status)
+                    except ValueError:
+                        pass
+                self._cache[pid] = data
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -98,33 +107,36 @@ class ProjectStore:
     def create(self, pid: str, data: dict) -> None:
         with self._lock:
             self._cache[pid] = data
-        self._persist(pid)
-
-    def update_field(self, pid: str, field: str, value: Any, *, persist: bool = False) -> None:
-        proj = self._cache.get(pid)
-        if proj is None:
-            return
-        proj[field] = value
-        if persist:
             self._persist(pid)
 
+    def update_field(self, pid: str, field: str, value: Any, *, persist: bool = False) -> None:
+        with self._lock:
+            proj = self._cache.get(pid)
+            if proj is None:
+                return
+            proj[field] = value
+            if persist:
+                self._persist(pid)
+
     def update_status(self, pid: str, status, *, error: str | None = None) -> None:
-        proj = self._cache.get(pid)
-        if proj is None:
-            return
-        proj["status"] = status
-        if error is not None:
-            proj["error"] = error
-        self._persist(pid)
+        with self._lock:
+            proj = self._cache.get(pid)
+            if proj is None:
+                return
+            proj["status"] = status
+            if error is not None:
+                proj["error"] = error
+            self._persist(pid)
 
     def set_result(self, pid: str, result: dict, **extra_fields) -> None:
-        proj = self._cache.get(pid)
-        if proj is None:
-            return
-        proj["result"] = result
-        for k, v in extra_fields.items():
-            proj[k] = v
-        self._persist(pid)
+        with self._lock:
+            proj = self._cache.get(pid)
+            if proj is None:
+                return
+            proj["result"] = result
+            for k, v in extra_fields.items():
+                proj[k] = v
+            self._persist(pid)
 
     def pop(self, pid: str, default=None) -> dict | None:
         with self._lock:

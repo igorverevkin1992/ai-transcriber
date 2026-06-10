@@ -48,6 +48,24 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # --- Limits ---
 MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
 
+# --- Turn building (склейка реплик в абзацы, как в эталонных стенограммах) ---
+TURN_MERGE_ENABLED = os.getenv("TURN_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
+TURN_INLINE_TC_SECONDS = float(os.getenv("TURN_INLINE_TC_SECONDS", "60"))
+TECH_BREAK_GAP_SECONDS = float(os.getenv("TECH_BREAK_GAP_SECONDS", "30"))
+
+# --- Whisper tuning ---
+# beam_size: выше = точнее, но медленнее (рекомендуется 5-10)
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
+# Подсказка декодеру: контекст и стиль; имена спикеров из имени файла
+# добавляются автоматически (см. services._build_whisper_prompt)
+WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "Интервью на русском языке.")
+
+# --- SpeechKit tuning ---
+SPEECHKIT_LITERATURE_TEXT = os.getenv("SPEECHKIT_LITERATURE_TEXT", "false").lower() in ("1", "true", "yes")
+
+# --- Gemini tuning ---
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
 
 def _auto_detect_concurrent_tasks() -> int:
     """Автоопределение MAX_CONCURRENT_TASKS на основе VRAM (если есть GPU)."""
@@ -73,4 +91,4 @@ ALLOWED_URL_HOSTS = {"yadi.sk", "disk.yandex.ru", "disk.yandex.com"}
 SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "projects.db")
 
 # --- CORS ---
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]

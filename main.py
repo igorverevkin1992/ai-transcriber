@@ -1,3 +1,4 @@
+import asyncio
 import shutil
 import subprocess
 import time
@@ -15,25 +16,40 @@ from backend.models import HealthResponse, ProjectStatusEnum
 from backend.routes import router
 from backend.services import (
     _TASK_REGISTRY,
+    _cleanup_old_projects,
     projects_db,
     shutdown_executor,
     submit_task,
 )
 
 DOCX_TTL_SECONDS = 30 * 24 * 3600  # 30 days
+CLEANUP_INTERVAL_SECONDS = 3600  # run housekeeping every hour
+
+
+SQLITE_BACKUP_KEEP = 5  # number of timestamped backups to retain
 
 
 def _backup_sqlite():
-    """Создаёт .backup копию SQLite перед запуском."""
+    """Создаёт timestamped-копию SQLite перед запуском и ротирует старые."""
     db_path = Path(SQLITE_DB_PATH)
     if not db_path.exists():
         return
-    backup_path = db_path.with_suffix(db_path.suffix + ".backup")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup_path = db_path.with_suffix(db_path.suffix + f".backup-{stamp}")
     try:
         shutil.copy2(db_path, backup_path)
         logger.info("SQLite резервная копия создана: %s", backup_path)
     except OSError as e:
         logger.warning("Не удалось создать backup SQLite: %s", e)
+        return
+
+    # Retain only the newest SQLITE_BACKUP_KEEP backups
+    backups = sorted(db_path.parent.glob(db_path.name + ".backup-*"))
+    for old in backups[:-SQLITE_BACKUP_KEEP]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
 
 def _cleanup_old_docx():
@@ -78,6 +94,17 @@ def _recover_inflight_projects():
         logger.info("Восстановлено %d задач после рестарта", recovered)
 
 
+async def _periodic_cleanup():
+    """Каждый час удаляет старые DOCX и завершённые проекты."""
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+        try:
+            _cleanup_old_docx()
+            _cleanup_old_projects()
+        except Exception as e:
+            logger.warning("Периодическая очистка завершилась с ошибкой: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Проверки при старте и очистка при завершении."""
@@ -101,9 +128,12 @@ async def lifespan(app: FastAPI):
     _cleanup_old_docx()
     _recover_inflight_projects()
 
+    cleanup_task = asyncio.create_task(_periodic_cleanup())
+
     logger.info("--- ПРОВЕРКИ ЗАВЕРШЕНЫ ---")
     yield
 
+    cleanup_task.cancel()
     shutdown_executor()
     for f in TEMP_DIR.iterdir():
         try:
@@ -125,6 +155,8 @@ app.add_middleware(ApiKeyMiddleware)
 
 if API_KEY:
     logger.info("API_KEY задан — аутентификация по X-API-Key включена.")
+else:
+    logger.warning("API_KEY не задан — все /api/* эндпоинты открыты без аутентификации!")
 
 app.include_router(router)
 

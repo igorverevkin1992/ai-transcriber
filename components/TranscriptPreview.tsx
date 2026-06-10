@@ -83,8 +83,8 @@ export const TranscriptPreview: React.FC<Props> = ({
 
       <div className="flex-1 overflow-y-auto p-4 md:p-8 bg-gray-50">
         <div className="max-w-3xl mx-auto bg-white shadow-lg min-h-[800px] p-6 md:p-12 font-times text-black">
-          <div className="mb-8 text-center uppercase font-bold text-base md:text-lg">
-            ИСХОДНИК: {filename}
+          <div className="mb-8 text-base md:text-lg">
+            {filename.replace(/\.[^.]+$/, '')}.docx
           </div>
 
           <div className="mb-8 space-y-1">
@@ -93,7 +93,7 @@ export const TranscriptPreview: React.FC<Props> = ({
               const abbr = getSpeakerAbbr(s.tag_id);
               return (
                 <div key={s.tag_id}>
-                  {name?.toUpperCase()} ({abbr})
+                  {name} – {abbr}.
                 </div>
               );
             })}
@@ -147,14 +147,15 @@ export const TranscriptPreview: React.FC<Props> = ({
                           </span>
                         ) : (
                           <span>
-                            {seg.timecode} <strong>{abbr}:</strong> {seg.text}
+                            {seg.timecode} {abbr}: {seg.text}
                           </span>
                         )}
                       </div>
                       <button
                         onClick={() => startEdit(idx, seg.text)}
-                        className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-gray-400 hover:text-blue-600 shrink-0"
+                        className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity p-1 text-gray-400 hover:text-blue-600 shrink-0"
                         title="Редактировать"
+                        aria-label={`Редактировать реплику ${seg.timecode}`}
                       >
                         <Pencil className="w-3.5 h-3.5" />
                       </button>

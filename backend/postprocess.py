@@ -1,28 +1,64 @@
 import re
+import threading
 import time
 
-from backend.config import GEMINI_API_KEY, logger
+from backend.config import GEMINI_API_KEY, GEMINI_MODEL, logger
 from backend.metrics import gemini_calls
 
-FILLER_WORDS_RE = re.compile(
-    r"\b(эээ|ээ|эм+|ммм+|хм+|ну вот|вот так вот|как бы|типа того|короче говоря)\b",
-    re.IGNORECASE,
-)
-REPEATED_WORDS_RE = re.compile(r"\b(\w+)(?:\s+\1\b)+", re.IGNORECASE)
+# «что -то» → «что-то»: пробел ПЕРЕД дефисом, но не после.
+# Пробелы с обеих сторон — это тире, его обрабатывает DASH_RE ниже.
+HYPHEN_SPACE_RE = re.compile(r"(\w) +-(\w)")
+# Эталонные стенограммы почти дословные: «ну», «вот», «как бы», «типа»,
+# «короче» в них СОХРАНЯЮТСЯ. Удаляем только нечленораздельные звуки,
+# которые человек никогда не переносит в текст.
+FILLER_WORDS_RE = re.compile(r"\b(э{2,}|эм+|ммм+|хм+)\b", re.IGNORECASE)
+REPEATED_WORDS_RE = re.compile(r"\b([а-яА-ЯёЁa-zA-Z]+)(?:\s+\1\b){2,}", re.IGNORECASE)
+# Em/en-dash без пробелов (или с одним) → " – "; только Unicode-тире, не дефис
+SPACELESS_DASH_RE = re.compile(r"(\w)[—–](\w)")
+# Дефис(ы) или en/em-тире с пробелами вокруг → " – " (en-dash, 146:0 в эталонах)
+DASH_RE = re.compile(r"(?<=\S)[ \t]+(?:-+|[—–])[ \t]+(?=\S)")
+# Эталоны используют "..." (451 случай), а не "…" (74, один файл)
+ELLIPSIS_CHAR_RE = re.compile(r"…")
+MANY_DOTS_RE = re.compile(r"\.{4,}")
+# ASCII-кавычки → «ёлочки» (в эталонах только «»)
+GUILLEMET_RE = re.compile(r'"([^"\n]+)"')
+SPACE_BEFORE_PUNCT_RE = re.compile(r" +([,.!?;:])")
+LEADING_PUNCT_RE = re.compile(r"^[\s,;:]+")
 MULTI_SPACE_RE = re.compile(r" {2,}")
-CAPITALIZE_RE = re.compile(r"([.!?])\s+([а-яa-z])")
+# Капитализация после конца предложения; (?<!\.) исключает "...", после
+# которого эталоны продолжают со строчной («Мне это было... это была...»)
+_CAPITALIZE_BASE_RE = re.compile(r"(?<!\.)([.!?])\s+([а-яa-z])")
+
+
+def _capitalize_after_sentence(m: re.Match) -> str:
+    if m.group(1) == ".":
+        before = m.string[:m.start()]
+        word_match = re.search(r"(\w+)$", before)
+        if word_match and len(word_match.group(1)) <= 4 and word_match.group(1).islower():
+            return m.group(0)
+    return m.group(1) + " " + m.group(2).upper()
 
 
 def regex_cleanup(text: str) -> str:
-    """Базовая чистка текста: filler-слова, повторы, капитализация."""
+    """Чистка текста: звуки-паразиты, повторы, русская типографика.
+
+    Первая буква НЕ капитализируется: ASR-сегмент может начинаться
+    с середины предложения, а заглавную букву реплике ставит
+    backend.turns при склейке.
+    """
+    text = HYPHEN_SPACE_RE.sub(r"\1-\2", text)
     text = FILLER_WORDS_RE.sub("", text)
     text = REPEATED_WORDS_RE.sub(r"\1", text)
+    text = SPACELESS_DASH_RE.sub(r"\1 – \2", text)
+    text = DASH_RE.sub(" – ", text)
+    text = ELLIPSIS_CHAR_RE.sub("...", text)
+    text = MANY_DOTS_RE.sub("...", text)
+    text = GUILLEMET_RE.sub(r"«\1»", text)
+    text = SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+    text = LEADING_PUNCT_RE.sub("", text)
     text = MULTI_SPACE_RE.sub(" ", text)
-    text = CAPITALIZE_RE.sub(lambda m: m.group(1) + " " + m.group(2).upper(), text)
-    text = text.strip()
-    if text and text[0].islower():
-        text = text[0].upper() + text[1:]
-    return text
+    text = _CAPITALIZE_BASE_RE.sub(_capitalize_after_sentence, text)
+    return text.strip()
 
 
 def _get_gemini_model():
@@ -38,10 +74,11 @@ def _get_gemini_model():
         return None
 
     genai.configure(api_key=GEMINI_API_KEY)
-    return genai.GenerativeModel("gemini-2.0-flash")
+    return genai.GenerativeModel(GEMINI_MODEL)
 
 
 _gemini_model = None
+_gemini_lock = threading.Lock()
 
 
 GEMINI_MAX_RETRIES = 3
@@ -52,23 +89,43 @@ def gemini_polish(text: str) -> str:
     """Полировка текста через Gemini API с retry на rate-limit/5xx."""
     global _gemini_model
     if _gemini_model is None:
-        _gemini_model = _get_gemini_model()
+        with _gemini_lock:
+            if _gemini_model is None:
+                _gemini_model = _get_gemini_model()
     if _gemini_model is None:
         return text
 
     prompt = (
-        "Ты — редактор расшифровок телеинтервью. Отредактируй текст расшифровки:\n"
-        "- Убери слова-паразиты (эээ, ну, вот, как бы, типа)\n"
-        "- Исправь пунктуацию и грамматику\n"
-        "- Сохрани смысл дословно, не меняй содержание\n"
-        "- Не добавляй ничего от себя\n"
-        "- Верни ТОЛЬКО отредактированный текст, без пояснений\n\n"
+        "Ты — корректор ДОСЛОВНОЙ стенограммы телеинтервью на русском языке.\n"
+        "Правила:\n"
+        "1. НЕ удаляй и НЕ добавляй слова. Разговорные «ну», «вот», «как бы», "
+        "«типа», «короче», «значит» — часть стенограммы, сохраняй их.\n"
+        "2. Убирай только нечленораздельные звуки: «эээ», «ммм», «хм».\n"
+        "3. Исправляй явные ошибки распознавания по контексту, особенно имена "
+        "собственные: «масс-фильм» → «Мосфильм».\n"
+        "4. Имена собственные пиши с заглавной буквы.\n"
+        "5. Названия (фильмы, песни, театры, каналы) бери в кавычки-ёлочки «».\n"
+        "6. Знаки препинания расставляй по смыслу. Тире — с пробелами: "
+        "«слово – слово». Дефисы внутри слов без пробелов: «что -то» → «что-то».\n"
+        "7. НЕ меняй порядок слов и НЕ переформулируй.\n"
+        "8. НЕ меняй первую букву фрагмента: фрагмент может начинаться "
+        "с середины предложения.\n"
+        "9. Если текст содержит разделитель ---SEGMENT_BREAK---, "
+        "сохрани его без изменений на отдельной строке.\n"
+        "10. Верни ТОЛЬКО текст, без комментариев.\n\n"
+        "Пример:\n"
+        "Вход: ну вот мы эээ и поехали на масс -фильм снимать вечную любовь\n"
+        "Выход: ну вот мы и поехали на «Мосфильм» снимать «Вечную любовь»\n\n"
         f"Текст:\n{text}"
     )
 
     for attempt in range(GEMINI_MAX_RETRIES):
         try:
-            response = _gemini_model.generate_content(prompt)
+            # temperature=0: корректор должен быть детерминированным
+            response = _gemini_model.generate_content(
+                prompt,
+                generation_config={"temperature": 0.0},
+            )
             result = response.text.strip()
             gemini_calls.labels(outcome="success").inc()
             if result:
@@ -100,6 +157,8 @@ def postprocess_segments(segments: list[dict], use_gemini: bool = True) -> list[
 
     for seg in segments:
         seg["text"] = regex_cleanup(seg["text"])
+
+    segments = [seg for seg in segments if seg["text"].strip()]
 
     if not use_gemini or not GEMINI_API_KEY:
         return segments

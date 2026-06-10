@@ -1,8 +1,8 @@
 import os
+import re
 import shutil
 import threading
 import time
-import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -15,8 +15,14 @@ from backend.config import (
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
     OUTPUT_DIR,
+    SPEECHKIT_LITERATURE_TEXT,
     SQLITE_DB_PATH,
+    TECH_BREAK_GAP_SECONDS,
     TEMP_DIR,
+    TURN_INLINE_TC_SECONDS,
+    TURN_MERGE_ENABLED,
+    WHISPER_BEAM_SIZE,
+    WHISPER_INITIAL_PROMPT,
     YANDEX_API_KEY,
     logger,
 )
@@ -29,6 +35,7 @@ from backend.metrics import (
 )
 from backend.models import ProjectStatusEnum
 from backend.store import ProjectStore
+from backend.turns import build_turns
 from backend.utils import (
     detect_fps,
     frames_to_tc,
@@ -45,6 +52,26 @@ _task_executor = ThreadPoolExecutor(
     max_workers=MAX_CONCURRENT_TASKS,
     thread_name_prefix="transcribe",
 )
+_executor_lock = threading.Lock()
+_executor_alive = True
+
+
+def _ensure_executor() -> ThreadPoolExecutor:
+    """Return a live executor, recreating it if a previous shutdown closed it.
+
+    Keeps the app (and tests that run the lifespan more than once) able to
+    submit tasks after a shutdown instead of raising 'cannot schedule new
+    futures after shutdown'.
+    """
+    global _task_executor, _executor_alive
+    with _executor_lock:
+        if not _executor_alive:
+            _task_executor = ThreadPoolExecutor(
+                max_workers=MAX_CONCURRENT_TASKS,
+                thread_name_prefix="transcribe",
+            )
+            _executor_alive = True
+        return _task_executor
 
 PROJECT_TTL_SECONDS = 6 * 3600  # 6 hours
 
@@ -76,6 +103,8 @@ except ImportError:
 _whisper_model = None
 _whisper_model_name = None
 _whisper_lock = threading.Lock()
+_whisperx_model = None
+_whisperx_model_name = None
 _whisperx_align_model = None
 _whisperx_align_meta = None
 _whisperx_diarize_pipeline = None
@@ -97,10 +126,13 @@ def _cleanup_gpu_memory():
 def unload_whisper_models():
     """Полностью выгружает все Whisper/WhisperX модели из памяти."""
     global _whisper_model, _whisper_model_name
+    global _whisperx_model, _whisperx_model_name
     global _whisperx_align_model, _whisperx_align_meta, _whisperx_diarize_pipeline
     with _whisper_lock:
         _whisper_model = None
         _whisper_model_name = None
+        _whisperx_model = None
+        _whisperx_model_name = None
         _whisperx_align_model = None
         _whisperx_align_meta = None
         _whisperx_diarize_pipeline = None
@@ -185,6 +217,10 @@ def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> s
             for chunk in r.iter_content(chunk_size=65536):
                 f.write(chunk)
                 downloaded_size += len(chunk)
+                if downloaded_size > MAX_FILE_SIZE_BYTES:
+                    raise ValueError(
+                        f"Файл слишком большой (>{MAX_FILE_SIZE_BYTES / (1024**3):.0f} ГБ). Скачивание прервано."
+                    )
                 if content_length > 0:
                     pct = min(int(downloaded_size / content_length * 100), 100)
                     projects_db.update_field(project_id, "progress_percent", pct)
@@ -224,7 +260,7 @@ def _generate_recognition_requests(audio_path):
             text_normalization=stt_pb2.TextNormalizationOptions(
                 text_normalization=stt_pb2.TextNormalizationOptions.TEXT_NORMALIZATION_ENABLED,
                 profanity_filter=False,
-                literature_text=True,
+                literature_text=SPEECHKIT_LITERATURE_TEXT,
             ),
             language_restriction=stt_pb2.LanguageRestrictionOptions(
                 restriction_type=stt_pb2.LanguageRestrictionOptions.WHITELIST,
@@ -279,7 +315,7 @@ def _transcribe_with_speechkit(project_id: str, audio_path) -> list[dict]:
                 if not alts:
                     continue
                 alt = alts[0]
-                text = alt.text
+                text = alt.text.strip()
                 words = list(alt.words)
                 if not words:
                     continue
@@ -355,11 +391,38 @@ def get_whisper_model(model_name: str = "medium"):
         return _whisper_model
 
 
-def _transcribe_with_whisperx(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
+def _build_whisper_prompt(original_filename: str) -> str:
+    """initial_prompt для Whisper: базовая подсказка + имена из имени файла.
+
+    Подсказка задаёт декодеру контекст (язык, жанр, имена собственные),
+    что снижает ошибки в редких именах и улучшает пунктуацию.
+    """
+    names = parse_filename_metadata(original_filename).get("speakers") or []
+    if names:
+        return f"{WHISPER_INITIAL_PROMPT} Участники: {', '.join(names)}."
+    return WHISPER_INITIAL_PROMPT
+
+
+_WHISPERX_SPEAKER_RE = re.compile(r"^SPEAKER_0*(\d+)$")
+
+
+def _normalize_speaker_id(raw: str) -> str:
+    m = _WHISPERX_SPEAKER_RE.match(raw)
+    return m.group(1) if m else raw
+
+
+def _transcribe_with_whisperx(
+    project_id: str,
+    file_path,
+    model_name: str = "medium",
+    initial_prompt: str | None = None,
+    original_filename: str | None = None,
+) -> list[dict]:
     """Распознавание через WhisperX: транскрипция + alignment + диаризация pyannote.
 
-    Возвращает сегменты с channel_tag = speaker label (SPEAKER_00, ...).
+    Возвращает сегменты с channel_tag = speaker label (нормализованный: "0", "1", ...).
     """
+    global _whisperx_model, _whisperx_model_name
     global _whisperx_align_model, _whisperx_align_meta, _whisperx_diarize_pipeline
 
     file_path = Path(file_path)
@@ -374,33 +437,52 @@ def _transcribe_with_whisperx(project_id: str, file_path, model_name: str = "med
                 project_id[:8], file_path.name, file_size_mb, model_name, device)
 
     compute_type = "float16" if device == "cuda" else "int8"
-    model = whisperx.load_model(model_name, device, compute_type=compute_type, language="ru")
+    with _whisper_lock:
+        if _whisperx_model is None or _whisperx_model_name != model_name:
+            logger.info("[%s] Загрузка WhisperX модели '%s'...", project_id[:8], model_name)
+            _whisperx_model = whisperx.load_model(
+                model_name, device, compute_type=compute_type, language="ru",
+            )
+            _whisperx_model_name = model_name
+        if initial_prompt and hasattr(_whisperx_model, "options"):
+            _whisperx_model.options = _whisperx_model.options._replace(initial_prompt=initial_prompt)
 
     audio = whisperx.load_audio(str(file_path))
-    result = model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
+    result = _whisperx_model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
     logger.info("[%s] WhisperX: транскрипция завершена, %d сегментов", project_id[:8], len(result["segments"]))
 
-    if _whisperx_align_model is None:
-        logger.info("[%s] Загрузка alignment-модели...", project_id[:8])
-        _whisperx_align_model, _whisperx_align_meta = whisperx.load_align_model(
-            language_code="ru", device=device,
-        )
+    with _whisper_lock:
+        if _whisperx_align_model is None:
+            logger.info("[%s] Загрузка alignment-модели...", project_id[:8])
+            _whisperx_align_model, _whisperx_align_meta = whisperx.load_align_model(
+                language_code="ru", device=device,
+            )
     result = whisperx.align(
         result["segments"], _whisperx_align_model, _whisperx_align_meta,
         audio, device, return_char_alignments=False,
     )
     logger.info("[%s] WhisperX: alignment завершён", project_id[:8])
 
-    if _whisperx_diarize_pipeline is None:
-        hf_token = HF_TOKEN
-        if not hf_token:
-            logger.warning("[%s] HF_TOKEN не задан — диаризация недоступна, все сегменты = speaker 0", project_id[:8])
-        else:
-            logger.info("[%s] Загрузка diarization pipeline...", project_id[:8])
-            _whisperx_diarize_pipeline = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
+    with _whisper_lock:
+        if _whisperx_diarize_pipeline is None:
+            hf_token = HF_TOKEN
+            if not hf_token:
+                logger.warning("[%s] HF_TOKEN не задан — диаризация недоступна, все сегменты = speaker 0", project_id[:8])
+            else:
+                logger.info("[%s] Загрузка diarization pipeline...", project_id[:8])
+                _whisperx_diarize_pipeline = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
 
     if _whisperx_diarize_pipeline is not None:
-        diarize_segments = _whisperx_diarize_pipeline(audio)
+        diarize_kwargs = {}
+        if original_filename:
+            meta = parse_filename_metadata(original_filename)
+            num_speakers = len(meta.get("speakers", []))
+            if num_speakers >= 2:
+                diarize_kwargs["min_speakers"] = num_speakers
+                diarize_kwargs["max_speakers"] = num_speakers + 1
+                logger.info("[%s] Диаризация: хинт %d-%d спикеров из имени файла",
+                            project_id[:8], num_speakers, num_speakers + 1)
+        diarize_segments = _whisperx_diarize_pipeline(audio, **diarize_kwargs)
         result = whisperx.assign_word_speakers(diarize_segments, result)
         logger.info("[%s] WhisperX: диаризация завершена", project_id[:8])
 
@@ -410,7 +492,7 @@ def _transcribe_with_whisperx(project_id: str, file_path, model_name: str = "med
         if not text:
             continue
 
-        speaker = seg.get("speaker", "SPEAKER_00")
+        speaker = _normalize_speaker_id(seg.get("speaker", "SPEAKER_00"))
 
         words = []
         for w in seg.get("words", []):
@@ -437,7 +519,12 @@ def _transcribe_with_whisperx(project_id: str, file_path, model_name: str = "med
     return segments
 
 
-def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
+def _transcribe_with_whisper(
+    project_id: str,
+    file_path,
+    model_name: str = "medium",
+    initial_prompt: str | None = None,
+) -> list[dict]:
     """Распознавание через faster-whisper (fallback без диаризации).
 
     Используется когда WhisperX недоступен.
@@ -458,8 +545,9 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
         str(file_path),
         language="ru",
         word_timestamps=True,
-        beam_size=5,
+        beam_size=WHISPER_BEAM_SIZE,
         vad_filter=True,
+        initial_prompt=initial_prompt,
     )
 
     segments = []
@@ -496,40 +584,63 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     meta = parse_filename_metadata(original_filename)
     projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
 
-    fps = detect_fps(str(video_path)) if video_path.exists() else 25
+    if video_path.exists():
+        fps = detect_fps(str(video_path))
+    else:
+        fps = 25
+        logger.warning("[%s] Видеофайл не найден для определения FPS, используется 25", project_id[:8])
 
     speaker_durations: dict[str, float] = {}
-    raw_segments = []
     start_frames = tc_to_frames(meta["start_tc"], fps)
 
+    # Длительности спикеров считаются по сырым ASR-сегментам (до склейки).
+    events = []
     for seg in segments:
         channel = str(seg["channel_tag"])
         text = seg["text"]
         words = seg["words"]
-        if not words:
+        if not words or not text.strip():
             continue
 
         start_s = words[0]["start_ms"] / 1000.0
         end_s = words[-1]["end_ms"] / 1000.0
-
-        dur = end_s - start_s
-        speaker_durations[channel] = speaker_durations.get(channel, 0) + dur
-
-        abs_frames = start_frames + int(start_s * fps)
-        tc_formatted = frames_to_tc(abs_frames, fps)
-
-        raw_segments.append({
-            "timecode": tc_formatted,
+        speaker_durations[channel] = speaker_durations.get(channel, 0) + (end_s - start_s)
+        events.append({
             "speaker": channel,
-            "text": text,
+            "text": text.strip(),
+            "start_s": start_s,
+            "end_s": end_s,
         })
+
+    if TURN_MERGE_ENABLED:
+        raw_segments = build_turns(
+            events, start_frames, fps,
+            inline_tc_seconds=TURN_INLINE_TC_SECONDS,
+            tech_break_gap_seconds=TECH_BREAK_GAP_SECONDS,
+        )
+    else:
+        # Legacy: один ASR-сегмент = один абзац
+        raw_segments = [
+            {
+                "timecode": frames_to_tc(start_frames + round(ev["start_s"] * fps), fps),
+                "speaker": ev["speaker"],
+                "text": ev["text"],
+            }
+            for ev in events
+        ]
 
     detected_speakers = {}
     sorted_voices = sorted(speaker_durations.items(), key=lambda x: x[1], reverse=True)
     file_names = meta["speakers"]
 
+    if file_names and len(file_names) != len(sorted_voices):
+        logger.warning(
+            "[%s] Несовпадение: %d имён в файле, %d голосов обнаружено — маппинг может быть неточным",
+            project_id[:8], len(file_names), len(sorted_voices),
+        )
+
     for i, (voice_id, dur) in enumerate(sorted_voices):
-        suggested = f"Спикер {voice_id}"
+        suggested = f"Спикер {int(voice_id) + 1}" if voice_id.isdigit() else f"Спикер {voice_id}"
         if i < len(file_names):
             suggested = file_names[i]
 
@@ -541,7 +652,12 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     speaker_count = len(detected_speakers)
     diarization_speakers.observe(speaker_count)
     low_confidence = speaker_count < 2 or speaker_count > 8
-    if low_confidence:
+    if speaker_count == 1:
+        logger.warning(
+            "[%s] Обнаружен только 1 спикер — возможно диаризация не сработала (проверьте HF_TOKEN)",
+            project_id[:8],
+        )
+    elif low_confidence:
         logger.warning(
             "[%s] Подозрительное число спикеров (%d) — рекомендуется ручная проверка",
             project_id[:8], speaker_count,
@@ -581,6 +697,9 @@ def process_video_task(project_id: str, disk_url: str):
     """Фоновая задача: скачивание -> конвертация -> распознавание с диаризацией."""
     local_video_path = TEMP_DIR / f"{project_id}_video"
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
+    projects_total.labels(engine="speechkit").inc()
+    active_projects.inc()
+    task_start = time.time()
 
     try:
         _cleanup_old_projects()
@@ -601,17 +720,24 @@ def process_video_task(project_id: str, disk_url: str):
         logger.info("[%s] Распознавание с диаризацией...", project_id[:8])
         segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
-        # 4. ОБРАБОТКА РЕЗУЛЬТАТА
+        # 4. ПОСТОБРАБОТКА ТЕКСТА
+        from backend.postprocess import postprocess_segments
+        logger.info("[%s] Постобработка текста...", project_id[:8])
+        segments = postprocess_segments(segments)
+
+        # 5. ОБРАБОТКА РЕЗУЛЬТАТА
         _process_recognition_result(project_id, segments, original_filename, local_video_path)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
+        transcribe_duration.labels(engine="speechkit").observe(time.time() - task_start)
 
     except Exception as e:
-        tb = traceback.format_exc()
+        project_errors.labels(stage="video_task").inc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
         projects_db.update_status(project_id, ProjectStatusEnum.ERROR,
-                                  error=f"{e}\n\nTraceback:\n{tb}")
+                                  error=str(e))
 
     finally:
+        active_projects.dec()
         for path in (local_video_path, local_audio_path):
             try:
                 if path.exists():
@@ -648,12 +774,20 @@ def process_uploaded_file_task(
         if engine == "whisper":
             projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
             projects_db.update_field(project_id, "progress_percent", None)
+            initial_prompt = _build_whisper_prompt(original_filename)
             if WHISPERX_AVAILABLE:
                 logger.info("[%s] WhisperX (с диаризацией): модель %s", project_id[:8], whisper_model)
-                segments = _transcribe_with_whisperx(project_id, local_video_path, whisper_model)
+                segments = _transcribe_with_whisperx(
+                    project_id, local_video_path, whisper_model,
+                    initial_prompt=initial_prompt,
+                    original_filename=original_filename,
+                )
             else:
                 logger.info("[%s] faster-whisper (без диаризации): модель %s", project_id[:8], whisper_model)
-                segments = _transcribe_with_whisper(project_id, local_video_path, whisper_model)
+                segments = _transcribe_with_whisper(
+                    project_id, local_video_path, whisper_model,
+                    initial_prompt=initial_prompt,
+                )
         else:
             projects_db.update_status(project_id, ProjectStatusEnum.CONVERTING)
             projects_db.update_field(project_id, "progress_percent", None)
@@ -686,11 +820,10 @@ def process_uploaded_file_task(
             logger.warning("[%s] Не удалось автосохранить DOCX: %s", project_id[:8], e)
 
     except Exception as e:
-        tb = traceback.format_exc()
         project_errors.labels(stage="upload_task").inc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
         projects_db.update_status(project_id, ProjectStatusEnum.ERROR,
-                                  error=f"{e}\n\nTraceback:\n{tb}")
+                                  error=str(e))
 
     finally:
         active_projects.dec()
@@ -740,11 +873,14 @@ def _maybe_retry(project_id: str):
     func = _TASK_REGISTRY[task_func_name]
     task_kwargs = proj.get("task_kwargs", {})
 
-    def _delayed_retry():
-        time.sleep(delay)
-        submit_task(func, *task_args, project_id=project_id, **task_kwargs)
-
-    threading.Thread(target=_delayed_retry, daemon=True).start()
+    # threading.Timer holds a single sleeping thread per retry that exits
+    # right after firing — cheaper than a raw Thread doing time.sleep.
+    timer = threading.Timer(
+        delay, submit_task, args=(func, *task_args),
+        kwargs={"project_id": project_id, **task_kwargs},
+    )
+    timer.daemon = True
+    timer.start()
 
 
 MIN_RAM_MB = int(os.getenv("MIN_RAM_MB", "500"))
@@ -785,7 +921,7 @@ def submit_task(func, *args, project_id: str | None = None, **kwargs):
             if project_id:
                 _maybe_retry(project_id)
 
-    _task_executor.submit(_wrapper)
+    _ensure_executor().submit(_wrapper)
 
 
 def cancel_project(project_id: str) -> bool:
@@ -831,7 +967,10 @@ def shutdown_executor():
         if proj.get("status") in in_flight:
             projects_db.update_status(pid, ProjectStatusEnum.QUEUED)
             logger.info("[%s] Сохранён как QUEUED для восстановления", pid[:8])
-    _task_executor.shutdown(wait=False, cancel_futures=True)
+    global _executor_alive
+    with _executor_lock:
+        _task_executor.shutdown(wait=False, cancel_futures=True)
+        _executor_alive = False
 
 
 def auto_export_project(project_id: str, output_path: str) -> str | None:
@@ -847,12 +986,17 @@ def auto_export_project(project_id: str, output_path: str) -> str | None:
     final_map = {}
     abbr_map = {}
 
+    _TECH_SPEAKER_NAMES = {"АЗК", "ГЗК"}
+    legend_exclude: set[str] = set()
+
     for speaker_id, info in speakers.items():
         name = info.get("suggested_name", f"Спикер {speaker_id}")
         final_map[speaker_id] = name
+        if name.strip().upper() in _TECH_SPEAKER_NAMES:
+            legend_exclude.add(speaker_id)
 
     abbr_map = _compute_smart_abbreviations(final_map)
-    return generate_docx(proj, final_map, abbr_map, output_path)
+    return generate_docx(proj, final_map, abbr_map, output_path, legend_exclude=legend_exclude)
 
 
 def _compute_smart_abbreviations(name_map: dict) -> dict:

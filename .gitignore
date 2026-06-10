@@ -30,3 +30,5 @@ video_source.mp4
 *.db-wal
 *.db-shm
 *.db.backup
+# SQLite backups
+projects.db.backup*

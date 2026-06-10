@@ -26,10 +26,7 @@ export class ErrorBoundary extends React.Component<React.PropsWithChildren, Stat
           {this.state.error?.message || 'Произошла непредвиденная ошибка'}
         </p>
         <button
-          onClick={() => {
-            this.setState({ hasError: false, error: null });
-            window.location.reload();
-          }}
+          onClick={() => window.location.reload()}
           className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700"
         >
           Перезагрузить

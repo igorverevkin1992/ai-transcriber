@@ -90,11 +90,15 @@ export const api = {
       onProgress(data.status_label, data.progress_percent ?? 0);
 
       await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(resolve, POLL_INTERVAL_MS);
-        signal?.addEventListener('abort', () => {
+        const onAbort = () => {
           clearTimeout(timeout);
           reject(new DOMException('Операция отменена', 'AbortError'));
-        }, { once: true });
+        };
+        const timeout = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        }, POLL_INTERVAL_MS);
+        signal?.addEventListener('abort', onAbort, { once: true });
       });
     }
   },
@@ -144,20 +148,29 @@ export const api = {
     };
   },
 
-  confirmMapping: async (projectId: string, mapping: MappingDecision): Promise<Blob> => {
+  confirmMapping: async (
+    projectId: string,
+    mapping: MappingDecision,
+    editedSegments?: Array<{ timecode: string; speaker: string; text: string }>,
+  ): Promise<Blob> => {
     const mappingList = Object.keys(mapping).map(tagId => ({
       speaker_label: tagId,
       mapped_name: mapping[tagId].name,
       abbreviation: mapping[tagId].abbreviation,
     }));
 
+    const body: Record<string, unknown> = {
+      mappings: mappingList,
+      filename: 'transcript.docx',
+    };
+    if (editedSegments) {
+      body.edited_segments = editedSegments;
+    }
+
     const response = await fetch(`${API_BASE_URL}/projects/${projectId}/export`, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({
-        mappings: mappingList,
-        filename: 'transcript.docx',
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) throw new Error('Не удалось сгенерировать документ');
@@ -188,7 +201,7 @@ export const api = {
   },
 
   batchStatus: async (projectIds: string[]): Promise<BatchStatus> => {
-    const response = await fetch(`${API_BASE_URL}/batch/status?ids=${projectIds.join(',')}`, { headers: authHeaders() });
+    const response = await fetch(`${API_BASE_URL}/batch/status?ids=${encodeURIComponent(projectIds.join(','))}`, { headers: authHeaders() });
     if (!response.ok) throw new Error('Ошибка получения статуса пакета');
     return await response.json();
   },
@@ -210,7 +223,7 @@ export const api = {
   },
 
   batchDownload: async (projectIds: string[]): Promise<Blob> => {
-    const response = await fetch(`${API_BASE_URL}/batch/download?ids=${projectIds.join(',')}`, { headers: authHeaders() });
+    const response = await fetch(`${API_BASE_URL}/batch/download?ids=${encodeURIComponent(projectIds.join(','))}`, { headers: authHeaders() });
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({}));
       throw new Error(errorBody.detail || 'Ошибка скачивания архива');
@@ -219,7 +232,7 @@ export const api = {
   },
 
   batchVerificationData: async (projectIds: string[]): Promise<BatchVerificationResponse> => {
-    const response = await fetch(`${API_BASE_URL}/batch/verification-data?ids=${projectIds.join(',')}`, { headers: authHeaders() });
+    const response = await fetch(`${API_BASE_URL}/batch/verification-data?ids=${encodeURIComponent(projectIds.join(','))}`, { headers: authHeaders() });
     if (!response.ok) throw new Error('Ошибка получения данных верификации');
     return await response.json();
   },

@@ -3,6 +3,7 @@ import { ProjectData, SpeakerInfo, TranscriptSegment } from '../types';
 import { SpeakerMatrix } from './SpeakerMatrix';
 import { TranscriptPreview } from './TranscriptPreview';
 import { api } from '../services/api';
+import { downloadBlob } from '../services/download';
 
 interface Props {
   data: ProjectData;
@@ -22,8 +23,8 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
     if (s1Index === -1 || s2Index === -1) return;
 
     const newSpeakers = [...speakers];
-    const s1 = newSpeakers[s1Index];
-    const s2 = newSpeakers[s2Index];
+    const s1 = { ...newSpeakers[s1Index] };
+    const s2 = { ...newSpeakers[s2Index] };
 
     const tempCand = s1.candidate_id;
     const tempName = s1.custom_name;
@@ -37,6 +38,8 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
     s2.custom_name = tempName;
     s2.custom_abbr = tempAbbr;
 
+    newSpeakers[s1Index] = s1;
+    newSpeakers[s2Index] = s2;
     setSpeakers(newSpeakers);
   };
 
@@ -90,20 +93,17 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
         return acc;
       }, {} as any);
 
-      const blob = await api.confirmMapping(data.id, mapping);
+      const editedSegments = segments.map(seg => ({
+        timecode: seg.timecode,
+        speaker: seg.tag_id,
+        text: seg.text,
+      }));
 
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = data.original_filename.replace(/\.[^.]+$/, '.docx');
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-
+      const blob = await api.confirmMapping(data.id, mapping, editedSegments);
+      downloadBlob(blob, data.original_filename.replace(/\.[^.]+$/, '.docx'));
       onFinish();
-    } catch (e: any) {
-      onError(e?.message || 'Ошибка генерации документа');
+    } catch (e: unknown) {
+      onError(e instanceof Error ? e.message : 'Ошибка генерации документа');
     } finally {
       setIsDownloading(false);
     }

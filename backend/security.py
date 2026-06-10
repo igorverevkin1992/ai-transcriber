@@ -16,7 +16,7 @@ ALLOWED_MIME_TYPES = {
     "audio/ogg", "audio/flac", "audio/x-flac", "audio/mp4", "audio/x-m4a",
     "video/mp4", "video/quicktime", "video/x-msvideo", "video/x-matroska",
     "video/x-ms-wmv", "video/x-mpegts", "video/mpeg", "application/mxf",
-    "video/mxf", "application/octet-stream",
+    "video/mxf",
 }
 
 

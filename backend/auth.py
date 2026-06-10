@@ -1,3 +1,5 @@
+import hmac
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -27,7 +29,7 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         provided = request.headers.get("X-API-Key", "")
-        if provided != API_KEY:
+        if not hmac.compare_digest(provided, API_KEY):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Неверный или отсутствующий API-ключ"},

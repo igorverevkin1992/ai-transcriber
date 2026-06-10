@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 import { saveBatchSession, clearBatchSession } from '../services/batchSession';
+import { downloadBlob } from '../services/download';
 import { BatchFileInfo } from '../types';
 
 interface Props {
@@ -99,8 +100,11 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   const pollRef = useRef<ReturnType<typeof setInterval>>();
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const logEndRef = useRef<HTMLDivElement>(null);
+  const logScrollRef = useRef<HTMLDivElement>(null);
   const prevBatchFilesRef = useRef<BatchFileInfo[]>([]);
   const pollFailCountRef = useRef(0);
+  const trackersRef = useRef<FileTracker[]>(trackers);
+  trackersRef.current = trackers;
 
   const addLog = useCallback((msg: string) => {
     const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -128,9 +132,15 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     };
   }, []);
 
-  // Auto-scroll log
+  // Auto-scroll log only when the user is already near the bottom,
+  // so manual scroll-up to read earlier entries isn't interrupted.
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = logScrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    if (nearBottom) {
+      logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [logMessages]);
 
   // Phase 1: Preload Whisper model (if needed), then upload files to server
@@ -215,7 +225,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   useEffect(() => {
     if (state !== 'processing') return;
 
-    const projectIds = trackers
+    const projectIds = trackersRef.current
       .filter(t => t.projectId)
       .map(t => t.projectId!);
 
@@ -229,25 +239,23 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         const status = await api.batchStatus(projectIds);
         pollFailCountRef.current = 0;
         setPollError(null);
-        setBatchFiles(prev => {
-          // Detect status changes and log them
-          const prevMap = new Map(prevBatchFilesRef.current.map(f => [f.id, f]));
-          for (const file of status.files) {
-            const prevFile = prevMap.get(file.id);
-            if (prevFile && prevFile.status !== file.status) {
-              if (file.status === 'completed') {
-                addLog(`✓ Обработан: ${file.filename}`);
-              } else if (file.status === 'error') {
-                addLog(`✗ Ошибка: ${file.filename} — ${file.error || 'неизвестная ошибка'}`);
-              } else {
-                const label = STEP_LABELS[file.status] || file.status_label;
-                addLog(`${file.filename} → ${label}`);
-              }
+        // Detect status changes and log them (outside the state updater)
+        const prevMap = new Map(prevBatchFilesRef.current.map(f => [f.id, f]));
+        for (const file of status.files) {
+          const prevFile = prevMap.get(file.id);
+          if (prevFile && prevFile.status !== file.status) {
+            if (file.status === 'completed') {
+              addLog(`✓ Обработан: ${file.filename}`);
+            } else if (file.status === 'error') {
+              addLog(`✗ Ошибка: ${file.filename} — ${file.error || 'неизвестная ошибка'}`);
+            } else {
+              const label = STEP_LABELS[file.status] || file.status_label;
+              addLog(`${file.filename} → ${label}`);
             }
           }
-          prevBatchFilesRef.current = status.files;
-          return status.files;
-        });
+        }
+        prevBatchFilesRef.current = status.files;
+        setBatchFiles(status.files);
         setCompletedCount(status.completed);
         setErrorCount(status.errors);
 
@@ -271,7 +279,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     poll();
     pollRef.current = setInterval(poll, 2000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [state, trackers, addLog]);
+  }, [state, addLog]);
 
   const handleDownload = useCallback(async () => {
     setIsDownloading(true);
@@ -281,23 +289,16 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         .map(t => t.projectId!);
 
       const blob = await api.batchDownload(projectIds);
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'transcripts.zip';
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-    } catch (e: any) {
-      onError(e?.message || 'Ошибка скачивания архива');
+      downloadBlob(blob, 'transcripts.zip');
+    } catch (e: unknown) {
+      onError(e instanceof Error ? e.message : 'Ошибка скачивания архива');
     } finally {
       setIsDownloading(false);
     }
   }, [trackers, onError]);
 
-  const totalFiles = files.length;
-  const uploadPercent = Math.round((uploadedCount / totalFiles) * 100);
+  const totalFiles = trackers.length || files.length;
+  const uploadPercent = totalFiles > 0 ? Math.round((uploadedCount / totalFiles) * 100) : 0;
   const doneTotal = completedCount + errorCount;
   const processPercent = totalFiles > 0 ? Math.round((doneTotal / totalFiles) * 100) : 0;
 
@@ -327,26 +328,27 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   );
 
   // Build unified file status list
-  const fileStatuses = trackers.map(t => {
+  const fileStatuses = trackers.map((t, idx) => {
+    const key = t.projectId || `${t.file.name}_${idx}`;
     if (t.uploadError) {
-      return { name: t.file.name, status: 'error', label: 'Ошибка загрузки', error: t.uploadError, step: -1 };
+      return { key, name: t.file.name, status: 'error', label: 'Ошибка загрузки', error: t.uploadError, step: -1 };
     }
     if (!t.projectId) {
       if (state === 'uploading') {
-        return { name: t.file.name, status: 'waiting', label: 'Ожидание...', step: 0 };
+        return { key, name: t.file.name, status: 'waiting', label: 'Ожидание...', step: 0 };
       }
-      return { name: t.file.name, status: 'error', label: 'Не загружен', step: -1 };
+      return { key, name: t.file.name, status: 'error', label: 'Не загружен', step: -1 };
     }
     const batchFile = batchFiles.find(bf => bf.id === t.projectId);
     if (batchFile) {
       const step = STEP_ORDER[batchFile.status] ?? 0;
       const label = STEP_LABELS[batchFile.status] || batchFile.status_label;
-      return { name: t.file.name, status: batchFile.status, label, error: batchFile.error, step };
+      return { key, name: t.file.name, status: batchFile.status, label, error: batchFile.error, step };
     }
     if (state === 'uploading') {
-      return { name: t.file.name, status: 'uploaded', label: 'Загружен на сервер', step: 0 };
+      return { key, name: t.file.name, status: 'uploaded', label: 'Загружен на сервер', step: 0 };
     }
-    return { name: t.file.name, status: 'queued', label: 'В очереди', step: 0 };
+    return { key, name: t.file.name, status: 'queued', label: 'В очереди', step: 0 };
   });
 
   return (
@@ -523,8 +525,8 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
             </div>
           </div>
           <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
-            {fileStatuses.map((fs, i) => (
-              <div key={i} className={`flex items-center px-4 py-2 ${
+            {fileStatuses.map((fs) => (
+              <div key={fs.key} className={`flex items-center px-4 py-2 ${
                 fs.status === 'completed' ? 'bg-green-50/50' :
                 fs.status === 'error' ? 'bg-red-50/50' : ''
               }`}>
@@ -580,13 +582,13 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
             <Activity className="w-3.5 h-3.5 text-green-400" />
             <span className="text-sm font-medium text-gray-300">Журнал</span>
             {state !== 'done' && (
-              <span className="ml-auto flex h-2 w-2">
+              <span className="ml-auto relative flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-green-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
               </span>
             )}
           </div>
-          <div className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-relaxed">
+          <div ref={logScrollRef} className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-relaxed">
             {logMessages.length === 0 ? (
               <p className="text-gray-600">Ожидание...</p>
             ) : (
