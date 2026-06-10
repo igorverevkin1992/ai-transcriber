@@ -29,7 +29,12 @@ CAPITALIZE_RE = re.compile(r"(?<!\.)([.!?])\s+([а-яa-z])")
 
 
 def regex_cleanup(text: str) -> str:
-    """Чистка текста: звуки-паразиты, повторы, русская типографика."""
+    """Чистка текста: звуки-паразиты, повторы, русская типографика.
+
+    Первая буква НЕ капитализируется: ASR-сегмент может начинаться
+    с середины предложения, а заглавную букву реплике ставит
+    backend.turns при склейке.
+    """
     text = HYPHEN_SPACE_RE.sub(r"\1-\2", text)
     text = FILLER_WORDS_RE.sub("", text)
     text = REPEATED_WORDS_RE.sub(r"\1", text)
@@ -41,10 +46,7 @@ def regex_cleanup(text: str) -> str:
     text = LEADING_PUNCT_RE.sub("", text)
     text = MULTI_SPACE_RE.sub(" ", text)
     text = CAPITALIZE_RE.sub(lambda m: m.group(1) + " " + m.group(2).upper(), text)
-    text = text.strip()
-    if text and text[0].islower():
-        text = text[0].upper() + text[1:]
-    return text
+    return text.strip()
 
 
 def _get_gemini_model():

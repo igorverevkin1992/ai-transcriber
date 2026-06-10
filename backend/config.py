@@ -48,6 +48,11 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # --- Limits ---
 MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
 
+# --- Turn building (склейка реплик в абзацы, как в эталонных стенограммах) ---
+TURN_MERGE_ENABLED = os.getenv("TURN_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
+TURN_INLINE_TC_SECONDS = float(os.getenv("TURN_INLINE_TC_SECONDS", "60"))
+TECH_BREAK_GAP_SECONDS = float(os.getenv("TECH_BREAK_GAP_SECONDS", "30"))
+
 
 def _auto_detect_concurrent_tasks() -> int:
     """Автоопределение MAX_CONCURRENT_TASKS на основе VRAM (если есть GPU)."""

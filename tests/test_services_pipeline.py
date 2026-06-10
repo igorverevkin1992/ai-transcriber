@@ -86,6 +86,58 @@ class TestProcessRecognitionResult:
         )
         assert store["p4"]["result"]["low_confidence_diarization"] is True
 
+    def test_merges_same_speaker_turns(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("pm1", {"id": "pm1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        segments = [
+            _seg("0", "Привет.", 0, 1000),
+            _seg("0", "Как дела?", 1500, 2500),
+            _seg("1", "Хорошо.", 3000, 4000),
+        ]
+        services._process_recognition_result("pm1", segments, "file.mp4", Path("/nope.mp4"))
+        result = store["pm1"]["result"]["segments"]
+        assert len(result) == 2
+        assert result[0]["text"] == "Привет. Как дела?"
+        assert result[1]["text"] == "Хорошо."
+
+    def test_speaker_durations_unaffected_by_merge(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("pm2", {"id": "pm2", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        segments = [
+            _seg("0", "Привет.", 0, 1000),
+            _seg("0", "Как дела?", 1500, 2500),
+            _seg("1", "Хорошо.", 3000, 4000),
+        ]
+        services._process_recognition_result("pm2", segments, "file.mp4", Path("/nope.mp4"))
+        speakers = store["pm2"]["result"]["speakers"]
+        assert speakers["0"]["duration_sec"] == 2.0
+        assert speakers["1"]["duration_sec"] == 1.0
+
+    def test_turn_merge_disabled(self, fresh_store, monkeypatch):
+        store, _, _ = fresh_store
+        monkeypatch.setattr(services, "TURN_MERGE_ENABLED", False)
+        store.create("pm3", {"id": "pm3", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        segments = [
+            _seg("0", "Привет.", 0, 1000),
+            _seg("0", "Как дела?", 1500, 2500),
+        ]
+        services._process_recognition_result("pm3", segments, "file.mp4", Path("/nope.mp4"))
+        assert len(store["pm3"]["result"]["segments"]) == 2
+
+    def test_tech_break_inserted_on_long_gap(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("pm4", {"id": "pm4", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        segments = [
+            _seg("0", "До перерыва.", 0, 5000),
+            _seg("0", "После перерыва.", 50000, 55000),
+        ]
+        services._process_recognition_result("pm4", segments, "file.mp4", Path("/nope.mp4"))
+        result = store["pm4"]["result"]["segments"]
+        assert [s["text"] for s in result] == [
+            "До перерыва.", "(Технические моменты).", "После перерыва.",
+        ]
+        assert result[1]["timecode"] == "00:00:05:00"
+
 
 class TestProcessVideoTask:
     def test_runs_postprocessing(self, fresh_store, monkeypatch):

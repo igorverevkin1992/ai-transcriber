@@ -3,38 +3,41 @@ from backend.postprocess import postprocess_segments, regex_cleanup
 
 class TestRegexCleanup:
     def test_removes_hesitation_sounds(self):
-        assert regex_cleanup("эээ давай") == "Давай"
-        assert regex_cleanup("мммм да") == "Да"
-        assert regex_cleanup("хм понятно") == "Понятно"
+        assert regex_cleanup("эээ давай") == "давай"
+        assert regex_cleanup("мммм да") == "да"
+        assert regex_cleanup("хм понятно") == "понятно"
 
     def test_preserves_discourse_words(self):
         # Эталонные стенограммы почти дословные: ну/вот/как бы/короче сохраняются
-        assert regex_cleanup("ну вот хорошо") == "Ну вот хорошо"
-        assert regex_cleanup("это как бы важно") == "Это как бы важно"
-        assert regex_cleanup("короче говоря, мы поехали") == "Короче говоря, мы поехали"
-        assert regex_cleanup("типа того") == "Типа того"
+        assert regex_cleanup("ну вот хорошо") == "ну вот хорошо"
+        assert regex_cleanup("это как бы важно") == "это как бы важно"
+        assert regex_cleanup("короче говоря, мы поехали") == "короче говоря, мы поехали"
+        assert regex_cleanup("типа того") == "типа того"
 
     def test_collapses_triple_repeated_words(self):
-        assert regex_cleanup("слово слово слово") == "Слово"
+        assert regex_cleanup("слово слово слово") == "слово"
 
     def test_preserves_double_repeated_words(self):
-        assert regex_cleanup("привет привет мир") == "Привет привет мир"
-        assert regex_cleanup("очень очень важно") == "Очень очень важно"
+        assert regex_cleanup("привет привет мир") == "привет привет мир"
+        assert regex_cleanup("очень очень важно") == "очень очень важно"
 
     def test_preserves_kak_by_to_ni_bylo(self):
-        assert "как бы то ни было" in regex_cleanup("как бы то ни было").lower()
+        assert "как бы то ни было" in regex_cleanup("как бы то ни было")
 
     def test_capitalizes_after_punctuation(self):
-        assert regex_cleanup("привет. как дела") == "Привет. Как дела"
-        assert regex_cleanup("да? хорошо") == "Да? Хорошо"
+        assert regex_cleanup("привет. как дела") == "привет. Как дела"
+        assert regex_cleanup("да? хорошо") == "да? Хорошо"
 
     def test_no_capitalize_after_ellipsis(self):
         # Эталон: «Мне это было... это была другая история» — строчная после "..."
         assert regex_cleanup("Мне это было... это была другая история") == \
             "Мне это было... это была другая история"
 
-    def test_capitalizes_first_letter(self):
-        assert regex_cleanup("привет мир") == "Привет мир"
+    def test_preserves_first_letter_case(self):
+        # ASR-сегмент может начинаться с середины предложения; заглавную букву
+        # реплике ставит backend.turns при склейке.
+        assert regex_cleanup("привет мир") == "привет мир"
+        assert regex_cleanup("Привет мир") == "Привет мир"
 
     def test_empty_string(self):
         assert regex_cleanup("") == ""
@@ -43,60 +46,58 @@ class TestRegexCleanup:
         assert regex_cleanup("Привет, мир.") == "Привет, мир."
 
     def test_fixes_hyphen_spacing(self):
-        assert regex_cleanup("что -то") == "Что-то"
-        assert regex_cleanup("какой -нибудь") == "Какой-нибудь"
-        assert regex_cleanup("из -за") == "Из-за"
+        assert regex_cleanup("что -то") == "что-то"
+        assert regex_cleanup("какой -нибудь") == "какой-нибудь"
+        assert regex_cleanup("из -за") == "из-за"
 
     def test_multi_space_collapse(self):
-        assert regex_cleanup("слово    другое") == "Слово другое"
+        assert regex_cleanup("слово    другое") == "слово другое"
 
 
 class TestTypography:
     def test_spaced_hyphen_becomes_dash(self):
-        assert regex_cleanup("мы пришли - и началось") == "Мы пришли – и началось"
+        assert regex_cleanup("мы пришли - и началось") == "мы пришли – и началось"
 
     def test_double_hyphen_becomes_dash(self):
-        assert regex_cleanup("слово -- другое") == "Слово – другое"
+        assert regex_cleanup("слово -- другое") == "слово – другое"
 
     def test_em_dash_normalized_to_en_dash(self):
-        assert regex_cleanup("театр — это другие деньги") == "Театр – это другие деньги"
+        assert regex_cleanup("театр — это другие деньги") == "театр – это другие деньги"
 
     def test_en_dash_kept(self):
-        assert regex_cleanup("здоровье – это главное") == "Здоровье – это главное"
+        assert regex_cleanup("здоровье – это главное") == "здоровье – это главное"
 
     def test_hyphenated_particles_not_dashed(self):
-        assert regex_cleanup("как-то раз") == "Как-то раз"
+        assert regex_cleanup("как-то раз") == "как-то раз"
         # частица фиксится ДО обработки тире
-        assert regex_cleanup("он что -то сказал - и ушёл") == "Он что-то сказал – и ушёл"
+        assert regex_cleanup("он что -то сказал - и ушёл") == "он что-то сказал – и ушёл"
 
     def test_ellipsis_char_to_three_dots(self):
         # Эталоны используют "..." (451 случай против 74 "…")
-        assert regex_cleanup("подожди…") == "Подожди..."
+        assert regex_cleanup("подожди…") == "подожди..."
 
     def test_many_dots_collapse(self):
-        assert regex_cleanup("подожди.....") == "Подожди..."
+        assert regex_cleanup("подожди.....") == "подожди..."
 
     def test_three_dots_unchanged(self):
-        assert regex_cleanup("Подожди...") == "Подожди..."
+        assert regex_cleanup("подожди...") == "подожди..."
 
     def test_ascii_quotes_to_guillemets(self):
-        assert regex_cleanup('передача "Время"') == "Передача «Время»"
+        assert regex_cleanup('передача "Время"') == "передача «Время»"
 
     def test_no_quotes_unchanged(self):
-        assert regex_cleanup("передача Время") == "Передача Время"
+        assert regex_cleanup("передача Время") == "передача Время"
 
     def test_space_before_punctuation_removed(self):
-        assert regex_cleanup("слово , другое") == "Слово, другое"
-        assert regex_cleanup("конец .") == "Конец."
+        assert regex_cleanup("слово , другое") == "слово, другое"
+        assert regex_cleanup("конец .") == "конец."
 
     def test_leading_comma_after_filler_removal(self):
-        assert regex_cleanup("эээ, давай") == "Давай"
+        assert regex_cleanup("эээ, давай") == "давай"
 
     def test_combined_typography(self):
         result = regex_cleanup('он сказал - смотрите "Время"…')
-        assert " – " in result
-        assert "«Время»" in result
-        assert result.endswith("...")
+        assert result == "он сказал – смотрите «Время»..."
 
 
 class TestPostprocessSegments:
@@ -106,8 +107,8 @@ class TestPostprocessSegments:
             {"text": "ну вот как дела", "channel_tag": 1},
         ]
         result = postprocess_segments(segs, use_gemini=False)
-        assert result[0]["text"] == "Привет"
-        assert result[1]["text"] == "Ну вот как дела"
+        assert result[0]["text"] == "привет"
+        assert result[1]["text"] == "ну вот как дела"
 
     def test_preserves_metadata(self):
         segs = [{"text": "эээ да", "channel_tag": "SPEAKER_00", "start_ms": 100}]

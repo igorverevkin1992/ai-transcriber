@@ -15,7 +15,10 @@ from backend.config import (
     MAX_FILE_SIZE_BYTES,
     OUTPUT_DIR,
     SQLITE_DB_PATH,
+    TECH_BREAK_GAP_SECONDS,
     TEMP_DIR,
+    TURN_INLINE_TC_SECONDS,
+    TURN_MERGE_ENABLED,
     YANDEX_API_KEY,
     logger,
 )
@@ -28,6 +31,7 @@ from backend.metrics import (
 )
 from backend.models import ProjectStatusEnum
 from backend.store import ProjectStore
+from backend.turns import build_turns
 from backend.utils import (
     detect_fps,
     frames_to_tc,
@@ -529,9 +533,10 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         logger.warning("[%s] Видеофайл не найден для определения FPS, используется 25", project_id[:8])
 
     speaker_durations: dict[str, float] = {}
-    raw_segments = []
     start_frames = tc_to_frames(meta["start_tc"], fps)
 
+    # Длительности спикеров считаются по сырым ASR-сегментам (до склейки).
+    events = []
     for seg in segments:
         channel = str(seg["channel_tag"])
         text = seg["text"]
@@ -541,18 +546,30 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
 
         start_s = words[0]["start_ms"] / 1000.0
         end_s = words[-1]["end_ms"] / 1000.0
-
-        dur = end_s - start_s
-        speaker_durations[channel] = speaker_durations.get(channel, 0) + dur
-
-        abs_frames = start_frames + round(start_s * fps)
-        tc_formatted = frames_to_tc(abs_frames, fps)
-
-        raw_segments.append({
-            "timecode": tc_formatted,
+        speaker_durations[channel] = speaker_durations.get(channel, 0) + (end_s - start_s)
+        events.append({
             "speaker": channel,
-            "text": text,
+            "text": text.strip(),
+            "start_s": start_s,
+            "end_s": end_s,
         })
+
+    if TURN_MERGE_ENABLED:
+        raw_segments = build_turns(
+            events, start_frames, fps,
+            inline_tc_seconds=TURN_INLINE_TC_SECONDS,
+            tech_break_gap_seconds=TECH_BREAK_GAP_SECONDS,
+        )
+    else:
+        # Legacy: один ASR-сегмент = один абзац
+        raw_segments = [
+            {
+                "timecode": frames_to_tc(start_frames + round(ev["start_s"] * fps), fps),
+                "speaker": ev["speaker"],
+                "text": ev["text"],
+            }
+            for ev in events
+        ]
 
     detected_speakers = {}
     sorted_voices = sorted(speaker_durations.items(), key=lambda x: x[1], reverse=True)
