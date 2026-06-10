@@ -29,9 +29,17 @@ class TestRegexCleanup:
         assert regex_cleanup("да? хорошо") == "да? Хорошо"
 
     def test_no_capitalize_after_ellipsis(self):
-        # Эталон: «Мне это было... это была другая история» — строчная после "..."
         assert regex_cleanup("Мне это было... это была другая история") == \
             "Мне это было... это была другая история"
+
+    def test_no_capitalize_after_abbreviation(self):
+        assert regex_cleanup("т.е. мы поехали") == "т.е. мы поехали"
+        assert regex_cleanup("и т.д. потом") == "и т.д. потом"
+        assert regex_cleanup("и т.п. далее") == "и т.п. далее"
+        assert regex_cleanup("г. москву") == "г. москву"
+
+    def test_number_repetition_preserved(self):
+        assert regex_cleanup("2024 2024 2024 год") == "2024 2024 2024 год"
 
     def test_preserves_first_letter_case(self):
         # ASR-сегмент может начинаться с середины предложения; заглавную букву
@@ -94,6 +102,17 @@ class TestTypography:
 
     def test_leading_comma_after_filler_removal(self):
         assert regex_cleanup("эээ, давай") == "давай"
+
+    def test_triple_dash_becomes_en_dash(self):
+        assert regex_cleanup("слово --- другое") == "слово – другое"
+
+    def test_spaceless_em_dash_normalized(self):
+        assert regex_cleanup("слово—другое") == "слово – другое"
+        assert regex_cleanup("слово–другое") == "слово – другое"
+
+    def test_spaceless_hyphen_not_dashed(self):
+        assert regex_cleanup("как-то раз") == "как-то раз"
+        assert regex_cleanup("кое-что") == "кое-что"
 
     def test_combined_typography(self):
         result = regex_cleanup('он сказал - смотрите "Время"…')

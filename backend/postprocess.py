@@ -12,9 +12,11 @@ HYPHEN_SPACE_RE = re.compile(r"(\w) +-(\w)")
 # «короче» в них СОХРАНЯЮТСЯ. Удаляем только нечленораздельные звуки,
 # которые человек никогда не переносит в текст.
 FILLER_WORDS_RE = re.compile(r"\b(э{2,}|эм+|ммм+|хм+)\b", re.IGNORECASE)
-REPEATED_WORDS_RE = re.compile(r"\b(\w+)(?:\s+\1\b){2,}", re.IGNORECASE)
+REPEATED_WORDS_RE = re.compile(r"\b([а-яА-ЯёЁa-zA-Z]+)(?:\s+\1\b){2,}", re.IGNORECASE)
+# Em/en-dash без пробелов (или с одним) → " – "; только Unicode-тире, не дефис
+SPACELESS_DASH_RE = re.compile(r"(\w)[—–](\w)")
 # Дефис(ы) или en/em-тире с пробелами вокруг → " – " (en-dash, 146:0 в эталонах)
-DASH_RE = re.compile(r"(?<=\S)[ \t]+(?:-{1,2}|[—–])[ \t]+(?=\S)")
+DASH_RE = re.compile(r"(?<=\S)[ \t]+(?:-+|[—–])[ \t]+(?=\S)")
 # Эталоны используют "..." (451 случай), а не "…" (74, один файл)
 ELLIPSIS_CHAR_RE = re.compile(r"…")
 MANY_DOTS_RE = re.compile(r"\.{4,}")
@@ -25,7 +27,16 @@ LEADING_PUNCT_RE = re.compile(r"^[\s,;:]+")
 MULTI_SPACE_RE = re.compile(r" {2,}")
 # Капитализация после конца предложения; (?<!\.) исключает "...", после
 # которого эталоны продолжают со строчной («Мне это было... это была...»)
-CAPITALIZE_RE = re.compile(r"(?<!\.)([.!?])\s+([а-яa-z])")
+_CAPITALIZE_BASE_RE = re.compile(r"(?<!\.)([.!?])\s+([а-яa-z])")
+
+
+def _capitalize_after_sentence(m: re.Match) -> str:
+    if m.group(1) == ".":
+        before = m.string[:m.start()]
+        word_match = re.search(r"(\w+)$", before)
+        if word_match and len(word_match.group(1)) <= 4 and word_match.group(1).islower():
+            return m.group(0)
+    return m.group(1) + " " + m.group(2).upper()
 
 
 def regex_cleanup(text: str) -> str:
@@ -38,6 +49,7 @@ def regex_cleanup(text: str) -> str:
     text = HYPHEN_SPACE_RE.sub(r"\1-\2", text)
     text = FILLER_WORDS_RE.sub("", text)
     text = REPEATED_WORDS_RE.sub(r"\1", text)
+    text = SPACELESS_DASH_RE.sub(r"\1 – \2", text)
     text = DASH_RE.sub(" – ", text)
     text = ELLIPSIS_CHAR_RE.sub("...", text)
     text = MANY_DOTS_RE.sub("...", text)
@@ -45,7 +57,7 @@ def regex_cleanup(text: str) -> str:
     text = SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
     text = LEADING_PUNCT_RE.sub("", text)
     text = MULTI_SPACE_RE.sub(" ", text)
-    text = CAPITALIZE_RE.sub(lambda m: m.group(1) + " " + m.group(2).upper(), text)
+    text = _CAPITALIZE_BASE_RE.sub(_capitalize_after_sentence, text)
     return text.strip()
 
 
