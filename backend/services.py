@@ -645,7 +645,12 @@ def process_video_task(project_id: str, disk_url: str):
         logger.info("[%s] Распознавание с диаризацией...", project_id[:8])
         segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
-        # 4. ОБРАБОТКА РЕЗУЛЬТАТА
+        # 4. ПОСТОБРАБОТКА ТЕКСТА
+        from backend.postprocess import postprocess_segments
+        logger.info("[%s] Постобработка текста...", project_id[:8])
+        segments = postprocess_segments(segments)
+
+        # 5. ОБРАБОТКА РЕЗУЛЬТАТА
         _process_recognition_result(project_id, segments, original_filename, local_video_path)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
         transcribe_duration.labels(engine="speechkit").observe(time.time() - task_start)

@@ -87,6 +87,33 @@ class TestProcessRecognitionResult:
         assert store["p4"]["result"]["low_confidence_diarization"] is True
 
 
+class TestProcessVideoTask:
+    def test_runs_postprocessing(self, fresh_store, monkeypatch):
+        """Регрессия: SpeechKit-путь (Яндекс.Диск) должен прогонять постобработку."""
+        store, _, _ = fresh_store
+        store.create("pv1", {"id": "pv1", "status": ProjectStatusEnum.QUEUED, "created_at": 1.0})
+
+        calls = {}
+        monkeypatch.setattr(services, "_download_from_yadisk",
+                            lambda pid, url, path: "Иванов_Петров.mp4")
+        monkeypatch.setattr(services, "_convert_to_opus", lambda pid, i, o: None)
+        monkeypatch.setattr(services, "_transcribe_with_speechkit",
+                            lambda pid, path: [_seg("0", "привет.", 0, 1000)])
+
+        import backend.postprocess as pp
+
+        def fake_postprocess(segments, use_gemini=True):
+            calls["postprocess"] = True
+            return segments
+
+        monkeypatch.setattr(pp, "postprocess_segments", fake_postprocess)
+
+        services.process_video_task("pv1", "http://disk")
+
+        assert calls.get("postprocess") is True
+        assert store["pv1"]["status"] == ProjectStatusEnum.COMPLETED
+
+
 class TestCancelProject:
     def test_returns_false_for_missing(self, fresh_store):
         assert services.cancel_project("ghost") is False
