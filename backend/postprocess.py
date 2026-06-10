@@ -16,6 +16,12 @@ HYPHEN_SPACE_RE = re.compile(r"(\w) +-(\w)")
 # сохраняет «Хм…» как осмысленную реплику.
 FILLER_WORDS_RE = re.compile(r"\b(э(?:-э)+|м(?:-м)+|а(?:-а)+|э{2,}|эм+|ммм+)\b", re.IGNORECASE)
 REPEATED_WORDS_RE = re.compile(r"\b([а-яА-ЯёЁa-zA-Z]+)(?:\s+\1\b){2,}", re.IGNORECASE)
+# Whisper-петля: фраза из 2-5 слов, повторённая 3+ раз подряд («и мы пошли
+# и мы пошли и мы пошли»). Дефисные повторы («да-да-да») не трогаем —
+# эталоны их сохраняют.
+REPEATED_PHRASE_RE = re.compile(
+    r"\b((?:[а-яА-ЯёЁa-zA-Z]+\s+){1,4}[а-яА-ЯёЁa-zA-Z]+)(?:\s+\1\b){2,}", re.IGNORECASE,
+)
 # Запятая, за которой идёт другой знак, — артефакт удаления филлера
 # («ну, эээ, давай» → «ну,, давай»). В эталонах ",," и ",." — 0 случаев.
 DUP_PUNCT_RE = re.compile(r",\s*([,.;:!?])")
@@ -66,7 +72,8 @@ def _capitalize_after_sentence(m: re.Match) -> str:
         word_match = re.search(r"(\w+)$", before)
         if word_match:
             word = word_match.group(1)
-            if word.islower() and (len(word) == 1 or word in _NO_CAPITALIZE_AFTER):
+            # «я» — не сокращение, а частый конец предложения («это был я.»)
+            if word.islower() and ((len(word) == 1 and word != "я") or word in _NO_CAPITALIZE_AFTER):
                 return m.group(0)
     return m.group(1) + " " + m.group(2).upper()
 
@@ -82,6 +89,7 @@ def regex_cleanup(text: str) -> str:
     text = _expand_abbreviations(text)
     text = FILLER_WORDS_RE.sub("", text)
     text = REPEATED_WORDS_RE.sub(r"\1", text)
+    text = REPEATED_PHRASE_RE.sub(r"\1", text)
     # Дубли пунктуации после удаления филлеров; до 2 проходов («, , ,»)
     for _ in range(2):
         text, n = DUP_PUNCT_RE.subn(r"\1", text)
@@ -122,6 +130,22 @@ _gemini_lock = threading.Lock()
 
 GEMINI_MAX_RETRIES = 3
 GEMINI_BACKOFF = [2, 5, 10]  # seconds
+
+# LLM изредка добавляет преамбулу вопреки правилу «верни ТОЛЬКО текст»
+_GEMINI_PREAMBLE_RE = re.compile(
+    r"^(?:вот\s+)?(?:исправленный|откорректированный|итоговый|готовый)\s+(?:текст|вариант):?\s*",
+    re.IGNORECASE,
+)
+
+
+def _clean_gemini_response(result: str) -> str:
+    """Срезает markdown-обёртку и преамбулы из ответа Gemini."""
+    result = result.strip()
+    if result.startswith("```"):
+        result = re.sub(r"^```[a-zа-яё]*\s*\n?", "", result)
+        result = re.sub(r"\n?```\s*$", "", result)
+    result = _GEMINI_PREAMBLE_RE.sub("", result)
+    return result.strip()
 
 
 def gemini_polish(text: str) -> str:
@@ -170,7 +194,7 @@ def gemini_polish(text: str) -> str:
                 prompt,
                 generation_config={"temperature": 0.0},
             )
-            result = response.text.strip()
+            result = _clean_gemini_response(response.text)
             gemini_calls.labels(outcome="success").inc()
             if result:
                 return result

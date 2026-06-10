@@ -65,6 +65,23 @@ class TestRegexCleanup:
     def test_number_repetition_preserved(self):
         assert regex_cleanup("2024 2024 2024 год") == "2024 2024 2024 год"
 
+    def test_repeated_phrase_collapsed(self):
+        # Whisper-петля: фраза повторяется 3+ раз подряд
+        assert regex_cleanup("и мы пошли и мы пошли и мы пошли") == "и мы пошли"
+        assert regex_cleanup("он сказал он сказал он сказал он сказал да") == "он сказал да"
+
+    def test_double_phrase_preserved(self):
+        # Двойной повтор — легитимная речь («мы шли, мы шли»)
+        assert regex_cleanup("мы шли мы шли и пришли") == "мы шли мы шли и пришли"
+
+    def test_hyphenated_repeats_preserved(self):
+        # Эталоны сохраняют «Да-да-да»
+        assert regex_cleanup("Да-да-да, был этот") == "Да-да-да, был этот"
+
+    def test_capitalize_after_ya(self):
+        # «я» — не сокращение: после «я.» эталоны капитализируют
+        assert regex_cleanup("это был я. потом мы пошли") == "это был я. Потом мы пошли"
+
     def test_no_double_punctuation_after_filler_removal(self):
         # В эталонах «,,» и «,.» — 0 случаев
         assert regex_cleanup("ну, эээ, давай") == "ну, давай"
@@ -154,6 +171,27 @@ class TestTypography:
     def test_combined_typography(self):
         result = regex_cleanup('он сказал - смотрите "Время"…')
         assert result == "он сказал – смотрите «Время»..."
+
+
+class TestCleanGeminiResponse:
+    def test_plain_text_unchanged(self):
+        from backend.postprocess import _clean_gemini_response
+        assert _clean_gemini_response("ну вот мы и поехали") == "ну вот мы и поехали"
+
+    def test_markdown_fence_stripped(self):
+        from backend.postprocess import _clean_gemini_response
+        assert _clean_gemini_response("```\nтекст реплики\n```") == "текст реплики"
+        assert _clean_gemini_response("```text\nтекст\n```") == "текст"
+
+    def test_preamble_stripped(self):
+        from backend.postprocess import _clean_gemini_response
+        assert _clean_gemini_response("Вот исправленный текст: мы поехали") == "мы поехали"
+        assert _clean_gemini_response("Исправленный текст:\nмы поехали") == "мы поехали"
+
+    def test_speech_starting_with_vot_kept(self):
+        from backend.postprocess import _clean_gemini_response
+        # «вот» как разговорное слово не должно срезаться
+        assert _clean_gemini_response("вот мы и поехали") == "вот мы и поехали"
 
 
 class TestPostprocessSegments:
