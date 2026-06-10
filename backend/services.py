@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import threading
 import time
@@ -101,6 +102,8 @@ except ImportError:
 _whisper_model = None
 _whisper_model_name = None
 _whisper_lock = threading.Lock()
+_whisperx_model = None
+_whisperx_model_name = None
 _whisperx_align_model = None
 _whisperx_align_meta = None
 _whisperx_diarize_pipeline = None
@@ -122,10 +125,13 @@ def _cleanup_gpu_memory():
 def unload_whisper_models():
     """Полностью выгружает все Whisper/WhisperX модели из памяти."""
     global _whisper_model, _whisper_model_name
+    global _whisperx_model, _whisperx_model_name
     global _whisperx_align_model, _whisperx_align_meta, _whisperx_diarize_pipeline
     with _whisper_lock:
         _whisper_model = None
         _whisper_model_name = None
+        _whisperx_model = None
+        _whisperx_model_name = None
         _whisperx_align_model = None
         _whisperx_align_meta = None
         _whisperx_diarize_pipeline = None
@@ -396,16 +402,26 @@ def _build_whisper_prompt(original_filename: str) -> str:
     return WHISPER_INITIAL_PROMPT
 
 
+_WHISPERX_SPEAKER_RE = re.compile(r"^SPEAKER_0*(\d+)$")
+
+
+def _normalize_speaker_id(raw: str) -> str:
+    m = _WHISPERX_SPEAKER_RE.match(raw)
+    return m.group(1) if m else raw
+
+
 def _transcribe_with_whisperx(
     project_id: str,
     file_path,
     model_name: str = "medium",
     initial_prompt: str | None = None,
+    original_filename: str | None = None,
 ) -> list[dict]:
     """Распознавание через WhisperX: транскрипция + alignment + диаризация pyannote.
 
-    Возвращает сегменты с channel_tag = speaker label (SPEAKER_00, ...).
+    Возвращает сегменты с channel_tag = speaker label (нормализованный: "0", "1", ...).
     """
+    global _whisperx_model, _whisperx_model_name
     global _whisperx_align_model, _whisperx_align_meta, _whisperx_diarize_pipeline
 
     file_path = Path(file_path)
@@ -420,17 +436,18 @@ def _transcribe_with_whisperx(
                 project_id[:8], file_path.name, file_size_mb, model_name, device)
 
     compute_type = "float16" if device == "cuda" else "int8"
-    # whisperx.transcribe() не принимает initial_prompt напрямую —
-    # он передаётся через asr_options при загрузке модели
-    asr_options = {"initial_prompt": initial_prompt} if initial_prompt else None
     with _whisper_lock:
-        model = whisperx.load_model(
-            model_name, device, compute_type=compute_type, language="ru",
-            asr_options=asr_options,
-        )
+        if _whisperx_model is None or _whisperx_model_name != model_name:
+            logger.info("[%s] Загрузка WhisperX модели '%s'...", project_id[:8], model_name)
+            _whisperx_model = whisperx.load_model(
+                model_name, device, compute_type=compute_type, language="ru",
+            )
+            _whisperx_model_name = model_name
+        if initial_prompt and hasattr(_whisperx_model, "options"):
+            _whisperx_model.options = _whisperx_model.options._replace(initial_prompt=initial_prompt)
 
     audio = whisperx.load_audio(str(file_path))
-    result = model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
+    result = _whisperx_model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
     logger.info("[%s] WhisperX: транскрипция завершена, %d сегментов", project_id[:8], len(result["segments"]))
 
     with _whisper_lock:
@@ -455,7 +472,16 @@ def _transcribe_with_whisperx(
                 _whisperx_diarize_pipeline = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
 
     if _whisperx_diarize_pipeline is not None:
-        diarize_segments = _whisperx_diarize_pipeline(audio)
+        diarize_kwargs = {}
+        if original_filename:
+            meta = parse_filename_metadata(original_filename)
+            num_speakers = len(meta.get("speakers", []))
+            if num_speakers >= 2:
+                diarize_kwargs["min_speakers"] = num_speakers
+                diarize_kwargs["max_speakers"] = num_speakers + 1
+                logger.info("[%s] Диаризация: хинт %d-%d спикеров из имени файла",
+                            project_id[:8], num_speakers, num_speakers + 1)
+        diarize_segments = _whisperx_diarize_pipeline(audio, **diarize_kwargs)
         result = whisperx.assign_word_speakers(diarize_segments, result)
         logger.info("[%s] WhisperX: диаризация завершена", project_id[:8])
 
@@ -465,7 +491,7 @@ def _transcribe_with_whisperx(
         if not text:
             continue
 
-        speaker = seg.get("speaker", "SPEAKER_00")
+        speaker = _normalize_speaker_id(seg.get("speaker", "SPEAKER_00"))
 
         words = []
         for w in seg.get("words", []):
@@ -613,7 +639,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         )
 
     for i, (voice_id, dur) in enumerate(sorted_voices):
-        suggested = f"Спикер {voice_id}"
+        suggested = f"Спикер {int(voice_id) + 1}" if voice_id.isdigit() else f"Спикер {voice_id}"
         if i < len(file_names):
             suggested = file_names[i]
 
@@ -753,6 +779,7 @@ def process_uploaded_file_task(
                 segments = _transcribe_with_whisperx(
                     project_id, local_video_path, whisper_model,
                     initial_prompt=initial_prompt,
+                    original_filename=original_filename,
                 )
             else:
                 logger.info("[%s] faster-whisper (без диаризации): модель %s", project_id[:8], whisper_model)

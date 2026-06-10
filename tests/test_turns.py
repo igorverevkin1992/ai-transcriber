@@ -107,6 +107,15 @@ class TestFinalization:
         out = _build([_ev("0", "мы поехали в", 0, 2), _ev("0", "Москву.", 3, 5)])
         assert out[0]["text"] == "Мы поехали в Москву."
 
+    def test_whitespace_only_events_produce_no_turns(self):
+        out = _build([_ev("0", " ", 0, 2), _ev("0", "  ", 3, 5)])
+        assert out == []
+
+    def test_partial_parenthetical_merged(self):
+        out = _build([_ev("0", "(пауза) и потом он сказал", 0, 5)])
+        assert len(out) == 1
+        assert "(пауза) и потом он сказал" in out[0]["text"]
+
     def test_parenthetical_not_merged(self):
         out = _build([
             _ev("0", "Первая фраза.", 0, 5),

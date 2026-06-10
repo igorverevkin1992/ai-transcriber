@@ -15,6 +15,8 @@
 человеком при паузах меньше порога, алгоритм не воспроизводит.
 """
 
+import re
+
 from backend.utils import frames_to_tc
 
 TECH_BREAK_TEXT = "(Технические моменты)."
@@ -23,6 +25,7 @@ TECH_BREAK_TEXT = "(Технические моменты)."
 _SENTENCE_FINAL_CHARS = tuple('.!?…»)"')
 # Хвост, отбрасываемый перед добавлением "..." прерванной реплики.
 _TRAILING_TRIM = " ,;:–—-"
+_FULL_PARENTHETICAL_RE = re.compile(r"^\([^)]+\)[.!?…]*$")
 
 
 def _ends_sentence(text: str) -> bool:
@@ -68,11 +71,13 @@ def build_turns(
     def close_turn():
         nonlocal cur
         if cur is not None:
-            out.append({
-                "timecode": tc(cur["start_s"]),
-                "speaker": cur["speaker"],
-                "text": _finalize_turn_text(" ".join(cur["parts"])),
-            })
+            text = _finalize_turn_text(" ".join(cur["parts"]))
+            if text:
+                out.append({
+                    "timecode": tc(cur["start_s"]),
+                    "speaker": cur["speaker"],
+                    "text": text,
+                })
             cur = None
 
     # Речь начинается заметно позже стартового таймкода файла —
@@ -97,9 +102,7 @@ def build_turns(
             })
         prev_end = ev["end_s"]
 
-        # Готовая скобочная ремарка — отдельный абзац, не склеивается
-        # и не финализируется (без заглавной и "...").
-        if ev["text"].startswith("("):
+        if _FULL_PARENTHETICAL_RE.match(ev["text"]):
             close_turn()
             out.append({
                 "timecode": tc(ev["start_s"]),
