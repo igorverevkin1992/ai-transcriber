@@ -990,7 +990,7 @@ def shutdown_executor():
 def auto_export_project(project_id: str, output_path: str) -> str | None:
     """Автоматически экспортирует проект в DOCX используя имена спикеров из метаданных файла.
     Возвращает имя файла для скачивания или None при ошибке."""
-    from backend.docx_export import generate_docx
+    from backend.docx_export import generate_docx, is_legend_excluded_name
 
     proj = projects_db.get(project_id)
     if not proj or "result" not in proj:
@@ -1000,13 +1000,12 @@ def auto_export_project(project_id: str, output_path: str) -> str | None:
     final_map = {}
     abbr_map = {}
 
-    _TECH_SPEAKER_NAMES = {"АЗК", "ГЗК"}
     legend_exclude: set[str] = set()
 
     for speaker_id, info in speakers.items():
         name = info.get("suggested_name", f"Спикер {speaker_id}")
         final_map[speaker_id] = name
-        if name.strip().upper() in _TECH_SPEAKER_NAMES:
+        if is_legend_excluded_name(name):
             legend_exclude.add(speaker_id)
 
     abbr_map = _compute_smart_abbreviations(final_map)

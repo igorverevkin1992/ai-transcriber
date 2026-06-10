@@ -10,6 +10,16 @@ from backend.utils import strip_extension
 # human reference also italicizes (e.g. the whole "(...)." including the dot).
 PARENTHETICAL_RE = re.compile("(\\((?:[^()]*|\\([^()]*\\))*\\)[.!?…]*)")
 
+# Служебные и эпизодические говорящие не входят в легенду эталонов:
+# АЗК/ГЗК (автор/голос за кадром) и безымянные метки М1, М2, М3, Ж, ММ
+# (цензус f8: реплики «М1:», «Ж:» есть, в легенде — только именованные).
+_LEGEND_EXCLUDE_NAME_RE = re.compile(r"^([А-ЯЁ]ЗК|[МЖ]{1,2}\d*)$")
+
+
+def is_legend_excluded_name(name: str) -> bool:
+    """True, если имя спикера — служебная метка, не входящая в легенду."""
+    return bool(_LEGEND_EXCLUDE_NAME_RE.match(name.strip().upper()))
+
 
 def _configure_paragraph(paragraph):
     """Применяет к абзацу выравнивание JUSTIFY, line_spacing=1.0, space_after=0."""
@@ -106,7 +116,9 @@ def generate_docx(
         p = doc.add_paragraph()
         _configure_paragraph(p)
 
-        if text.startswith("("):
+        # Без префикса спикера — только ЦЕЛИКОМ скобочная ремарка;
+        # реплика, начинающаяся со скобки («(пауза) и потом...»), — речь.
+        if PARENTHETICAL_RE.fullmatch(text):
             _add_run(p, f"{seg['timecode']} ")
             _add_text_with_italics(p, text)
         else:

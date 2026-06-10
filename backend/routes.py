@@ -42,8 +42,6 @@ from backend.utils import sanitize_filename, validate_file_extension, validate_u
 router = APIRouter(prefix="/api/v1")
 limiter = Limiter(key_func=get_remote_address)
 
-_TECH_SPEAKER_NAMES = {"АЗК", "ГЗК"}
-
 
 def _safe_unlink(path: str) -> None:
     """Удаляет файл, игнорируя ошибки (для background-cleanup ZIP-архивов)."""
@@ -55,7 +53,8 @@ def _safe_unlink(path: str) -> None:
 
 def _compute_legend_exclude(name_map: dict[str, str]) -> set[str]:
     """Возвращает speaker_id тех спикеров, которых нужно исключить из легенды."""
-    return {sid for sid, name in name_map.items() if name.strip().upper() in _TECH_SPEAKER_NAMES}
+    from backend.docx_export import is_legend_excluded_name
+    return {sid for sid, name in name_map.items() if is_legend_excluded_name(name)}
 
 
 @router.post("/projects", response_model=CreateProjectResponse)
