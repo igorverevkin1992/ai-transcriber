@@ -38,6 +38,27 @@ class TestGenerateDocx:
         assert "Денис" in text
         assert "Григорий" in text
 
+    def test_legend_ordered_by_first_appearance(self, tmp_path, sample_project):
+        # Эталон ф5: ИНТЕРВЬЮЕР в легенде первый, хотя говорит меньше.
+        # speakers_info отсортирован по длительности ("0" самый говорливый),
+        # но первым в стенограмме появляется "1" — он и в легенде первый.
+        sample_project["result"]["segments"] = [
+            {"timecode": "11:04:15:00", "speaker": "1", "text": "Первый вопрос?"},
+            {"timecode": "11:04:25:00", "speaker": "0", "text": "Длинный ответ."},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(
+            sample_project,
+            final_map={"0": "Майданов", "1": "Интервьюер"},
+            abbr_map={"0": "М", "1": "И"},
+            output_path=str(out),
+        )
+        doc = Document(str(out))
+        texts = [p.text for p in doc.paragraphs]
+        legend_lines = [t for t in texts if " – " in t and t.endswith(".")]
+        assert legend_lines[0].startswith("Интервьюер")
+        assert legend_lines[1].startswith("Майданов")
+
     def test_legend_exclude_hides_speaker_from_legend(self, tmp_path, sample_project):
         sample_project["result"]["speakers"]["2"] = {
             "duration_sec": 10.0, "suggested_name": "АЗК",

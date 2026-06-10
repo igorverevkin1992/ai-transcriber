@@ -35,12 +35,21 @@ def _ends_sentence(text: str) -> bool:
     return text.rstrip().endswith(_SENTENCE_FINAL_CHARS)
 
 
-def _finalize_turn_text(text: str) -> str:
-    """Финализирует реплику: заглавная первая буква, "..." для прерванных."""
+def _finalize_turn_text(text: str, resumed: bool = False) -> str:
+    """Финализирует реплику: заглавная первая буква, "..." для прерванных.
+
+    resumed=True — возобновление прерванной реплики того же спикера после
+    тех-паузы: эталоны начинают её с «... » и строчной («М: ... организации.»).
+    """
     text = text.strip()
     if not text:
         return text
-    if text[0].islower():
+    if resumed:
+        # Строчная только если слово не похоже на аббревиатуру (МХАТ)
+        if text[0].isupper() and not (len(text) > 1 and text[1].isalpha() and text[1].isupper()):
+            text = text[0].lower() + text[1:]
+        text = "... " + text
+    elif text[0].islower():
         text = text[0].upper() + text[1:]
     if not text.endswith(_SENTENCE_FINAL_CHARS):
         text = text.rstrip(_TRAILING_TRIM) + "..."
@@ -70,18 +79,24 @@ def build_turns(
         return frames_to_tc(start_frames + round(seconds * fps), fps)
 
     cur: dict | None = None
+    # Спикер, чья реплика была прервана тех-паузой посреди предложения, —
+    # его следующая реплика начинается с «... » (эталон: «М: ... организации.»)
+    resume_speaker: str | None = None
 
-    def close_turn():
+    def close_turn() -> dict | None:
         nonlocal cur
+        closed = None
         if cur is not None:
-            text = _finalize_turn_text(" ".join(cur["parts"]))
+            text = _finalize_turn_text(" ".join(cur["parts"]), resumed=cur.get("resumed", False))
             if text:
-                out.append({
+                closed = {
                     "timecode": tc(cur["start_s"]),
                     "speaker": cur["speaker"],
                     "text": text,
-                })
+                }
+                out.append(closed)
             cur = None
+        return closed
 
     # Речь начинается заметно позже стартового таймкода файла —
     # эталоны открываются ремаркой с таймкодом начала записи.
@@ -97,12 +112,14 @@ def build_turns(
         # Длинная пауза закрывает реплику даже у того же спикера;
         # таймкод ремарки = конец предыдущей речи.
         if prev_end is not None and ev["start_s"] - prev_end >= tech_break_gap_seconds:
-            close_turn()
+            closed = close_turn()
             out.append({
                 "timecode": tc(prev_end),
                 "speaker": ev["speaker"],
                 "text": TECH_BREAK_TEXT,
             })
+            if closed is not None and closed["text"].endswith("...") and closed["speaker"] == ev["speaker"]:
+                resume_speaker = ev["speaker"]
         prev_end = ev["end_s"]
 
         # "(неразборчиво)" — НЕ отдельная ремарка: склеивается в реплику ниже.
@@ -126,7 +143,9 @@ def build_turns(
                 "start_s": ev["start_s"],
                 "parts": [ev["text"]],
                 "last_tc_s": ev["start_s"],
+                "resumed": resume_speaker == ev["speaker"],
             }
+            resume_speaker = None
             continue
 
         # Продолжение текущей реплики.

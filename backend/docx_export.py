@@ -92,7 +92,18 @@ def generate_docx(
     speakers_in_segments = {seg["speaker"] for seg in segments}
     exclude = legend_exclude or set()
 
-    for speaker_id, info in speakers_info.items():
+    # Эталоны упорядочивают легенду по ПЕРВОМУ появлению в стенограмме
+    # (ф5: ИНТЕРВЬЮЕР раньше АНТИПЕНКО, хотя А говорит в 2,5 раза больше),
+    # а не по длительности речи, в которой отсортирован speakers_info.
+    appearance_order: list = []
+    for seg in segments:
+        if seg["speaker"] not in appearance_order:
+            appearance_order.append(seg["speaker"])
+    ordered_ids = [sid for sid in appearance_order if sid in speakers_info]
+    ordered_ids += [sid for sid in speakers_info if sid not in appearance_order]
+
+    for speaker_id in ordered_ids:
+        info = speakers_info[speaker_id]
         if speaker_id not in speakers_in_segments:
             continue
         if speaker_id in exclude:

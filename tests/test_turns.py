@@ -89,6 +89,42 @@ class TestTechBreaks:
         assert out[1]["speaker"] == "1"
 
 
+class TestResumedTurns:
+    def test_interrupted_same_speaker_resumes_with_ellipsis(self):
+        # Эталон: «М: ... организации.» — прерванная реплика возобновляется
+        # с «... » и строчной буквы
+        out = _build([
+            _ev("0", "мы начали обсуждать вопросы", 0, 5),
+            _ev("0", "Организации. И поехали дальше.", 50, 55),
+        ])
+        assert len(out) == 3
+        assert out[0]["text"] == "Мы начали обсуждать вопросы..."
+        assert out[1]["text"] == TECH_BREAK_TEXT
+        assert out[2]["text"] == "... организации. И поехали дальше."
+
+    def test_other_speaker_after_break_no_ellipsis(self):
+        out = _build([
+            _ev("0", "мы начали обсуждать", 0, 5),
+            _ev("1", "новая тема.", 50, 55),
+        ])
+        assert out[2]["text"] == "Новая тема."
+
+    def test_finished_turn_no_resume_prefix(self):
+        # Реплика завершена точкой — после паузы продолжение с заглавной
+        out = _build([
+            _ev("0", "Мы всё обсудили.", 0, 5),
+            _ev("0", "теперь о другом.", 50, 55),
+        ])
+        assert out[2]["text"] == "Теперь о другом."
+
+    def test_resumed_acronym_not_lowercased(self):
+        out = _build([
+            _ev("0", "тогда мы пошли в", 0, 5),
+            _ev("0", "МХАТ на спектакль.", 50, 55),
+        ])
+        assert out[2]["text"] == "... МХАТ на спектакль."
+
+
 class TestFinalization:
     def test_trailing_ellipsis_unfinished(self):
         assert _build([_ev("0", "и тогда мы решили", 0, 2)])[0]["text"] == "И тогда мы решили..."

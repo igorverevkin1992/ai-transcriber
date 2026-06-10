@@ -532,12 +532,20 @@ def _transcribe_with_whisperx(
         logger.info("[%s] WhisperX: диаризация завершена", project_id[:8])
 
     segments = []
+    last_speaker = "0"
     for seg in result["segments"]:
         text = seg.get("text", "").strip()
         if not text:
             continue
 
-        speaker = _normalize_speaker_id(seg.get("speaker", "SPEAKER_00"))
+        raw_speaker = seg.get("speaker")
+        if raw_speaker:
+            speaker = _normalize_speaker_id(raw_speaker)
+            last_speaker = speaker
+        else:
+            # Диаризация пропустила сегмент (музыка, перекрытие голосов) —
+            # наследуем спикера предыдущего сегмента, а не «нулевого».
+            speaker = last_speaker
 
         words = []
         for w in seg.get("words", []):
