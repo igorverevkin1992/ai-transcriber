@@ -20,15 +20,26 @@ _FILE_CODE_RE = re.compile(r"^[fф]\d+(-\d+)?$", re.IGNORECASE)
 _DATE_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$|^\d{4}\.\d{2}\.\d{2}$")
 _PURE_DIGITS_RE = re.compile(r"^\d+$")
 
+# SMPTE-таймкод в имени файла. Двоеточия запрещены в Windows-именах,
+# поэтому допускаем также точку/дефис/подчёркивание (один и тот же
+# разделитель между всеми группами — \2 отсекает даты вида 02.03_05).
+_FILENAME_TC_RE = re.compile(r"(?<!\d)(\d{2})([:.\-_])(\d{2})\2(\d{2})\2(\d{2})(?!\d)")
+
+
+def _validate_tc_parts(h: int, m: int, s: int, f: int) -> bool:
+    return h < 24 and m < 60 and s < 60 and f < 60
+
 
 def parse_filename_metadata(filename: str) -> dict:
     """Извлекает имена спикеров и стартовый таймкод из названия файла."""
     result = {"speakers": [], "start_tc": "00:00:00:00"}
 
-    tc_match = re.search(r"(\d{2}:\d{2}:\d{2}:\d{2})", filename)
+    tc_match = _FILENAME_TC_RE.search(filename)
     if tc_match:
-        result["start_tc"] = tc_match.group(1)
-        filename = filename.replace(result["start_tc"], "")
+        h, _sep, m, s, f = tc_match.groups()
+        if _validate_tc_parts(int(h), int(m), int(s), int(f)):
+            result["start_tc"] = f"{h}:{m}:{s}:{f}"
+            filename = filename.replace(tc_match.group(0), "")
 
     clean_name = re.sub(r"\.[^.]+$", "", filename)
     parts = re.split(r"[,_]+", clean_name)
@@ -112,6 +123,48 @@ def validate_file_extension(filename: str) -> str | None:
     ext = re.search(r"(\.[^.]+)$", filename.lower())
     if not ext or ext.group(1) not in ALLOWED_EXTENSIONS:
         return f"Формат файла не поддерживается. Допустимые: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+    return None
+
+
+_EMBEDDED_TC_RE = re.compile(r"^(\d{2})[:;](\d{2})[:;](\d{2})[:;](\d{2})$")
+
+
+def detect_start_timecode(file_path: str) -> str | None:
+    """Читает встроенный SMPTE-таймкод (tmcd-дорожка MOV/MXF) через ffprobe.
+
+    Вещательные файлы несут таймкод съёмки в контейнере — эталонные
+    стенограммы начинаются именно с него. Возвращает "HH:MM:SS:FF"
+    или None, если таймкод отсутствует.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format_tags=timecode:stream_tags=timecode",
+                "-of", "json",
+                str(file_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+        candidates = [data.get("format", {}).get("tags", {}).get("timecode")]
+        for stream in data.get("streams", []):
+            candidates.append(stream.get("tags", {}).get("timecode"))
+        for tc in candidates:
+            if not tc:
+                continue
+            m = _EMBEDDED_TC_RE.match(tc.strip())
+            if m and _validate_tc_parts(*map(int, m.groups())):
+                # ";" — drop-frame нотация (NTSC), нормализуем к ":"
+                normalized = "{}:{}:{}:{}".format(*m.groups())
+                logger.info("Встроенный таймкод: %s", normalized)
+                return normalized
+    except Exception as e:
+        logger.warning("Не удалось прочитать встроенный таймкод: %s", e)
     return None
 
 

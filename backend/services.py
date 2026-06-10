@@ -38,6 +38,7 @@ from backend.store import ProjectStore
 from backend.turns import build_turns
 from backend.utils import (
     detect_fps,
+    detect_start_timecode,
     frames_to_tc,
     parse_filename_metadata,
     strip_extension,
@@ -589,6 +590,19 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     else:
         fps = 25
         logger.warning("[%s] Видеофайл не найден для определения FPS, используется 25", project_id[:8])
+
+    # Стартовый таймкод: явный TC в имени файла приоритетнее; иначе —
+    # встроенный SMPTE-таймкод контейнера (эталоны начинаются именно с него).
+    if meta["start_tc"] == "00:00:00:00" and video_path.exists():
+        embedded_tc = detect_start_timecode(str(video_path))
+        if embedded_tc:
+            meta["start_tc"] = embedded_tc
+            logger.info("[%s] Стартовый таймкод из контейнера: %s", project_id[:8], embedded_tc)
+        else:
+            logger.warning(
+                "[%s] Стартовый таймкод не найден ни в имени файла, ни в контейнере — отсчёт с 00:00:00:00",
+                project_id[:8],
+            )
 
     speaker_durations: dict[str, float] = {}
     start_frames = tc_to_frames(meta["start_tc"], fps)
