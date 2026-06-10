@@ -19,6 +19,8 @@ from backend.config import (
     TEMP_DIR,
     TURN_INLINE_TC_SECONDS,
     TURN_MERGE_ENABLED,
+    WHISPER_BEAM_SIZE,
+    WHISPER_INITIAL_PROMPT,
     YANDEX_API_KEY,
     logger,
 )
@@ -382,7 +384,24 @@ def get_whisper_model(model_name: str = "medium"):
         return _whisper_model
 
 
-def _transcribe_with_whisperx(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
+def _build_whisper_prompt(original_filename: str) -> str:
+    """initial_prompt для Whisper: базовая подсказка + имена из имени файла.
+
+    Подсказка задаёт декодеру контекст (язык, жанр, имена собственные),
+    что снижает ошибки в редких именах и улучшает пунктуацию.
+    """
+    names = parse_filename_metadata(original_filename).get("speakers") or []
+    if names:
+        return f"{WHISPER_INITIAL_PROMPT} Участники: {', '.join(names)}."
+    return WHISPER_INITIAL_PROMPT
+
+
+def _transcribe_with_whisperx(
+    project_id: str,
+    file_path,
+    model_name: str = "medium",
+    initial_prompt: str | None = None,
+) -> list[dict]:
     """Распознавание через WhisperX: транскрипция + alignment + диаризация pyannote.
 
     Возвращает сегменты с channel_tag = speaker label (SPEAKER_00, ...).
@@ -401,8 +420,14 @@ def _transcribe_with_whisperx(project_id: str, file_path, model_name: str = "med
                 project_id[:8], file_path.name, file_size_mb, model_name, device)
 
     compute_type = "float16" if device == "cuda" else "int8"
+    # whisperx.transcribe() не принимает initial_prompt напрямую —
+    # он передаётся через asr_options при загрузке модели
+    asr_options = {"initial_prompt": initial_prompt} if initial_prompt else None
     with _whisper_lock:
-        model = whisperx.load_model(model_name, device, compute_type=compute_type, language="ru")
+        model = whisperx.load_model(
+            model_name, device, compute_type=compute_type, language="ru",
+            asr_options=asr_options,
+        )
 
     audio = whisperx.load_audio(str(file_path))
     result = model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
@@ -467,7 +492,12 @@ def _transcribe_with_whisperx(project_id: str, file_path, model_name: str = "med
     return segments
 
 
-def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medium") -> list[dict]:
+def _transcribe_with_whisper(
+    project_id: str,
+    file_path,
+    model_name: str = "medium",
+    initial_prompt: str | None = None,
+) -> list[dict]:
     """Распознавание через faster-whisper (fallback без диаризации).
 
     Используется когда WhisperX недоступен.
@@ -488,8 +518,9 @@ def _transcribe_with_whisper(project_id: str, file_path, model_name: str = "medi
         str(file_path),
         language="ru",
         word_timestamps=True,
-        beam_size=5,
+        beam_size=WHISPER_BEAM_SIZE,
         vad_filter=True,
+        initial_prompt=initial_prompt,
     )
 
     segments = []
@@ -716,12 +747,19 @@ def process_uploaded_file_task(
         if engine == "whisper":
             projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
             projects_db.update_field(project_id, "progress_percent", None)
+            initial_prompt = _build_whisper_prompt(original_filename)
             if WHISPERX_AVAILABLE:
                 logger.info("[%s] WhisperX (с диаризацией): модель %s", project_id[:8], whisper_model)
-                segments = _transcribe_with_whisperx(project_id, local_video_path, whisper_model)
+                segments = _transcribe_with_whisperx(
+                    project_id, local_video_path, whisper_model,
+                    initial_prompt=initial_prompt,
+                )
             else:
                 logger.info("[%s] faster-whisper (без диаризации): модель %s", project_id[:8], whisper_model)
-                segments = _transcribe_with_whisper(project_id, local_video_path, whisper_model)
+                segments = _transcribe_with_whisper(
+                    project_id, local_video_path, whisper_model,
+                    initial_prompt=initial_prompt,
+                )
         else:
             projects_db.update_status(project_id, ProjectStatusEnum.CONVERTING)
             projects_db.update_field(project_id, "progress_percent", None)

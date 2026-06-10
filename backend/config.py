@@ -53,6 +53,13 @@ TURN_MERGE_ENABLED = os.getenv("TURN_MERGE_ENABLED", "true").lower() in ("1", "t
 TURN_INLINE_TC_SECONDS = float(os.getenv("TURN_INLINE_TC_SECONDS", "60"))
 TECH_BREAK_GAP_SECONDS = float(os.getenv("TECH_BREAK_GAP_SECONDS", "30"))
 
+# --- Whisper tuning ---
+# beam_size: выше = точнее, но медленнее (рекомендуется 5-10)
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
+# Подсказка декодеру: контекст и стиль; имена спикеров из имени файла
+# добавляются автоматически (см. services._build_whisper_prompt)
+WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "Интервью на русском языке.")
+
 
 def _auto_detect_concurrent_tasks() -> int:
     """Автоопределение MAX_CONCURRENT_TASKS на основе VRAM (если есть GPU)."""
