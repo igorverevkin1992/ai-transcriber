@@ -65,6 +65,23 @@ class TestRegexCleanup:
     def test_number_repetition_preserved(self):
         assert regex_cleanup("2024 2024 2024 год") == "2024 2024 2024 год"
 
+    def test_repeated_phrase_collapsed(self):
+        # Whisper-петля: фраза повторяется 3+ раз подряд
+        assert regex_cleanup("и мы пошли и мы пошли и мы пошли") == "и мы пошли"
+        assert regex_cleanup("он сказал он сказал он сказал он сказал да") == "он сказал да"
+
+    def test_double_phrase_preserved(self):
+        # Двойной повтор — легитимная речь («мы шли, мы шли»)
+        assert regex_cleanup("мы шли мы шли и пришли") == "мы шли мы шли и пришли"
+
+    def test_hyphenated_repeats_preserved(self):
+        # Эталоны сохраняют «Да-да-да»
+        assert regex_cleanup("Да-да-да, был этот") == "Да-да-да, был этот"
+
+    def test_capitalize_after_ya(self):
+        # «я» — не сокращение: после «я.» эталоны капитализируют
+        assert regex_cleanup("это был я. потом мы пошли") == "это был я. Потом мы пошли"
+
     def test_no_double_punctuation_after_filler_removal(self):
         # В эталонах «,,» и «,.» — 0 случаев
         assert regex_cleanup("ну, эээ, давай") == "ну, давай"
@@ -123,6 +140,13 @@ class TestTypography:
     def test_ascii_quotes_to_guillemets(self):
         assert regex_cleanup('передача "Время"') == "передача «Время»"
 
+    def test_low9_quotes_to_guillemets(self):
+        assert regex_cleanup('передача „Время"') == "передача «Время»"
+        assert regex_cleanup('передача „Время"') == "передача «Время»"
+
+    def test_curly_quotes_to_guillemets(self):
+        assert regex_cleanup('передача “Время”') == "передача «Время»"
+
     def test_no_quotes_unchanged(self):
         assert regex_cleanup("передача Время") == "передача Время"
 
@@ -156,6 +180,27 @@ class TestTypography:
         assert result == "он сказал – смотрите «Время»..."
 
 
+class TestCleanGeminiResponse:
+    def test_plain_text_unchanged(self):
+        from backend.postprocess import _clean_gemini_response
+        assert _clean_gemini_response("ну вот мы и поехали") == "ну вот мы и поехали"
+
+    def test_markdown_fence_stripped(self):
+        from backend.postprocess import _clean_gemini_response
+        assert _clean_gemini_response("```\nтекст реплики\n```") == "текст реплики"
+        assert _clean_gemini_response("```text\nтекст\n```") == "текст"
+
+    def test_preamble_stripped(self):
+        from backend.postprocess import _clean_gemini_response
+        assert _clean_gemini_response("Вот исправленный текст: мы поехали") == "мы поехали"
+        assert _clean_gemini_response("Исправленный текст:\nмы поехали") == "мы поехали"
+
+    def test_speech_starting_with_vot_kept(self):
+        from backend.postprocess import _clean_gemini_response
+        # «вот» как разговорное слово не должно срезаться
+        assert _clean_gemini_response("вот мы и поехали") == "вот мы и поехали"
+
+
 class TestPostprocessSegments:
     def test_applies_regex_to_all_segments(self):
         segs = [
@@ -174,3 +219,62 @@ class TestPostprocessSegments:
 
     def test_empty_list(self):
         assert postprocess_segments([], use_gemini=False) == []
+
+    def test_filler_words_removed_from_timing(self):
+        segs = [{
+            "text": "эээ привет",
+            "channel_tag": 0,
+            "words": [
+                {"text": "эээ", "start_ms": 1000, "end_ms": 1500},
+                {"text": "привет", "start_ms": 2000, "end_ms": 2500},
+            ],
+        }]
+        result = postprocess_segments(segs, use_gemini=False)
+        assert result[0]["text"] == "привет"
+        assert result[0]["words"][0]["text"] == "привет"
+        assert result[0]["words"][0]["start_ms"] == 2000
+
+    def test_all_filler_words_fallback(self):
+        segs = [{
+            "text": "эээ ммм",
+            "channel_tag": 0,
+            "words": [
+                {"text": "эээ", "start_ms": 1000, "end_ms": 1500},
+                {"text": "ммм", "start_ms": 2000, "end_ms": 2500},
+            ],
+        }]
+        result = postprocess_segments(segs, use_gemini=False)
+        assert result == []
+
+
+class TestGeminiPrompt:
+    def test_gemini_prompt_preserves_hm(self):
+        from backend.postprocess import gemini_polish
+        import unittest.mock as mock
+
+        captured_prompt = {}
+        fake_response = mock.MagicMock()
+        fake_response.text = "хм понятно"
+
+        fake_model = mock.MagicMock()
+        fake_model.generate_content.return_value = fake_response
+
+        import backend.postprocess as pp
+        original_model = pp._gemini_model
+        pp._gemini_model = fake_model
+        try:
+            gemini_polish("хм понятно")
+            prompt_text = fake_model.generate_content.call_args[0][0]
+            assert "«хм»" in prompt_text
+            assert "сохраняй" in prompt_text.split("«хм»")[1][:50]
+            assert "Убирай" not in prompt_text or "«хм»" not in prompt_text.split("Убирай")[1][:50]
+        finally:
+            pp._gemini_model = original_model
+
+
+class TestAbbreviationCapitalization:
+    def test_abbreviation_expansion_lowercases_next_word(self):
+        assert regex_cleanup("и т.д. Потом мы пошли") == "и так далее потом мы пошли"
+
+    def test_abbreviation_expansion_keeps_acronym_after(self):
+        assert regex_cleanup("и т.д. МХАТ продолжил") == "и так далее МХАТ продолжил"

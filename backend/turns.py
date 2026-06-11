@@ -17,29 +17,54 @@
 
 import re
 
-from backend.utils import frames_to_tc
+from backend.utils import frames_to_tc, offset_tc
 
 TECH_BREAK_TEXT = "(Технические моменты)."
+# Замена неуверенных ASR-сегментов; эталоны пишут её ВНУТРИ реплики
+# («...текст (неразборчиво) текст»), поэтому склеивается как обычная речь.
+UNCLEAR_TEXT = "(неразборчиво)"
 
-# Символы, которыми может законно заканчиваться завершённое предложение.
-_SENTENCE_FINAL_CHARS = tuple('.!?…»)"')
+# Конечная пунктуация предложения — строго для инлайн-таймкодов и
+# капитализации следующего сегмента. Цензус: все 71 инлайн-таймкодов
+# эталонов стоят после .!?, НИКОГДА после »)". Кавычка/скобка сами по себе
+# не закрывают предложение («на «Мосфильме» для...» — середина фразы).
+_SENTENCE_END_PUNCT = tuple('.!?…')
+# Символы, после которых реплика визуально завершена и НЕ получает "...".
+# Шире, чем _SENTENCE_END_PUNCT: закрывающая кавычка/скобка завершают
+# реплику типа «Это «Щука».» (точка попадает в _SENTENCE_END_PUNCT, но и
+# одиночная » не должна тянуть искусственное многоточие).
+_TURN_COMPLETE_CHARS = tuple('.!?…»)"')
 # Хвост, отбрасываемый перед добавлением "..." прерванной реплики.
 _TRAILING_TRIM = " ,;:–—-"
-_FULL_PARENTHETICAL_RE = re.compile(r"^\([^)]+\)[.!?…]*$")
+_FULL_PARENTHETICAL_RE = re.compile(r"^\((?:[^()]*|\([^()]*\))*\)[.!?…]*$")
 
 
 def _ends_sentence(text: str) -> bool:
-    return text.rstrip().endswith(_SENTENCE_FINAL_CHARS)
+    return text.rstrip().endswith(_SENTENCE_END_PUNCT)
 
 
-def _finalize_turn_text(text: str) -> str:
-    """Финализирует реплику: заглавная первая буква, "..." для прерванных."""
+def _finalize_turn_text(text: str, resumed: bool = False) -> str:
+    """Финализирует реплику: заглавная первая буква, "..." для прерванных.
+
+    resumed=True — возобновление прерванной реплики того же спикера после
+    тех-паузы: эталоны начинают её с «... » и строчной («М: ... организации.»).
+    """
     text = text.strip()
     if not text:
         return text
-    if text[0].islower():
+    # Чисто неразборчивый сегмент: эталоны пишут «(неразборчиво).» с точкой
+    # (цензус: все 6 standalone-случаев с точкой). Inline-случаи сюда не
+    # попадают — они склеены в более длинную реплику.
+    if text == UNCLEAR_TEXT:
+        return text + "."
+    if resumed:
+        # Строчная только если слово не похоже на аббревиатуру (МХАТ)
+        if text[0].isupper() and not (len(text) > 1 and text[1].isalpha() and text[1].isupper()):
+            text = text[0].lower() + text[1:]
+        text = "... " + text
+    elif text[0].islower():
         text = text[0].upper() + text[1:]
-    if not text.endswith(_SENTENCE_FINAL_CHARS):
+    if not text.endswith(_TURN_COMPLETE_CHARS):
         text = text.rstrip(_TRAILING_TRIM) + "..."
     return text
 
@@ -64,27 +89,33 @@ def build_turns(
         return out
 
     def tc(seconds: float) -> str:
-        return frames_to_tc(start_frames + round(seconds * fps), fps)
+        return offset_tc(start_frames, seconds, fps)
 
     cur: dict | None = None
+    # Спикер, чья реплика была прервана тех-паузой посреди предложения, —
+    # его следующая реплика начинается с «... » (эталон: «М: ... организации.»)
+    resume_speaker: str | None = None
 
-    def close_turn():
+    def close_turn() -> dict | None:
         nonlocal cur
+        closed = None
         if cur is not None:
-            text = _finalize_turn_text(" ".join(cur["parts"]))
+            text = _finalize_turn_text(" ".join(cur["parts"]), resumed=cur.get("resumed", False))
             if text:
-                out.append({
+                closed = {
                     "timecode": tc(cur["start_s"]),
                     "speaker": cur["speaker"],
                     "text": text,
-                })
+                }
+                out.append(closed)
             cur = None
+        return closed
 
     # Речь начинается заметно позже стартового таймкода файла —
     # эталоны открываются ремаркой с таймкодом начала записи.
     if events[0]["start_s"] >= tech_break_gap_seconds:
         out.append({
-            "timecode": frames_to_tc(start_frames, fps),
+            "timecode": offset_tc(start_frames, 0.0, fps),
             "speaker": events[0]["speaker"],
             "text": TECH_BREAK_TEXT,
         })
@@ -94,21 +125,26 @@ def build_turns(
         # Длинная пауза закрывает реплику даже у того же спикера;
         # таймкод ремарки = конец предыдущей речи.
         if prev_end is not None and ev["start_s"] - prev_end >= tech_break_gap_seconds:
-            close_turn()
+            closed = close_turn()
             out.append({
                 "timecode": tc(prev_end),
                 "speaker": ev["speaker"],
                 "text": TECH_BREAK_TEXT,
             })
+            if closed is not None and closed["text"].endswith("...") and closed["speaker"] == ev["speaker"]:
+                resume_speaker = ev["speaker"]
         prev_end = ev["end_s"]
 
-        if _FULL_PARENTHETICAL_RE.match(ev["text"]):
+        # "(неразборчиво)" — НЕ отдельная ремарка: склеивается в реплику ниже.
+        if _FULL_PARENTHETICAL_RE.match(ev["text"]) and ev["text"] != UNCLEAR_TEXT:
             close_turn()
-            out.append({
-                "timecode": tc(ev["start_s"]),
-                "speaker": ev["speaker"],
-                "text": ev["text"],
-            })
+            # Подряд идущие одинаковые ремарки не дублируем
+            if not (out and out[-1]["text"] == ev["text"]):
+                out.append({
+                    "timecode": tc(ev["start_s"]),
+                    "speaker": ev["speaker"],
+                    "text": ev["text"],
+                })
             continue
 
         if cur is not None and ev["speaker"] != cur["speaker"]:
@@ -120,12 +156,17 @@ def build_turns(
                 "start_s": ev["start_s"],
                 "parts": [ev["text"]],
                 "last_tc_s": ev["start_s"],
+                "resumed": resume_speaker == ev["speaker"],
             }
+            resume_speaker = None
             continue
 
         # Продолжение текущей реплики.
-        tail_final = _ends_sentence(cur["parts"][-1])
         part = ev["text"]
+        # Серия неуверенных сегментов → одно "(неразборчиво)" в реплике
+        if part == UNCLEAR_TEXT and cur["parts"][-1].endswith(UNCLEAR_TEXT):
+            continue
+        tail_final = _ends_sentence(cur["parts"][-1])
         if tail_final and part and part[0].islower():
             part = part[0].upper() + part[1:]
         # Инлайн-таймкод только на границе предложений; если хвост на запятой,

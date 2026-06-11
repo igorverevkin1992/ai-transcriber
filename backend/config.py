@@ -60,6 +60,24 @@ WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 # добавляются автоматически (см. services._build_whisper_prompt)
 WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "Интервью на русском языке.")
 
+# --- ASR anti-hallucination ---
+# Известные Whisper-галлюцинации на музыке/тишине (подстрочный поиск,
+# регистронезависимо, только для коротких сегментов). Env заменяет список.
+_DEFAULT_HALLUCINATIONS = (
+    "субтитры,редактор субтитров,продолжение следует,спасибо за просмотр,"
+    "dimatorzok,дима торжок,подпишись,подписывайтесь на канал"
+)
+HALLUCINATION_BLACKLIST = [
+    p.strip().lower()
+    for p in os.getenv("HALLUCINATION_BLACKLIST", _DEFAULT_HALLUCINATIONS).split(",")
+    if p.strip()
+]
+# Сегмент с avg_logprob ниже порога — неразборчивая речь: человек пишет
+# "(неразборчиво)" (цензус: 8 случаев в эталонах), а не выдуманный текст.
+UNCLEAR_LOGPROB_THRESHOLD = float(os.getenv("UNCLEAR_LOGPROB_THRESHOLD", "-1.2"))
+# Сегмент с no_speech_prob выше порога — не речь, отбрасывается.
+NO_SPEECH_PROB_THRESHOLD = float(os.getenv("NO_SPEECH_PROB_THRESHOLD", "0.85"))
+
 # --- SpeechKit tuning ---
 SPEECHKIT_LITERATURE_TEXT = os.getenv("SPEECHKIT_LITERATURE_TEXT", "false").lower() in ("1", "true", "yes")
 

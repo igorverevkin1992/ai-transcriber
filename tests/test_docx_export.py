@@ -2,7 +2,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Mm, Pt
 
-from backend.docx_export import generate_docx
+from backend.docx_export import generate_docx, is_legend_excluded_name
 
 
 class TestGenerateDocx:
@@ -37,6 +37,27 @@ class TestGenerateDocx:
         assert "Призрак" not in text
         assert "Денис" in text
         assert "Григорий" in text
+
+    def test_legend_ordered_by_first_appearance(self, tmp_path, sample_project):
+        # Эталон ф5: ИНТЕРВЬЮЕР в легенде первый, хотя говорит меньше.
+        # speakers_info отсортирован по длительности ("0" самый говорливый),
+        # но первым в стенограмме появляется "1" — он и в легенде первый.
+        sample_project["result"]["segments"] = [
+            {"timecode": "11:04:15:00", "speaker": "1", "text": "Первый вопрос?"},
+            {"timecode": "11:04:25:00", "speaker": "0", "text": "Длинный ответ."},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(
+            sample_project,
+            final_map={"0": "Майданов", "1": "Интервьюер"},
+            abbr_map={"0": "М", "1": "И"},
+            output_path=str(out),
+        )
+        doc = Document(str(out))
+        texts = [p.text for p in doc.paragraphs]
+        legend_lines = [t for t in texts if " – " in t and t.endswith(".")]
+        assert legend_lines[0].startswith("Интервьюер")
+        assert legend_lines[1].startswith("Майданов")
 
     def test_legend_exclude_hides_speaker_from_legend(self, tmp_path, sample_project):
         sample_project["result"]["speakers"]["2"] = {
@@ -96,6 +117,22 @@ class TestGenerateDocx:
         assert abs(section.top_margin - Cm(2)) < 1000
         assert abs(section.left_margin - Cm(3)) < 1000
         assert abs(section.right_margin - Cm(1.5)) < 1000
+
+    def test_header_footer_distance(self, tmp_path, sample_project):
+        # Эталоны: header/footer distance 449580 EMU (~1.25 см).
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        section = doc.sections[0]
+        assert section.header_distance == 449580
+        assert section.footer_distance == 449580
+
+    def test_trailing_empty_paragraph(self, tmp_path, sample_project):
+        # Эталоны заканчиваются пустым абзацем после последней реплики.
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        assert not doc.paragraphs[-1].text.strip()
 
     def test_segment_format_inline_timecode(self, tmp_path, sample_project):
         out = tmp_path / "out.docx"
@@ -170,6 +207,28 @@ class TestGenerateDocx:
         assert len(paren_runs) == 1
         assert paren_runs[0].italic
 
+    def test_unclear_standalone_has_speaker_prefix(self, tmp_path, sample_project):
+        sample_project["result"]["segments"] = [
+            {"timecode": "11:04:15:00", "speaker": "0", "text": "(неразборчиво)."},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
+        doc = Document(str(out))
+        para = next(p for p in doc.paragraphs if "неразборчиво" in p.text)
+        assert "М:" in para.text
+
+    def test_unclear_not_italic(self, tmp_path, sample_project):
+        sample_project["result"]["segments"] = [
+            {"timecode": "11:04:15:00", "speaker": "0", "text": "Текст (неразборчиво) продолжение."},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
+        doc = Document(str(out))
+        para = next(p for p in doc.paragraphs if "неразборчиво" in p.text)
+        unclear_runs = [r for r in para.runs if "неразборчиво" in r.text]
+        assert len(unclear_runs) == 1
+        assert not unclear_runs[0].italic
+
     def test_segments_override_replaces_original(self, tmp_path, sample_project):
         edited = [
             {"timecode": "11:04:15:00", "speaker": "0", "text": "Исправленный текст."},
@@ -185,3 +244,27 @@ class TestGenerateDocx:
         assert "Исправленный текст." in all_text
         assert "Привет всем." not in all_text
         assert "Хорошо, давайте." not in all_text
+
+
+class TestLegendExcludedNames:
+    def test_azk_gzk_excluded(self):
+        assert is_legend_excluded_name("АЗК")
+        assert is_legend_excluded_name("ГЗК")
+
+    def test_m_zh_labels_excluded(self):
+        assert is_legend_excluded_name("М")
+        assert is_legend_excluded_name("Ж")
+        assert is_legend_excluded_name("М1")
+        assert is_legend_excluded_name("М2")
+        assert is_legend_excluded_name("ММ")
+
+    def test_zhenschina_muzhchina_excluded(self):
+        assert is_legend_excluded_name("ЖЕНЩИНА")
+        assert is_legend_excluded_name("МУЖЧИНА")
+        assert is_legend_excluded_name("Женщина")
+        assert is_legend_excluded_name("Мужчина")
+
+    def test_named_speakers_not_excluded(self):
+        assert not is_legend_excluded_name("Антипенко")
+        assert not is_legend_excluded_name("Интервьюер")
+        assert not is_legend_excluded_name("Денис")

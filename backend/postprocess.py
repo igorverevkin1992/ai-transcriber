@@ -4,6 +4,7 @@ import time
 
 from backend.config import GEMINI_API_KEY, GEMINI_MODEL, logger
 from backend.metrics import gemini_calls
+from backend.turns import UNCLEAR_TEXT
 
 # «что -то» → «что-то»: пробел ПЕРЕД дефисом, но не после.
 # Пробелы с обеих сторон — это тире, его обрабатывает DASH_RE ниже.
@@ -14,7 +15,14 @@ HYPHEN_SPACE_RE = re.compile(r"(\w) +-(\w)")
 # «м-м-м») — частая запись мычания у Whisper. «Хм» НЕ удаляем: эталон ф5
 # сохраняет «Хм…» как осмысленную реплику.
 FILLER_WORDS_RE = re.compile(r"\b(э(?:-э)+|м(?:-м)+|а(?:-а)+|э{2,}|эм+|ммм+)\b", re.IGNORECASE)
+_FILLER_WORD_RE = re.compile(r"^(э(?:-э)*|м(?:-м)*|а(?:-а)*|э{2,}|эм+|ммм+)$", re.IGNORECASE)
 REPEATED_WORDS_RE = re.compile(r"\b([а-яА-ЯёЁa-zA-Z]+)(?:\s+\1\b){2,}", re.IGNORECASE)
+# Whisper-петля: фраза из 2-5 слов, повторённая 3+ раз подряд («и мы пошли
+# и мы пошли и мы пошли»). Дефисные повторы («да-да-да») не трогаем —
+# эталоны их сохраняют.
+REPEATED_PHRASE_RE = re.compile(
+    r"\b((?:[а-яА-ЯёЁa-zA-Z]+\s+){1,4}[а-яА-ЯёЁa-zA-Z]+)(?:\s+\1\b){2,}", re.IGNORECASE,
+)
 # Запятая, за которой идёт другой знак, — артефакт удаления филлера
 # («ну, эээ, давай» → «ну,, давай»). В эталонах ",," и ",." — 0 случаев.
 DUP_PUNCT_RE = re.compile(r",\s*([,.;:!?])")
@@ -36,13 +44,21 @@ _ABBR_EXPANSIONS = [
 ]
 
 
+_POST_ABBR_CAP_RE = re.compile(
+    r"(то есть|так далее|тому подобное)\s+([А-ЯЁ])([а-яё])",
+)
+
+
 def _expand_abbreviations(text: str) -> str:
     for rx, repl in _ABBR_EXPANSIONS:
         text = rx.sub(lambda m, r=repl: r.capitalize() if m.group(0)[0] == "Т" else r, text)
+    text = _POST_ABBR_CAP_RE.sub(lambda m: f"{m.group(1)} {m.group(2).lower()}{m.group(3)}", text)
     return text
 # Эталоны используют "..." (451 случай), а не "…" (74, один файл)
 ELLIPSIS_CHAR_RE = re.compile(r"…")
 MANY_DOTS_RE = re.compile(r"\.{4,}")
+LOW9_QUOTE_RE = re.compile("\u201e([^\u201e\u201c\u201d\"\n]+)[\u201c\u201d\"]")
+CURLY_QUOTE_RE = re.compile("\u201c([^\u201c\u201e\"\n]+)\u201d")
 # ASCII-кавычки → «ёлочки» (в эталонах только «»)
 GUILLEMET_RE = re.compile(r'"([^"\n]+)"')
 SPACE_BEFORE_PUNCT_RE = re.compile(r" +([,.!?;:])")
@@ -65,7 +81,8 @@ def _capitalize_after_sentence(m: re.Match) -> str:
         word_match = re.search(r"(\w+)$", before)
         if word_match:
             word = word_match.group(1)
-            if word.islower() and (len(word) == 1 or word in _NO_CAPITALIZE_AFTER):
+            # «я» — не сокращение, а частый конец предложения («это был я.»)
+            if word.islower() and ((len(word) == 1 and word != "я") or word in _NO_CAPITALIZE_AFTER):
                 return m.group(0)
     return m.group(1) + " " + m.group(2).upper()
 
@@ -81,6 +98,7 @@ def regex_cleanup(text: str) -> str:
     text = _expand_abbreviations(text)
     text = FILLER_WORDS_RE.sub("", text)
     text = REPEATED_WORDS_RE.sub(r"\1", text)
+    text = REPEATED_PHRASE_RE.sub(r"\1", text)
     # Дубли пунктуации после удаления филлеров; до 2 проходов («, , ,»)
     for _ in range(2):
         text, n = DUP_PUNCT_RE.subn(r"\1", text)
@@ -91,6 +109,8 @@ def regex_cleanup(text: str) -> str:
     text = DASH_RE.sub(" – ", text)
     text = ELLIPSIS_CHAR_RE.sub("...", text)
     text = MANY_DOTS_RE.sub("...", text)
+    text = LOW9_QUOTE_RE.sub(r"«\1»", text)
+    text = CURLY_QUOTE_RE.sub(r"«\1»", text)
     text = GUILLEMET_RE.sub(r"«\1»", text)
     text = SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
     text = LEADING_PUNCT_RE.sub("", text)
@@ -122,6 +142,22 @@ _gemini_lock = threading.Lock()
 GEMINI_MAX_RETRIES = 3
 GEMINI_BACKOFF = [2, 5, 10]  # seconds
 
+# LLM изредка добавляет преамбулу вопреки правилу «верни ТОЛЬКО текст»
+_GEMINI_PREAMBLE_RE = re.compile(
+    r"^(?:вот\s+)?(?:исправленный|откорректированный|итоговый|готовый)\s+(?:текст|вариант):?\s*",
+    re.IGNORECASE,
+)
+
+
+def _clean_gemini_response(result: str) -> str:
+    """Срезает markdown-обёртку и преамбулы из ответа Gemini."""
+    result = result.strip()
+    if result.startswith("```"):
+        result = re.sub(r"^```[a-zа-яё]*\s*\n?", "", result)
+        result = re.sub(r"\n?```\s*$", "", result)
+    result = _GEMINI_PREAMBLE_RE.sub("", result)
+    return result.strip()
+
 
 def gemini_polish(text: str) -> str:
     """Полировка текста через Gemini API с retry на rate-limit/5xx."""
@@ -137,27 +173,27 @@ def gemini_polish(text: str) -> str:
         "Ты — корректор ДОСЛОВНОЙ стенограммы телеинтервью на русском языке.\n"
         "Правила:\n"
         "1. НЕ удаляй и НЕ добавляй слова. Разговорные «ну», «вот», «как бы», "
-        "«типа», «короче», «значит» — часть стенограммы, сохраняй их.\n"
-        "2. Убирай только нечленораздельные звуки: «эээ», «ммм», «хм».\n"
-        "3. Исправляй явные ошибки распознавания по контексту, особенно имена "
+        "«типа», «короче», «значит», «хм» — часть стенограммы, сохраняй их. "
+        "Нечленораздельные звуки уже удалены до тебя.\n"
+        "2. Исправляй явные ошибки распознавания по контексту, особенно имена "
         "собственные: «масс-фильм» → «Мосфильм».\n"
-        "4. Имена собственные пиши с заглавной буквы.\n"
-        "5. Названия (фильмы, песни, театры, каналы) бери в кавычки-ёлочки «».\n"
-        "6. Знаки препинания расставляй по смыслу. Тире — с пробелами: "
+        "3. Имена собственные пиши с заглавной буквы.\n"
+        "4. Названия (фильмы, песни, театры, каналы) бери в кавычки-ёлочки «».\n"
+        "5. Знаки препинания расставляй по смыслу. Тире — с пробелами: "
         "«слово – слово». Дефисы внутри слов без пробелов: «что -то» → «что-то».\n"
-        "7. НЕ меняй порядок слов и НЕ переформулируй.\n"
-        "8. НЕ меняй первую букву фрагмента: фрагмент может начинаться "
+        "6. НЕ меняй порядок слов и НЕ переформулируй.\n"
+        "7. НЕ меняй первую букву фрагмента: фрагмент может начинаться "
         "с середины предложения.\n"
-        "9. Если текст содержит разделитель ---SEGMENT_BREAK---, "
+        "8. Если текст содержит разделитель ---SEGMENT_BREAK---, "
         "сохрани его без изменений на отдельной строке.\n"
-        "10. Годы, возраст, суммы, даты пиши цифрами с наращением через "
+        "9. Годы, возраст, суммы, даты пиши цифрами с наращением через "
         "дефис: «в девяносто третьем» → «в 93-м», «с семи до одиннадцати "
         "лет» → «с 7-ми до 11-ти». Диапазоны — дефис без пробелов: «20-25». "
         "Малые количества (один-десять предметов) оставляй прописью: «два "
         "спектакля». Это ЕДИНСТВЕННОЕ разрешённое изменение формы слов.\n"
-        "11. Верни ТОЛЬКО текст, без комментариев.\n\n"
+        "10. Верни ТОЛЬКО текст, без комментариев.\n\n"
         "Пример:\n"
-        "Вход: ну вот мы эээ и поехали на масс -фильм снимать вечную любовь\n"
+        "Вход: ну вот мы и поехали на масс -фильм снимать вечную любовь\n"
         "Выход: ну вот мы и поехали на «Мосфильм» снимать «Вечную любовь»\n\n"
         f"Текст:\n{text}"
     )
@@ -169,7 +205,7 @@ def gemini_polish(text: str) -> str:
                 prompt,
                 generation_config={"temperature": 0.0},
             )
-            result = response.text.strip()
+            result = _clean_gemini_response(response.text)
             gemini_calls.labels(outcome="success").inc()
             if result:
                 return result
@@ -200,6 +236,8 @@ def postprocess_segments(segments: list[dict], use_gemini: bool = True) -> list[
 
     for seg in segments:
         seg["text"] = regex_cleanup(seg["text"])
+        if seg.get("words"):
+            seg["words"] = [w for w in seg["words"] if not _FILLER_WORD_RE.match(w.get("text", "").strip())]
 
     segments = [seg for seg in segments if seg["text"].strip()]
 
@@ -215,7 +253,8 @@ def postprocess_segments(segments: list[dict], use_gemini: bool = True) -> list[
 
     for i, seg in enumerate(segments):
         text = seg["text"]
-        if not text:
+        # "(неразборчиво)" — служебная замена, Gemini её не полирует
+        if not text or text == UNCLEAR_TEXT:
             continue
         if current_batch and len(current_batch) + len(SEPARATOR) + len(text) > MAX_BATCH_CHARS:
             batch_texts.append(current_batch)

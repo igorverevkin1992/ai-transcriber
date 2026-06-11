@@ -44,7 +44,7 @@ export const TranscriptPreview: React.FC<Props> = ({
 
   // Полная скобочная ремарка «(Технические моменты).» — как в backend/turns.py;
   // частичная «(пауза) и потом...» рендерится как обычная речь.
-  const isFullParenthetical = (text: string) => /^\([^)]+\)[.!?…]*$/.test(text);
+  const isFullParenthetical = (text: string) => /^\((?:[^()]*|\([^()]*\))*\)[.!?…]*$/.test(text);
 
   const startEdit = (idx: number, text: string) => {
     setEditingIndex(idx);
@@ -106,7 +106,7 @@ export const TranscriptPreview: React.FC<Props> = ({
           <div className="space-y-3 text-base md:text-lg leading-relaxed">
             {segments.map((seg, idx) => {
               const abbr = getSpeakerAbbr(seg.tag_id);
-              const isTechRemark = isFullParenthetical(seg.text);
+              const isTechRemark = isFullParenthetical(seg.text) && !seg.text.startsWith('(неразборчиво)');
               const isEditing = editingIndex === idx;
 
               return (

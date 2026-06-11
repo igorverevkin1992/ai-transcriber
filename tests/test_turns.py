@@ -1,6 +1,6 @@
 """Тесты сборки реплик (backend.turns) — структура как в эталонных стенограммах."""
 
-from backend.turns import TECH_BREAK_TEXT, build_turns
+from backend.turns import TECH_BREAK_TEXT, UNCLEAR_TEXT, build_turns
 from backend.utils import tc_to_frames
 
 
@@ -59,6 +59,23 @@ class TestInlineTimecodes:
         assert out[0]["text"] == "Начало истории, которая продолжается. 00:01:15:00 Конец."
 
 
+class TestFrameZeroing:
+    def test_fractional_seconds_produce_zero_frames(self):
+        out = _build([_ev("0", "Привет.", 2.52, 4.0)])
+        assert out[0]["timecode"] == "00:00:02:00"
+
+    def test_fractional_with_start_tc(self):
+        frames = tc_to_frames("11:26:35:00", 25)
+        out = _build([_ev("0", "Привет.", 2.52, 4.0)], start_frames=frames)
+        assert out[0]["timecode"] == "11:26:37:00"
+
+    def test_embedded_tc_frames_zeroed(self):
+        frames = tc_to_frames("11:26:35:12", 25)
+        out = _build([_ev("0", "Поехали.", 35, 40)], start_frames=frames)
+        assert out[0]["timecode"] == "11:26:35:00"
+        assert out[1]["timecode"] == "11:27:10:00"
+
+
 class TestTechBreaks:
     def test_tech_break_at_start(self):
         out = _build([_ev("0", "Поехали.", 35, 40)])
@@ -87,6 +104,42 @@ class TestTechBreaks:
         out = _build([_ev("0", "Первая.", 0, 10), _ev("1", "Вторая.", 55, 60)])
         assert out[1]["text"] == TECH_BREAK_TEXT
         assert out[1]["speaker"] == "1"
+
+
+class TestResumedTurns:
+    def test_interrupted_same_speaker_resumes_with_ellipsis(self):
+        # Эталон: «М: ... организации.» — прерванная реплика возобновляется
+        # с «... » и строчной буквы
+        out = _build([
+            _ev("0", "мы начали обсуждать вопросы", 0, 5),
+            _ev("0", "Организации. И поехали дальше.", 50, 55),
+        ])
+        assert len(out) == 3
+        assert out[0]["text"] == "Мы начали обсуждать вопросы..."
+        assert out[1]["text"] == TECH_BREAK_TEXT
+        assert out[2]["text"] == "... организации. И поехали дальше."
+
+    def test_other_speaker_after_break_no_ellipsis(self):
+        out = _build([
+            _ev("0", "мы начали обсуждать", 0, 5),
+            _ev("1", "новая тема.", 50, 55),
+        ])
+        assert out[2]["text"] == "Новая тема."
+
+    def test_finished_turn_no_resume_prefix(self):
+        # Реплика завершена точкой — после паузы продолжение с заглавной
+        out = _build([
+            _ev("0", "Мы всё обсудили.", 0, 5),
+            _ev("0", "теперь о другом.", 50, 55),
+        ])
+        assert out[2]["text"] == "Теперь о другом."
+
+    def test_resumed_acronym_not_lowercased(self):
+        out = _build([
+            _ev("0", "тогда мы пошли в", 0, 5),
+            _ev("0", "МХАТ на спектакль.", 50, 55),
+        ])
+        assert out[2]["text"] == "... МХАТ на спектакль."
 
 
 class TestFinalization:
@@ -125,3 +178,90 @@ class TestFinalization:
         assert len(out) == 3
         assert out[1] == {"timecode": "00:00:06:00", "speaker": "0", "text": "(смех)"}
         assert out[2]["timecode"] == "00:00:09:00"
+
+    def test_nested_parenthetical_recognized(self):
+        out = _build([
+            _ev("0", "Первая фраза.", 0, 5),
+            _ev("0", "(Технические моменты (перерыв)).", 6, 8),
+            _ev("0", "Вторая фраза.", 9, 12),
+        ])
+        assert len(out) == 3
+        assert out[1]["text"] == "(Технические моменты (перерыв))."
+
+    def test_consecutive_identical_remarks_deduped(self):
+        out = _build([
+            _ev("0", "(звучит песня)", 0, 5),
+            _ev("0", "(звучит песня)", 6, 10),
+            _ev("0", "Дальше речь.", 11, 14),
+        ])
+        assert len(out) == 2
+        assert out[0]["text"] == "(звучит песня)"
+        assert out[1]["text"] == "Дальше речь."
+
+
+class TestUnclearText:
+    def test_unclear_merges_inline_into_turn(self):
+        # Эталон ф14-15: «(неразборчиво)» — внутри реплики, не отдельный абзац
+        out = _build([
+            _ev("0", "мы начали говорить", 0, 3),
+            _ev("0", UNCLEAR_TEXT, 4, 6),
+            _ev("0", "и закончили хорошо.", 7, 10),
+        ])
+        assert len(out) == 1
+        assert UNCLEAR_TEXT in out[0]["text"]
+        assert out[0]["text"].startswith("Мы начали")
+
+    def test_consecutive_unclear_collapsed(self):
+        out = _build([
+            _ev("0", "речь шла", 0, 3),
+            _ev("0", UNCLEAR_TEXT, 4, 6),
+            _ev("0", UNCLEAR_TEXT, 7, 9),
+            _ev("0", UNCLEAR_TEXT, 10, 12),
+        ])
+        assert len(out) == 1
+        assert out[0]["text"].count(UNCLEAR_TEXT) == 1
+
+    def test_unclear_alone_is_own_turn(self):
+        # Эталоны: standalone «(неразборчиво).» пишется с точкой (6/6 случаев)
+        out = _build([_ev("0", UNCLEAR_TEXT, 0, 3)])
+        assert out == [{"timecode": "00:00:00:00", "speaker": "0", "text": UNCLEAR_TEXT + "."}]
+
+    def test_standalone_unclear_gets_period(self):
+        out = _build([_ev("0", UNCLEAR_TEXT, 0, 3)])
+        assert out[0]["text"] == "(неразборчиво)."
+
+    def test_inline_unclear_no_period(self):
+        # Внутри реплики «(неразборчиво)» не получает собственную точку;
+        # закрывающая скобка завершает реплику без искусственного «...».
+        out = _build([
+            _ev("0", "какая это была", 0, 3),
+            _ev("0", UNCLEAR_TEXT, 4, 6),
+        ])
+        assert len(out) == 1
+        assert out[0]["text"] == "Какая это была (неразборчиво)"
+
+
+class TestSentenceBoundary:
+    def test_guillemet_ending_not_treated_as_sentence(self):
+        # Сегмент, кончающийся «»» без точки — середина фразы: следующий
+        # сегмент НЕ капитализируется, инлайн-таймкод НЕ вставляется.
+        out = _build([
+            _ev("0", "мы поехали на «Мосфильм»", 0, 59),
+            _ev("0", "снимать кино.", 61, 70),
+        ])
+        assert len(out) == 1
+        assert out[0]["text"] == "Мы поехали на «Мосфильм» снимать кино."
+
+    def test_guillemet_with_period_is_sentence(self):
+        # «...«Щука».» — точка после кавычки закрывает предложение:
+        # следующий сегмент капитализируется.
+        out = _build([
+            _ev("0", "это «Щука».", 0, 2),
+            _ev("0", "потом мы ушли.", 3, 5),
+        ])
+        assert out[0]["text"] == "Это «Щука». Потом мы ушли."
+
+    def test_guillemet_ending_no_artificial_ellipsis(self):
+        # Реплика, кончающаяся «»», не получает искусственное «...»
+        out = _build([_ev("0", "снимать «Вечную любовь»", 0, 2)])
+        assert out[0]["text"] == "Снимать «Вечную любовь»"
