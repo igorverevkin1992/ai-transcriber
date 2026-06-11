@@ -69,6 +69,17 @@ class TestHallucinationFilter:
         assert _is_hallucination("Интервью на русском языке.", prompt)
         assert not _is_hallucination("Мы поехали на гастроли.", prompt)
 
+    def test_prompt_echo_does_not_flag_speaker_name(self):
+        from backend.services import _is_hallucination
+        prompt = "Интервью на русском языке. Участники: Денис Майданов, Григорий Антипенко."
+        assert not _is_hallucination("Денис Майданов", prompt)
+        assert not _is_hallucination("Григорий Антипенко", prompt)
+
+    def test_prompt_echo_flags_full_echo(self):
+        from backend.services import _is_hallucination
+        prompt = "Интервью на русском языке. Участники: Денис Майданов."
+        assert _is_hallucination(prompt, prompt)
+
     def test_filter_keeps_normal_speech(self):
         from backend.services import _filter_hallucinated_segments
         segs = [self._seg("Обычная речь."), self._seg("Субтитры сделал DimaTorzok")]

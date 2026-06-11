@@ -420,8 +420,11 @@ def _is_hallucination(text: str, initial_prompt: str | None = None) -> bool:
     if len(lowered) <= _HALLUCINATION_MAX_LEN:
         if any(phrase in lowered for phrase in HALLUCINATION_BLACKLIST):
             return True
-    if initial_prompt and len(lowered) > 10 and lowered.strip(" .") in initial_prompt.lower():
-        return True
+    if initial_prompt and len(lowered) > 10:
+        prompt_clean = initial_prompt.lower().strip(" .")
+        text_clean = lowered.strip(" .")
+        if text_clean in prompt_clean and len(text_clean) >= len(prompt_clean) * 0.4:
+            return True
     return False
 
 
@@ -491,9 +494,8 @@ def _transcribe_with_whisperx(
             _whisperx_model_name = model_name
         if initial_prompt and hasattr(_whisperx_model, "options"):
             _whisperx_model.options = _whisperx_model.options._replace(initial_prompt=initial_prompt)
-
-    audio = whisperx.load_audio(str(file_path))
-    result = _whisperx_model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
+        audio = whisperx.load_audio(str(file_path))
+        result = _whisperx_model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
     logger.info("[%s] WhisperX: транскрипция завершена, %d сегментов", project_id[:8], len(result["segments"]))
 
     with _whisper_lock:
