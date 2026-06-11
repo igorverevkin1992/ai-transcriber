@@ -24,15 +24,23 @@ TECH_BREAK_TEXT = "(Технические моменты)."
 # («...текст (неразборчиво) текст»), поэтому склеивается как обычная речь.
 UNCLEAR_TEXT = "(неразборчиво)"
 
-# Символы, которыми может законно заканчиваться завершённое предложение.
-_SENTENCE_FINAL_CHARS = tuple('.!?…»)"')
+# Конечная пунктуация предложения — строго для инлайн-таймкодов и
+# капитализации следующего сегмента. Цензус: все 71 инлайн-таймкодов
+# эталонов стоят после .!?, НИКОГДА после »)". Кавычка/скобка сами по себе
+# не закрывают предложение («на «Мосфильме» для...» — середина фразы).
+_SENTENCE_END_PUNCT = tuple('.!?…')
+# Символы, после которых реплика визуально завершена и НЕ получает "...".
+# Шире, чем _SENTENCE_END_PUNCT: закрывающая кавычка/скобка завершают
+# реплику типа «Это «Щука».» (точка попадает в _SENTENCE_END_PUNCT, но и
+# одиночная » не должна тянуть искусственное многоточие).
+_TURN_COMPLETE_CHARS = tuple('.!?…»)"')
 # Хвост, отбрасываемый перед добавлением "..." прерванной реплики.
 _TRAILING_TRIM = " ,;:–—-"
 _FULL_PARENTHETICAL_RE = re.compile(r"^\((?:[^()]*|\([^()]*\))*\)[.!?…]*$")
 
 
 def _ends_sentence(text: str) -> bool:
-    return text.rstrip().endswith(_SENTENCE_FINAL_CHARS)
+    return text.rstrip().endswith(_SENTENCE_END_PUNCT)
 
 
 def _finalize_turn_text(text: str, resumed: bool = False) -> str:
@@ -44,6 +52,11 @@ def _finalize_turn_text(text: str, resumed: bool = False) -> str:
     text = text.strip()
     if not text:
         return text
+    # Чисто неразборчивый сегмент: эталоны пишут «(неразборчиво).» с точкой
+    # (цензус: все 6 standalone-случаев с точкой). Inline-случаи сюда не
+    # попадают — они склеены в более длинную реплику.
+    if text == UNCLEAR_TEXT:
+        return text + "."
     if resumed:
         # Строчная только если слово не похоже на аббревиатуру (МХАТ)
         if text[0].isupper() and not (len(text) > 1 and text[1].isalpha() and text[1].isupper()):
@@ -51,7 +64,7 @@ def _finalize_turn_text(text: str, resumed: bool = False) -> str:
         text = "... " + text
     elif text[0].islower():
         text = text[0].upper() + text[1:]
-    if not text.endswith(_SENTENCE_FINAL_CHARS):
+    if not text.endswith(_TURN_COMPLETE_CHARS):
         text = text.rstrip(_TRAILING_TRIM) + "..."
     return text
 

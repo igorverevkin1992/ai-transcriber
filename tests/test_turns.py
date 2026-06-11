@@ -205,5 +205,46 @@ class TestUnclearText:
         assert out[0]["text"].count(UNCLEAR_TEXT) == 1
 
     def test_unclear_alone_is_own_turn(self):
+        # Эталоны: standalone «(неразборчиво).» пишется с точкой (6/6 случаев)
         out = _build([_ev("0", UNCLEAR_TEXT, 0, 3)])
-        assert out == [{"timecode": "00:00:00:00", "speaker": "0", "text": UNCLEAR_TEXT}]
+        assert out == [{"timecode": "00:00:00:00", "speaker": "0", "text": UNCLEAR_TEXT + "."}]
+
+    def test_standalone_unclear_gets_period(self):
+        out = _build([_ev("0", UNCLEAR_TEXT, 0, 3)])
+        assert out[0]["text"] == "(неразборчиво)."
+
+    def test_inline_unclear_no_period(self):
+        # Внутри реплики «(неразборчиво)» не получает собственную точку;
+        # закрывающая скобка завершает реплику без искусственного «...».
+        out = _build([
+            _ev("0", "какая это была", 0, 3),
+            _ev("0", UNCLEAR_TEXT, 4, 6),
+        ])
+        assert len(out) == 1
+        assert out[0]["text"] == "Какая это была (неразборчиво)"
+
+
+class TestSentenceBoundary:
+    def test_guillemet_ending_not_treated_as_sentence(self):
+        # Сегмент, кончающийся «»» без точки — середина фразы: следующий
+        # сегмент НЕ капитализируется, инлайн-таймкод НЕ вставляется.
+        out = _build([
+            _ev("0", "мы поехали на «Мосфильм»", 0, 59),
+            _ev("0", "снимать кино.", 61, 70),
+        ])
+        assert len(out) == 1
+        assert out[0]["text"] == "Мы поехали на «Мосфильм» снимать кино."
+
+    def test_guillemet_with_period_is_sentence(self):
+        # «...«Щука».» — точка после кавычки закрывает предложение:
+        # следующий сегмент капитализируется.
+        out = _build([
+            _ev("0", "это «Щука».", 0, 2),
+            _ev("0", "потом мы ушли.", 3, 5),
+        ])
+        assert out[0]["text"] == "Это «Щука». Потом мы ушли."
+
+    def test_guillemet_ending_no_artificial_ellipsis(self):
+        # Реплика, кончающаяся «»», не получает искусственное «...»
+        out = _build([_ev("0", "снимать «Вечную любовь»", 0, 2)])
+        assert out[0]["text"] == "Снимать «Вечную любовь»"
