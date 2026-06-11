@@ -140,6 +140,13 @@ class TestTypography:
     def test_ascii_quotes_to_guillemets(self):
         assert regex_cleanup('передача "Время"') == "передача «Время»"
 
+    def test_low9_quotes_to_guillemets(self):
+        assert regex_cleanup('передача „Время"') == "передача «Время»"
+        assert regex_cleanup('передача „Время"') == "передача «Время»"
+
+    def test_curly_quotes_to_guillemets(self):
+        assert regex_cleanup('передача “Время”') == "передача «Время»"
+
     def test_no_quotes_unchanged(self):
         assert regex_cleanup("передача Время") == "передача Время"
 

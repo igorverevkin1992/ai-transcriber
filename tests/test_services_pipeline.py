@@ -219,6 +219,38 @@ class TestAutoExportProject:
         assert any("Иванов" in t for t in legend)
 
 
+    def test_service_labels_keep_full_prefix_and_dont_pollute_abbrs(self, fresh_store):
+        store, temp_dir, _ = fresh_store
+        store.create("p7b", {
+            "id": "p7b",
+            "status": ProjectStatusEnum.COMPLETED,
+            "created_at": 1.0,
+            "original_filename": "interview.mp4",
+            "result": {
+                "speakers": {
+                    "0": {"duration_sec": 100.0, "suggested_name": "Антипенко"},
+                    "1": {"duration_sec": 50.0, "suggested_name": "АЗК"},
+                    "2": {"duration_sec": 30.0, "suggested_name": "Интервьюер"},
+                },
+                "segments": [
+                    {"timecode": "00:00:01:00", "speaker": "0", "text": "Текст."},
+                    {"timecode": "00:00:05:00", "speaker": "1", "text": "Вопрос."},
+                    {"timecode": "00:00:10:00", "speaker": "2", "text": "Ответ."},
+                ],
+            },
+        })
+        out = str(temp_dir / "p7b.docx")
+        services.auto_export_project("p7b", out)
+
+        from docx import Document
+        doc = Document(out)
+        all_text = "\n".join(p.text for p in doc.paragraphs)
+        # АЗК uses its full name as prefix, not a computed abbreviation
+        assert "АЗК:" in all_text
+        # Антипенко gets clean "А" (no collision with АЗК)
+        assert "А:" in all_text
+
+
 class TestMaybeRetry:
     def test_no_retry_when_not_error(self, fresh_store):
         store, _, _ = fresh_store
