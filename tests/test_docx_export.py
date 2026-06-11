@@ -1,5 +1,8 @@
+import zipfile
+
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt
 
 from backend.docx_export import generate_docx, is_legend_excluded_name
@@ -244,6 +247,53 @@ class TestGenerateDocx:
         assert "Исправленный текст." in all_text
         assert "Привет всем." not in all_text
         assert "Хорошо, давайте." not in all_text
+
+
+class TestDocxStructure:
+    def test_page_number_in_header(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            for name in z.namelist():
+                if name.startswith("word/header"):
+                    xml = z.read(name).decode("utf-8")
+                    assert "PAGE" in xml
+                    assert "MERGEFORMAT" in xml
+                    break
+            else:
+                raise AssertionError("No header XML found")
+
+    def test_page_number_header_right_aligned(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        section = doc.sections[0]
+        hdr_para = section.header.paragraphs[0]
+        assert hdr_para.alignment == WD_ALIGN_PARAGRAPH.RIGHT
+
+    def test_document_language_ru(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            styles_xml = z.read("word/styles.xml").decode("utf-8")
+        assert 'w:val="ru-RU"' in styles_xml
+
+    def test_runs_have_szcs(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        segment_para = next(p for p in doc.paragraphs if "11:04:" in p.text)
+        run = segment_para.runs[0]
+        szcs = run._element.find(qn("w:rPr")).find(qn("w:szCs"))
+        assert szcs is not None
+        assert szcs.get(qn("w:val")) == "28"
+
+    def test_cols_space_708(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        cols = doc.sections[0]._sectPr.find(qn("w:cols"))
+        assert cols.get(qn("w:space")) == "708"
 
 
 class TestLegendExcludedNames:
