@@ -76,6 +76,10 @@ def generate_docx(
         section.bottom_margin = Cm(2)
         section.left_margin = Cm(3)
         section.right_margin = Cm(1.5)
+        # Эталоны: расстояние до колонтитулов 449580 EMU (~1.25 см);
+        # дефолт python-docx 457200 EMU (1.27 см).
+        section.header_distance = 449580
+        section.footer_distance = 449580
 
     original_filename = project.get("original_filename", "transcript")
     download_name = strip_extension(original_filename) + ".docx"
@@ -135,6 +139,11 @@ def generate_docx(
         else:
             _add_run(p, f"{seg['timecode']} {display_name}: ")
             _add_text_with_italics(p, text)
+
+    # Эталоны заканчиваются пустым абзацем после последней реплики
+    # (все 4 файла: 1-2 завершающих пустых абзаца).
+    trailing = doc.add_paragraph()
+    _configure_paragraph(trailing)
 
     doc.save(output_path)
     return download_name

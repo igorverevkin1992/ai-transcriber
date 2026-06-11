@@ -118,6 +118,22 @@ class TestGenerateDocx:
         assert abs(section.left_margin - Cm(3)) < 1000
         assert abs(section.right_margin - Cm(1.5)) < 1000
 
+    def test_header_footer_distance(self, tmp_path, sample_project):
+        # Эталоны: header/footer distance 449580 EMU (~1.25 см).
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        section = doc.sections[0]
+        assert section.header_distance == 449580
+        assert section.footer_distance == 449580
+
+    def test_trailing_empty_paragraph(self, tmp_path, sample_project):
+        # Эталоны заканчиваются пустым абзацем после последней реплики.
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        assert not doc.paragraphs[-1].text.strip()
+
     def test_segment_format_inline_timecode(self, tmp_path, sample_project):
         out = tmp_path / "out.docx"
         generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
