@@ -7,6 +7,7 @@ from unittest.mock import patch
 from backend.utils import (
     detect_start_timecode,
     frames_to_tc,
+    offset_tc,
     parse_filename_metadata,
     sanitize_filename,
     strip_extension,
@@ -63,6 +64,22 @@ class TestTcToFrames:
     def test_roundtrip(self):
         for f in [0, 1, 24, 25, 100, 1000, 90000]:
             assert tc_to_frames(frames_to_tc(f)) == f
+
+
+class TestOffsetTc:
+    def test_fractional_seconds_zeroes_frames(self):
+        start = tc_to_frames("11:26:35:00", 25)
+        assert offset_tc(start, 2.52, 25) == "11:26:37:00"
+
+    def test_whole_seconds_unchanged(self):
+        assert offset_tc(0, 5.0, 25) == "00:00:05:00"
+
+    def test_embedded_tc_with_frames_zeroed(self):
+        start = tc_to_frames("11:26:35:12", 25)
+        assert offset_tc(start, 0.0, 25) == "11:26:35:00"
+
+    def test_zero_offset(self):
+        assert offset_tc(0, 0.0, 25) == "00:00:00:00"
 
 
 class TestParseFilenameMetadata:

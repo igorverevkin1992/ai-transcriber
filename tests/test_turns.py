@@ -59,6 +59,23 @@ class TestInlineTimecodes:
         assert out[0]["text"] == "Начало истории, которая продолжается. 00:01:15:00 Конец."
 
 
+class TestFrameZeroing:
+    def test_fractional_seconds_produce_zero_frames(self):
+        out = _build([_ev("0", "Привет.", 2.52, 4.0)])
+        assert out[0]["timecode"] == "00:00:02:00"
+
+    def test_fractional_with_start_tc(self):
+        frames = tc_to_frames("11:26:35:00", 25)
+        out = _build([_ev("0", "Привет.", 2.52, 4.0)], start_frames=frames)
+        assert out[0]["timecode"] == "11:26:37:00"
+
+    def test_embedded_tc_frames_zeroed(self):
+        frames = tc_to_frames("11:26:35:12", 25)
+        out = _build([_ev("0", "Поехали.", 35, 40)], start_frames=frames)
+        assert out[0]["timecode"] == "11:26:35:00"
+        assert out[1]["timecode"] == "11:27:10:00"
+
+
 class TestTechBreaks:
     def test_tech_break_at_start(self):
         out = _build([_ev("0", "Поехали.", 35, 40)])

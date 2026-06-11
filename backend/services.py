@@ -43,6 +43,7 @@ from backend.utils import (
     detect_fps,
     detect_start_timecode,
     frames_to_tc,
+    offset_tc,
     parse_filename_metadata,
     strip_extension,
     tc_to_frames,
@@ -711,7 +712,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         # Legacy: один ASR-сегмент = один абзац
         raw_segments = [
             {
-                "timecode": frames_to_tc(start_frames + round(ev["start_s"] * fps), fps),
+                "timecode": offset_tc(start_frames, ev["start_s"], fps),
                 "speaker": ev["speaker"],
                 "text": ev["text"],
             }
@@ -1083,7 +1084,10 @@ def auto_export_project(project_id: str, output_path: str) -> str | None:
         if is_legend_excluded_name(name):
             legend_exclude.add(speaker_id)
 
-    abbr_map = _compute_smart_abbreviations(final_map)
+    named_map = {sid: n for sid, n in final_map.items() if sid not in legend_exclude}
+    abbr_map = _compute_smart_abbreviations(named_map)
+    for sid in legend_exclude:
+        abbr_map[sid] = final_map[sid]
     return generate_docx(proj, final_map, abbr_map, output_path, legend_exclude=legend_exclude)
 
 

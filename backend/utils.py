@@ -71,6 +71,12 @@ def frames_to_tc(frames: int, fps: int = 25) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}:{f:02d}"
 
 
+def offset_tc(start_frames: int, seconds: float, fps: int = 25) -> str:
+    """ТК начала речи с точностью до секунды (кадры :00)."""
+    total = start_frames + round(seconds * fps)
+    return frames_to_tc(total - total % fps, fps)
+
+
 def tc_to_frames(tc_str: str, fps: int = 25) -> int:
     """Конвертирует SMPTE таймкод в кадры."""
     try:

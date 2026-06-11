@@ -17,7 +17,7 @@
 
 import re
 
-from backend.utils import frames_to_tc
+from backend.utils import frames_to_tc, offset_tc
 
 TECH_BREAK_TEXT = "(Технические моменты)."
 # Замена неуверенных ASR-сегментов; эталоны пишут её ВНУТРИ реплики
@@ -89,7 +89,7 @@ def build_turns(
         return out
 
     def tc(seconds: float) -> str:
-        return frames_to_tc(start_frames + round(seconds * fps), fps)
+        return offset_tc(start_frames, seconds, fps)
 
     cur: dict | None = None
     # Спикер, чья реплика была прервана тех-паузой посреди предложения, —
@@ -115,7 +115,7 @@ def build_turns(
     # эталоны открываются ремаркой с таймкодом начала записи.
     if events[0]["start_s"] >= tech_break_gap_seconds:
         out.append({
-            "timecode": frames_to_tc(start_frames, fps),
+            "timecode": offset_tc(start_frames, 0.0, fps),
             "speaker": events[0]["speaker"],
             "text": TECH_BREAK_TEXT,
         })
