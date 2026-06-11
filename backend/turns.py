@@ -17,7 +17,7 @@
 
 import re
 
-from backend.utils import frames_to_tc, offset_tc
+from backend.utils import offset_tc
 
 TECH_BREAK_TEXT = "(Технические моменты)."
 # Замена неуверенных ASR-сегментов; эталоны пишут её ВНУТРИ реплики

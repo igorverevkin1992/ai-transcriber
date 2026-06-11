@@ -42,7 +42,6 @@ from backend.turns import UNCLEAR_TEXT, build_turns
 from backend.utils import (
     detect_fps,
     detect_start_timecode,
-    frames_to_tc,
     offset_tc,
     parse_filename_metadata,
     strip_extension,
