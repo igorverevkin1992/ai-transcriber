@@ -162,6 +162,15 @@ class TestFinalization:
         assert out[1] == {"timecode": "00:00:06:00", "speaker": "0", "text": "(смех)"}
         assert out[2]["timecode"] == "00:00:09:00"
 
+    def test_nested_parenthetical_recognized(self):
+        out = _build([
+            _ev("0", "Первая фраза.", 0, 5),
+            _ev("0", "(Технические моменты (перерыв)).", 6, 8),
+            _ev("0", "Вторая фраза.", 9, 12),
+        ])
+        assert len(out) == 3
+        assert out[1]["text"] == "(Технические моменты (перерыв))."
+
     def test_consecutive_identical_remarks_deduped(self):
         out = _build([
             _ev("0", "(звучит песня)", 0, 5),

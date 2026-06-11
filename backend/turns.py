@@ -28,7 +28,7 @@ UNCLEAR_TEXT = "(неразборчиво)"
 _SENTENCE_FINAL_CHARS = tuple('.!?…»)"')
 # Хвост, отбрасываемый перед добавлением "..." прерванной реплики.
 _TRAILING_TRIM = " ,;:–—-"
-_FULL_PARENTHETICAL_RE = re.compile(r"^\([^)]+\)[.!?…]*$")
+_FULL_PARENTHETICAL_RE = re.compile(r"^\((?:[^()]*|\([^()]*\))*\)[.!?…]*$")
 
 
 def _ends_sentence(text: str) -> bool:
