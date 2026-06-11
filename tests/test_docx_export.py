@@ -2,7 +2,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Mm, Pt
 
-from backend.docx_export import generate_docx
+from backend.docx_export import generate_docx, is_legend_excluded_name
 
 
 class TestGenerateDocx:
@@ -207,6 +207,28 @@ class TestGenerateDocx:
         assert len(paren_runs) == 1
         assert paren_runs[0].italic
 
+    def test_unclear_standalone_has_speaker_prefix(self, tmp_path, sample_project):
+        sample_project["result"]["segments"] = [
+            {"timecode": "11:04:15:00", "speaker": "0", "text": "(неразборчиво)."},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
+        doc = Document(str(out))
+        para = next(p for p in doc.paragraphs if "неразборчиво" in p.text)
+        assert "М:" in para.text
+
+    def test_unclear_not_italic(self, tmp_path, sample_project):
+        sample_project["result"]["segments"] = [
+            {"timecode": "11:04:15:00", "speaker": "0", "text": "Текст (неразборчиво) продолжение."},
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
+        doc = Document(str(out))
+        para = next(p for p in doc.paragraphs if "неразборчиво" in p.text)
+        unclear_runs = [r for r in para.runs if "неразборчиво" in r.text]
+        assert len(unclear_runs) == 1
+        assert not unclear_runs[0].italic
+
     def test_segments_override_replaces_original(self, tmp_path, sample_project):
         edited = [
             {"timecode": "11:04:15:00", "speaker": "0", "text": "Исправленный текст."},
@@ -222,3 +244,27 @@ class TestGenerateDocx:
         assert "Исправленный текст." in all_text
         assert "Привет всем." not in all_text
         assert "Хорошо, давайте." not in all_text
+
+
+class TestLegendExcludedNames:
+    def test_azk_gzk_excluded(self):
+        assert is_legend_excluded_name("АЗК")
+        assert is_legend_excluded_name("ГЗК")
+
+    def test_m_zh_labels_excluded(self):
+        assert is_legend_excluded_name("М")
+        assert is_legend_excluded_name("Ж")
+        assert is_legend_excluded_name("М1")
+        assert is_legend_excluded_name("М2")
+        assert is_legend_excluded_name("ММ")
+
+    def test_zhenschina_muzhchina_excluded(self):
+        assert is_legend_excluded_name("ЖЕНЩИНА")
+        assert is_legend_excluded_name("МУЖЧИНА")
+        assert is_legend_excluded_name("Женщина")
+        assert is_legend_excluded_name("Мужчина")
+
+    def test_named_speakers_not_excluded(self):
+        assert not is_legend_excluded_name("Антипенко")
+        assert not is_legend_excluded_name("Интервьюер")
+        assert not is_legend_excluded_name("Денис")

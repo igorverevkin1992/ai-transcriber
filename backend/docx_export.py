@@ -4,6 +4,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.shared import Cm, Mm, Pt
 
+from backend.turns import UNCLEAR_TEXT
 from backend.utils import strip_extension
 
 # Parenthetical remark, optionally followed by sentence punctuation that the
@@ -13,7 +14,7 @@ PARENTHETICAL_RE = re.compile("(\\((?:[^()]*|\\([^()]*\\))*\\)[.!?…]*)")
 # Служебные и эпизодические говорящие не входят в легенду эталонов:
 # АЗК/ГЗК (автор/голос за кадром) и безымянные метки М1, М2, М3, Ж, ММ
 # (цензус f8: реплики «М1:», «Ж:» есть, в легенде — только именованные).
-_LEGEND_EXCLUDE_NAME_RE = re.compile(r"^([А-ЯЁ]ЗК|[МЖ]{1,2}\d*)$")
+_LEGEND_EXCLUDE_NAME_RE = re.compile(r"^([А-ЯЁ]ЗК|[МЖ]{1,2}\d*|ЖЕНЩИНА|МУЖЧИНА)$")
 
 
 def is_legend_excluded_name(name: str) -> bool:
@@ -47,7 +48,7 @@ def _add_text_with_italics(paragraph, text: str):
     for part in parts:
         if not part:
             continue
-        is_parenthetical = part.startswith("(") and ")" in part
+        is_parenthetical = part.startswith("(") and ")" in part and not part.startswith(UNCLEAR_TEXT)
         _add_run(paragraph, part, italic=is_parenthetical)
 
 
@@ -133,7 +134,7 @@ def generate_docx(
 
         # Без префикса спикера — только ЦЕЛИКОМ скобочная ремарка;
         # реплика, начинающаяся со скобки («(пауза) и потом...»), — речь.
-        if PARENTHETICAL_RE.fullmatch(text):
+        if PARENTHETICAL_RE.fullmatch(text) and not text.startswith(UNCLEAR_TEXT):
             _add_run(p, f"{seg['timecode']} ")
             _add_text_with_italics(p, text)
         else:
