@@ -411,13 +411,14 @@ class TestRevisionIds:
         assert len(runs) > 0
         assert len(with_rsid) / len(runs) >= 0.9
 
-    def test_paragraphs_carry_rsidrpr(self, tmp_path, sample_project):
+    def test_rsidrpr_only_on_paragraphs_with_runs(self, tmp_path, sample_project):
+        # Эталоны: rsidRPr на всех контентных абзацах, но НИ на одном пустом.
         out = tmp_path / "out.docx"
         generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
-        with zipfile.ZipFile(str(out)) as z:
-            doc = z.read("word/document.xml").decode("utf-8")
-        for tag in re.findall(r"<w:p\b[^>]*>", doc):
-            assert "w:rsidRPr=" in tag
+        doc = Document(str(out))
+        for para in doc.paragraphs:
+            has_rsidrpr = para._p.get(qn("w:rsidRPr")) is not None
+            assert has_rsidrpr == bool(para.runs)
 
 
 class TestCapsFormatting:
@@ -559,6 +560,39 @@ class TestRunSplitPattern:
                 italic_runs = [r for r in p.runs if r.italic]
                 assert len(italic_runs) == 1
                 assert italic_runs[0].text == "(смеётся)"
+
+
+class TestEmptyParagraphIds:
+    """Пустые абзацы: textId-сентинел «77777777», без rsidRPr (как в эталонах)."""
+
+    def test_empty_paragraphs_carry_sentinel_textid(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        empties = [p for p in doc.paragraphs if not p.runs]
+        assert len(empties) >= 3
+        # все пустые, кроме завершающего, несут сентинел
+        for p in empties[:-1]:
+            assert p._p.get(qn("w14:textId")) == "77777777"
+
+    def test_trailing_empty_has_unique_textid(self, tmp_path, sample_project):
+        # Завершающий пустой абзац эталонов несёт уникальный textId
+        # (f7: 4B1FFC40, f8: 089B72E7), а не сентинел.
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        trailing = doc.paragraphs[-1]
+        assert not trailing.runs
+        assert trailing._p.get(qn("w14:textId")) != "77777777"
+
+    def test_content_paragraphs_have_random_textid(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        content = [p for p in doc.paragraphs if p.runs]
+        ids = [p._p.get(qn("w14:textId")) for p in content]
+        assert all(i and i != "77777777" for i in ids)
+        assert len(set(ids)) == len(ids)
 
 
 class TestGoBackBookmark:

@@ -92,22 +92,32 @@ def _apply_revision_ids(doc, seed_text: str) -> None:
     rsid_root = _rand_rsid(rng)
 
     body = doc.element.body
+    paras = body.findall(qn("w:p"))
     used_ids: set = set()
     current = rng.choice(pool)
-    for p in body.findall(qn("w:p")):
+    for p in paras:
+        runs = p.findall(qn("w:r"))
+        # Пустой абзац: Word ставит сентинел textId="77777777" («текст не
+        # менялся») и НЕ ставит rsidRPr (эталоны: 0 из 13 пустых с rsidRPr).
+        # Исключение — завершающий пустой абзац, он несёт уникальный textId.
+        is_empty = not runs
         # Соседние абзацы чаще делят rsid (правка одной сессии) — инерция ~70%.
         if rng.random() > 0.7:
             current = rng.choice(pool)
         # Порядок атрибутов как в эталонах: paraId, textId, rsidR, rsidRPr,
         # rsidRDefault, rsidP.
         p.set(qn("w14:paraId"), _rand_paraid(rng, used_ids))
-        p.set(qn("w14:textId"), _rand_paraid(rng, used_ids))
+        if is_empty and p is not paras[-1]:
+            p.set(qn("w14:textId"), "77777777")
+        else:
+            p.set(qn("w14:textId"), _rand_paraid(rng, used_ids))
         p.set(qn("w:rsidR"), current)
-        p.set(qn("w:rsidRPr"), current)
+        if not is_empty:
+            p.set(qn("w:rsidRPr"), current)
         p.set(qn("w:rsidRDefault"), current)
         p.set(qn("w:rsidP"), rng.choice(pool))
         # Run-уровневые rsid: эталоны несут их на ~97% runs.
-        for ri, r in enumerate(p.findall(qn("w:r"))):
+        for ri, r in enumerate(runs):
             if rng.random() < 0.03:
                 continue  # ~3% runs без атрибутов, как в эталоне
             if ri > 0 and rng.random() < 0.2:
