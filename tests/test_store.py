@@ -157,3 +157,12 @@ class TestProjectStoreCleanup:
         deleted = store.cleanup_old(3600)
         assert deleted == 1
         assert "err" not in store
+
+    def test_cleanup_old_matches_enum_statuses(self, store):
+        from backend.models import ProjectStatusEnum
+        store.create("done", {"id": "done", "status": ProjectStatusEnum.COMPLETED, "created_at": 1.0})
+        store.create("fail", {"id": "fail", "status": ProjectStatusEnum.ERROR, "created_at": 1.0})
+        store.create("run", {"id": "run", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        deleted = store.cleanup_old(3600)
+        assert deleted == 2
+        assert "run" in store
