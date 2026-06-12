@@ -5,6 +5,10 @@ export interface ProcessingStep {
   status: 'pending' | 'loading' | 'completed';
 }
 
+// Фоллбеки для спикера без сопоставленного кандидата
+export const UNKNOWN_SPEAKER_NAME = 'Unknown';
+export const UNKNOWN_SPEAKER_ABBR = 'UNK';
+
 // Data structures from PRD Section 6
 export interface Candidate {
   id: string;

@@ -577,7 +577,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         </div>
 
         {/* Activity log */}
-        <div className="bg-gray-900 rounded-xl shadow-sm border border-gray-700 overflow-hidden flex flex-col min-h-0" role="log" aria-live="off" aria-label="Журнал обработки">
+        <div className="bg-gray-900 rounded-xl shadow-sm border border-gray-700 overflow-hidden flex flex-col min-h-0" role="log" aria-live="polite" aria-label="Журнал обработки">
           <div className="px-4 py-2.5 border-b border-gray-700 bg-gray-800 flex items-center gap-2 flex-shrink-0">
             <Activity className="w-3.5 h-3.5 text-green-400" />
             <span className="text-sm font-medium text-gray-300">Журнал</span>

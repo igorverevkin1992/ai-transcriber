@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { TranscriptSegment, SpeakerInfo, Candidate } from '../types';
+import { TranscriptSegment, SpeakerInfo, Candidate, UNKNOWN_SPEAKER_ABBR } from '../types';
 import { FileText, Download, Pencil } from 'lucide-react';
 
 interface Props {
@@ -37,14 +37,14 @@ export const TranscriptPreview: React.FC<Props> = ({
     const speaker = speakerByTag.get(tagId);
     if (!speaker) return tagId;
     if (speaker.candidate_id) {
-      return candidateById.get(speaker.candidate_id)?.abbr || 'UNK';
+      return candidateById.get(speaker.candidate_id)?.abbr || UNKNOWN_SPEAKER_ABBR;
     }
     return speaker.custom_abbr || `S${tagId}`;
   };
 
   // Полная скобочная ремарка «(Технические моменты).» — как в backend/turns.py;
   // частичная «(пауза) и потом...» рендерится как обычная речь.
-  const isFullParenthetical = (text: string) => /^\((?:[^()]*|\([^()]*\))*\)[.!?…]*$/.test(text);
+  const isFullParenthetical = (text: string) => /^\((?:[^()]|\([^()]*\))*\)[.!?…]*$/.test(text);
 
   const startEdit = (idx: number, text: string) => {
     setEditingIndex(idx);
@@ -118,6 +118,7 @@ export const TranscriptPreview: React.FC<Props> = ({
                       </div>
                       <textarea
                         className="w-full border border-blue-300 rounded p-2 text-base font-times focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        aria-label="Редактирование текста сегмента"
                         value={editText}
                         onChange={(e) => setEditText(e.target.value)}
                         rows={3}

@@ -1,5 +1,5 @@
 import React from 'react';
-import { SpeakerInfo, Candidate } from '../types';
+import { SpeakerInfo, Candidate, UNKNOWN_SPEAKER_NAME, UNKNOWN_SPEAKER_ABBR } from '../types';
 import { ArrowUpDown, User, Mic2, Settings2 } from 'lucide-react';
 
 interface Props {
@@ -20,14 +20,14 @@ export const SpeakerMatrix: React.FC<Props> = ({
   
   const getSpeakerName = (s: SpeakerInfo) => {
     if (s.candidate_id) {
-      return candidates.find(c => c.id === s.candidate_id)?.name || "Unknown";
+      return candidates.find(c => c.id === s.candidate_id)?.name || UNKNOWN_SPEAKER_NAME;
     }
     return s.custom_name || `Speaker ${s.tag_id}`;
   };
 
   const getSpeakerAbbr = (s: SpeakerInfo) => {
     if (s.candidate_id) {
-      return candidates.find(c => c.id === s.candidate_id)?.abbr || "UNK";
+      return candidates.find(c => c.id === s.candidate_id)?.abbr || UNKNOWN_SPEAKER_ABBR;
     }
     return s.custom_abbr || `S${s.tag_id}`;
   };

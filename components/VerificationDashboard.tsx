@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ProjectData, SpeakerInfo, TranscriptSegment } from '../types';
+import { MappingDecision, ProjectData, SpeakerInfo, TranscriptSegment } from '../types';
 import { SpeakerMatrix } from './SpeakerMatrix';
 import { TranscriptPreview } from './TranscriptPreview';
 import { api } from '../services/api';
@@ -91,7 +91,7 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
             : s.custom_abbr) || '',
         };
         return acc;
-      }, {} as any);
+      }, {} as MappingDecision);
 
       const editedSegments = segments.map(seg => ({
         timecode: seg.timecode,
