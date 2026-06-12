@@ -52,6 +52,7 @@ docker compose --profile dev up   # dev: separate Vite dev server
 - `WHISPER_BEAM_SIZE` / `WHISPER_INITIAL_PROMPT` — ASR accuracy tuning
 - `SPEECHKIT_LITERATURE_TEXT` — SpeechKit literary mode (default: false, better for interviews)
 - `GEMINI_MODEL` — Gemini model for text polishing (default: gemini-2.0-flash)
+- `DOCX_AUTHOR` — dc:creator / lastModifiedBy in generated DOCX (default: empty)
 - `HALLUCINATION_BLACKLIST` — Whisper hallucination phrases to drop (replaces builtin list)
 - `UNCLEAR_LOGPROB_THRESHOLD` / `NO_SPEECH_PROB_THRESHOLD` — ASR confidence gating (-1.2 / 0.85)
 

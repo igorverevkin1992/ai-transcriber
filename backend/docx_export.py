@@ -6,6 +6,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt
 
+from backend.config import DOCX_AUTHOR
 from backend.turns import UNCLEAR_TEXT
 from backend.utils import strip_extension
 
@@ -70,14 +71,17 @@ def _add_page_number_header(section):
     run5.append(fld_end)
     p._element.append(run5)
 
+    p2 = header.add_paragraph()
+    p2.style = p.style
+
 
 def _add_run(paragraph, text: str, italic: bool = False):
     """Добавляет run с заданным текстом и опциональным курсивом."""
     run = paragraph.add_run(text)
     run.font.size = Pt(14)
-    run._element.find(qn("w:rPr")).append(
-        OxmlElement("w:szCs", {qn("w:val"): "28"})
-    )
+    rpr = run._element.find(qn("w:rPr"))
+    rpr.append(OxmlElement("w:szCs", {qn("w:val"): "28"}))
+    rpr.insert(0, OxmlElement("w:rFonts", {qn("w:cstheme"): "minorHAnsi"}))
     if italic:
         run.italic = True
     return run
@@ -130,6 +134,13 @@ def generate_docx(
     tfl = settings.find(qn("w:themeFontLang"))
     if tfl is not None:
         tfl.set(qn("w:val"), "ru-RU")
+
+    proof_state = settings.find(qn("w:proofState"))
+    if proof_state is not None:
+        settings.remove(proof_state)
+
+    doc.core_properties.author = DOCX_AUTHOR
+    doc.core_properties.last_modified_by = DOCX_AUTHOR
 
     for section in doc.sections:
         section.page_width = Mm(210)

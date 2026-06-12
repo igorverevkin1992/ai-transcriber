@@ -84,6 +84,9 @@ SPEECHKIT_LITERATURE_TEXT = os.getenv("SPEECHKIT_LITERATURE_TEXT", "false").lowe
 # --- Gemini tuning ---
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
+# --- DOCX metadata ---
+DOCX_AUTHOR = os.getenv("DOCX_AUTHOR", "")
+
 
 def _auto_detect_concurrent_tasks() -> int:
     """Автоопределение MAX_CONCURRENT_TASKS на основе VRAM (если есть GPU)."""

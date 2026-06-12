@@ -296,6 +296,39 @@ class TestDocxStructure:
         assert cols.get(qn("w:space")) == "708"
 
 
+    def test_header_has_trailing_empty_paragraph(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        section = doc.sections[0]
+        hdr_paras = section.header.paragraphs
+        assert len(hdr_paras) == 2
+        assert hdr_paras[1].text == ""
+
+    def test_author_not_python_docx(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        assert doc.core_properties.author != "python-docx"
+
+    def test_no_proof_state_in_settings(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        proof_state = doc.settings.element.find(qn("w:proofState"))
+        assert proof_state is None
+
+    def test_runs_have_cstheme(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        segment_para = next(p for p in doc.paragraphs if "11:04:" in p.text)
+        run = segment_para.runs[0]
+        rfonts = run._element.find(qn("w:rPr")).find(qn("w:rFonts"))
+        assert rfonts is not None
+        assert rfonts.get(qn("w:cstheme")) == "minorHAnsi"
+
+
 class TestLegendExcludedNames:
     def test_azk_gzk_excluded(self):
         assert is_legend_excluded_name("АЗК")
