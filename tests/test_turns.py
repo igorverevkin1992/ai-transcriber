@@ -141,6 +141,41 @@ class TestResumedTurns:
         ])
         assert out[2]["text"] == "... МХАТ на спектакль."
 
+    def test_resume_after_one_interruption(self):
+        out = _build([
+            _ev("0", "мы начали обсуждать", 0, 5),
+            _ev("1", "Артефактами?", 6, 8),
+            _ev("0", "с артефактами, которые уезжали.", 9, 14),
+        ])
+        assert out[0]["text"] == "Мы начали обсуждать..."
+        assert out[1]["text"] == "Артефактами?"
+        assert out[2]["text"] == "... с артефактами, которые уезжали."
+
+    def test_no_resume_if_previous_turn_finished(self):
+        out = _build([
+            _ev("0", "Мы всё обсудили.", 0, 5),
+            _ev("1", "Хорошо.", 6, 8),
+            _ev("0", "теперь о другом.", 9, 14),
+        ])
+        assert out[2]["text"] == "Теперь о другом."
+
+    def test_no_resume_if_two_intervening_turns(self):
+        out = _build([
+            _ev("0", "мы начали обсуждать", 0, 5),
+            _ev("1", "Артефактами?", 6, 8),
+            _ev("2", "Нет.", 9, 10),
+            _ev("0", "с артефактами.", 11, 14),
+        ])
+        assert out[3]["text"] == "С артефактами."
+
+    def test_resume_preserves_polite_vy(self):
+        out = _build([
+            _ev("0", "мы хотели спросить", 0, 5),
+            _ev("1", "Конечно.", 6, 8),
+            _ev("0", "Вы даже молодых сегодня.", 9, 14),
+        ])
+        assert out[2]["text"] == "... Вы даже молодых сегодня."
+
 
 class TestFinalization:
     def test_trailing_ellipsis_unfinished(self):

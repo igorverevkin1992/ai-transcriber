@@ -42,7 +42,6 @@ from backend.turns import UNCLEAR_TEXT, build_turns
 from backend.utils import (
     detect_fps,
     detect_start_timecode,
-    frames_to_tc,
     offset_tc,
     parse_filename_metadata,
     strip_extension,
@@ -1063,6 +1062,13 @@ def shutdown_executor():
         _executor_alive = False
 
 
+def _invert_name(name: str) -> str:
+    words = name.strip().split()
+    if len(words) == 2 and all(w[0].isupper() and w.isalpha() for w in words):
+        return f"{words[1]} {words[0]}"
+    return name
+
+
 def auto_export_project(project_id: str, output_path: str) -> str | None:
     """Автоматически экспортирует проект в DOCX используя имена спикеров из метаданных файла.
     Возвращает имя файла для скачивания или None при ошибке."""
@@ -1088,6 +1094,8 @@ def auto_export_project(project_id: str, output_path: str) -> str | None:
     abbr_map = _compute_smart_abbreviations(named_map)
     for sid in legend_exclude:
         abbr_map[sid] = final_map[sid]
+    for sid in named_map:
+        final_map[sid] = _invert_name(final_map[sid])
     return generate_docx(proj, final_map, abbr_map, output_path, legend_exclude=legend_exclude)
 
 

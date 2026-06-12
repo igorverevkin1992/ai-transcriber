@@ -249,10 +249,10 @@ class TestPostprocessSegments:
 
 class TestGeminiPrompt:
     def test_gemini_prompt_preserves_hm(self):
-        from backend.postprocess import gemini_polish
         import unittest.mock as mock
 
-        captured_prompt = {}
+        from backend.postprocess import gemini_polish
+
         fake_response = mock.MagicMock()
         fake_response.text = "хм понятно"
 
