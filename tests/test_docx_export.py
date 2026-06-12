@@ -1,3 +1,4 @@
+import re
 import zipfile
 
 from docx import Document
@@ -177,11 +178,16 @@ class TestGenerateDocx:
         assert doc.styles["Normal"].font.size is None
 
     def test_body_font_is_calibri(self, tmp_path, sample_project):
-        # Reference body font is Calibri; python-docx default theme is Cambria.
+        # Reference body font is Calibri (theme minor font). The template's
+        # Normal style carries no explicit rPr — the font resolves through the
+        # theme, exactly as in the human reference.
         out = tmp_path / "out.docx"
         generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
-        doc = Document(str(out))
-        assert doc.styles["Normal"].font.name == "Calibri"
+        with zipfile.ZipFile(str(out)) as z:
+            theme = z.read("word/theme/theme1.xml").decode("utf-8")
+        m = re.search(r'<a:minorFont>.*?<a:latin typeface="([^"]*)"', theme, re.S)
+        assert m is not None
+        assert m.group(1) == "Calibri"
 
     def test_parenthetical_trailing_period_is_italic(self, tmp_path, sample_project):
         # Reference italicizes the whole "(...)." including the trailing dot.
@@ -264,12 +270,17 @@ class TestDocxStructure:
                 raise AssertionError("No header XML found")
 
     def test_page_number_header_right_aligned(self, tmp_path, sample_project):
+        # The reference wraps the PAGE field in a w:sdt (page-number gallery),
+        # so the field paragraph is not a direct child of w:hdr and is not
+        # visible via section.header.paragraphs — inspect the header XML.
         out = tmp_path / "out.docx"
         generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
-        doc = Document(str(out))
-        section = doc.sections[0]
-        hdr_para = section.header.paragraphs[0]
-        assert hdr_para.alignment == WD_ALIGN_PARAGRAPH.RIGHT
+        with zipfile.ZipFile(str(out)) as z:
+            hdr = z.read("word/header1.xml").decode("utf-8")
+        sdt = re.search(r"<w:sdt>.*?</w:sdt>", hdr, re.S)
+        assert sdt is not None
+        assert 'w:val="right"' in sdt.group(0)
+        assert "PAGE" in sdt.group(0)
 
     def test_document_language_ru(self, tmp_path, sample_project):
         out = tmp_path / "out.docx"
@@ -297,13 +308,13 @@ class TestDocxStructure:
 
 
     def test_header_has_trailing_empty_paragraph(self, tmp_path, sample_project):
+        # Reference header = sdt-wrapped PAGE paragraph + one trailing empty
+        # paragraph (2 w:p total in word/header1.xml).
         out = tmp_path / "out.docx"
         generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
-        doc = Document(str(out))
-        section = doc.sections[0]
-        hdr_paras = section.header.paragraphs
-        assert len(hdr_paras) == 2
-        assert hdr_paras[1].text == ""
+        with zipfile.ZipFile(str(out)) as z:
+            hdr = z.read("word/header1.xml").decode("utf-8")
+        assert len(re.findall(r"<w:p[ >]", hdr)) == 2
 
     def test_author_not_python_docx(self, tmp_path, sample_project):
         out = tmp_path / "out.docx"
@@ -327,6 +338,59 @@ class TestDocxStructure:
         rfonts = run._element.find(qn("w:rPr")).find(qn("w:rFonts"))
         assert rfonts is not None
         assert rfonts.get(qn("w:cstheme")) == "minorHAnsi"
+
+
+class TestTemplateSkeleton:
+    """Пакет наследует скелет эталона, а не дефолтного шаблона python-docx."""
+
+    def _generate(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        return out
+
+    def test_no_python_docx_fingerprint_anywhere(self, tmp_path, sample_project):
+        out = self._generate(tmp_path, sample_project)
+        with zipfile.ZipFile(str(out)) as z:
+            blob = b"".join(z.read(n) for n in z.namelist())
+        assert b"python-docx" not in blob
+
+    def test_part_list_matches_reference(self, tmp_path, sample_project):
+        out = self._generate(tmp_path, sample_project)
+        with zipfile.ZipFile(str(out)) as z:
+            parts = set(z.namelist())
+        # Word-родные части эталона присутствуют...
+        assert "word/footnotes.xml" in parts
+        assert "word/endnotes.xml" in parts
+        # ...а отпечатки дефолтного шаблона python-docx отсутствуют.
+        assert "docProps/thumbnail.jpeg" not in parts
+        assert "word/numbering.xml" not in parts
+        assert "word/stylesWithEffects.xml" not in parts
+        assert not any(p.startswith("customXml/") for p in parts)
+
+    def test_styles_are_reference_skeleton(self, tmp_path, sample_project):
+        out = self._generate(tmp_path, sample_project)
+        with zipfile.ZipFile(str(out)) as z:
+            styles = z.read("word/styles.xml").decode("utf-8")
+        # Эталон: компактный styles.xml с авто-ID a..a6 (русский Word);
+        # дефолт python-docx — 349 КБ с сотней англоязычных стилей.
+        assert len(styles) < 40000
+        assert 'w:styleId="a3"' in styles
+
+    def test_settings_are_reference_skeleton(self, tmp_path, sample_project):
+        out = self._generate(tmp_path, sample_project)
+        with zipfile.ZipFile(str(out)) as z:
+            settings = z.read("word/settings.xml").decode("utf-8")
+        assert '<w:zoom w:percent="100"/>' in settings
+        assert '<w:decimalSymbol w:val=","/>' in settings
+        assert '<w:listSeparator w:val=";"/>' in settings
+        assert '<w:defaultTabStop w:val="708"/>' in settings
+
+    def test_header_uses_sdt_with_noproof(self, tmp_path, sample_project):
+        out = self._generate(tmp_path, sample_project)
+        with zipfile.ZipFile(str(out)) as z:
+            hdr = z.read("word/header1.xml").decode("utf-8")
+        assert "<w:sdt>" in hdr
+        assert "<w:noProof/>" in hdr
 
 
 class TestLegendExcludedNames:

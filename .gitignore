@@ -23,6 +23,7 @@ temp_*
 temp_files/
 *.opus
 transcript_*.docx
+!backend/transcript_template.docx
 video_source.mp4
 
 # SQLite database

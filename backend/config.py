@@ -86,6 +86,13 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 # --- DOCX metadata ---
 DOCX_AUTHOR = os.getenv("DOCX_AUTHOR", "")
+# Шаблон-пакет из эталонной стенограммы (styles/theme/settings/header).
+# Генератор открывает его вместо пустого Document(), чтобы не нести отпечатки
+# дефолтного шаблона python-docx. Изготавливается scripts/make_template.py.
+DOCX_TEMPLATE_PATH = os.getenv(
+    "DOCX_TEMPLATE_PATH",
+    str(Path(__file__).resolve().parent / "transcript_template.docx"),
+)
 
 
 def _auto_detect_concurrent_tasks() -> int:

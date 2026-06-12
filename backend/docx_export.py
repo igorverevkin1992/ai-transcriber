@@ -6,7 +6,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt
 
-from backend.config import DOCX_AUTHOR
+from backend.config import DOCX_AUTHOR, DOCX_TEMPLATE_PATH
 from backend.turns import UNCLEAR_TEXT
 from backend.utils import strip_extension
 
@@ -32,47 +32,6 @@ def _configure_paragraph(paragraph):
     fmt.space_after = Pt(0)
     fmt.line_spacing_rule = WD_LINE_SPACING.SINGLE
     fmt.line_spacing = 1.0
-
-
-def _add_page_number_header(section):
-    """Добавляет номер страницы в верхний колонтитул (вправо), как в эталонах."""
-    header = section.header
-    header.is_linked_to_previous = False
-    p = header.paragraphs[0]
-    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-
-    run1 = OxmlElement("w:r")
-    fld_begin = OxmlElement("w:fldChar")
-    fld_begin.set(qn("w:fldCharType"), "begin")
-    run1.append(fld_begin)
-    p._element.append(run1)
-
-    run2 = OxmlElement("w:r")
-    instr = OxmlElement("w:instrText")
-    instr.text = "PAGE   \\* MERGEFORMAT"
-    run2.append(instr)
-    p._element.append(run2)
-
-    run3 = OxmlElement("w:r")
-    fld_sep = OxmlElement("w:fldChar")
-    fld_sep.set(qn("w:fldCharType"), "separate")
-    run3.append(fld_sep)
-    p._element.append(run3)
-
-    run4 = OxmlElement("w:r")
-    t = OxmlElement("w:t")
-    t.text = "1"
-    run4.append(t)
-    p._element.append(run4)
-
-    run5 = OxmlElement("w:r")
-    fld_end = OxmlElement("w:fldChar")
-    fld_end.set(qn("w:fldCharType"), "end")
-    run5.append(fld_end)
-    p._element.append(run5)
-
-    p2 = header.add_paragraph()
-    p2.style = p.style
 
 
 def _add_run(paragraph, text: str, italic: bool = False):
@@ -107,41 +66,21 @@ def generate_docx(
     legend_exclude: set[str] | None = None,
     segments_override: list[dict] | None = None,
 ) -> str:
-    """Генерирует DOCX с расшифровкой в формате, идентичном ручному."""
-    doc = Document()
+    """Генерирует DOCX с расшифровкой в формате, идентичном ручному.
 
-    # The human reference renders in Calibri (theme minor font), while
-    # python-docx's default template resolves the minor font to Cambria.
-    # Pin Normal to Calibri so body text and blank lines match the reference.
-    # We deliberately do NOT set a Normal size: the 11pt document default is
-    # kept (blank separator lines are 11pt); 14pt is applied only per run.
-    doc.styles["Normal"].font.name = "Calibri"
-
-    # Язык документа: эталоны — ru-RU; python-docx default — en-US.
-    styles_el = doc.styles.element
-    doc_defaults = styles_el.find(qn("w:docDefaults"))
-    if doc_defaults is not None:
-        rpr_default_el = doc_defaults.find(qn("w:rPrDefault"))
-        if rpr_default_el is not None:
-            rpr = rpr_default_el.find(qn("w:rPr"))
-            if rpr is not None:
-                lang = rpr.find(qn("w:lang"))
-                if lang is not None:
-                    lang.set(qn("w:val"), "ru-RU")
-
-    # settings.xml: themeFontLang
-    settings = doc.settings.element
-    tfl = settings.find(qn("w:themeFontLang"))
-    if tfl is not None:
-        tfl.set(qn("w:val"), "ru-RU")
-
-    proof_state = settings.find(qn("w:proofState"))
-    if proof_state is not None:
-        settings.remove(proof_state)
+    Документ строится из backend/transcript_template.docx — пакета,
+    извлечённого из эталонной стенограммы (styles/theme/fontTable/settings,
+    header с номером страницы, footnotes/endnotes). Это снимает все отпечатки
+    дефолтного шаблона python-docx разом; здесь дописываются только абзацы.
+    """
+    doc = Document(str(DOCX_TEMPLATE_PATH))
 
     doc.core_properties.author = DOCX_AUTHOR
     doc.core_properties.last_modified_by = DOCX_AUTHOR
 
+    # Размер страницы, поля и расстояние до колонтитулов уже заданы в sectPr
+    # шаблона (A4, поля 2/3/2/1.5 см, header/footer 708 twips). Дублируем явно
+    # как страховку на случай смены шаблона — значения совпадают, диффа нет.
     for section in doc.sections:
         section.page_width = Mm(210)
         section.page_height = Mm(297)
@@ -149,15 +88,8 @@ def generate_docx(
         section.bottom_margin = Cm(2)
         section.left_margin = Cm(3)
         section.right_margin = Cm(1.5)
-        # Эталоны: расстояние до колонтитулов 449580 EMU (~1.25 см);
-        # дефолт python-docx 457200 EMU (1.27 см).
         section.header_distance = 449580
         section.footer_distance = 449580
-        _add_page_number_header(section)
-        # cols space: эталоны 708, python-docx default 720
-        cols = section._sectPr.find(qn("w:cols"))
-        if cols is not None:
-            cols.set(qn("w:space"), "708")
 
     original_filename = project.get("original_filename", "transcript")
     download_name = strip_extension(original_filename) + ".docx"
