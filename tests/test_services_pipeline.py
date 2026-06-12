@@ -251,6 +251,36 @@ class TestAutoExportProject:
         assert "А:" in all_text
 
 
+    def test_legend_name_inverted_to_first_name_first(self, fresh_store):
+        store, temp_dir, _ = fresh_store
+        store.create("p7c", {
+            "id": "p7c",
+            "status": ProjectStatusEnum.COMPLETED,
+            "created_at": 1.0,
+            "original_filename": "Довлатова Алла_interview.mp4",
+            "result": {
+                "speakers": {
+                    "0": {"duration_sec": 100.0, "suggested_name": "Довлатова Алла"},
+                    "1": {"duration_sec": 50.0, "suggested_name": "Интервьюер"},
+                },
+                "segments": [
+                    {"timecode": "00:00:01:00", "speaker": "0", "text": "Текст."},
+                    {"timecode": "00:00:05:00", "speaker": "1", "text": "Вопрос."},
+                ],
+            },
+        })
+        out = str(temp_dir / "p7c.docx")
+        services.auto_export_project("p7c", out)
+
+        from docx import Document
+        doc = Document(out)
+        legend = [p.text for p in doc.paragraphs if "–" in p.text]
+        assert any("Алла Довлатова" in t for t in legend)
+        assert not any("Довлатова Алла" in t for t in legend)
+        all_text = "\n".join(p.text for p in doc.paragraphs)
+        assert "Д:" in all_text
+
+
 class TestMaybeRetry:
     def test_no_retry_when_not_error(self, fresh_store):
         store, _, _ = fresh_store
