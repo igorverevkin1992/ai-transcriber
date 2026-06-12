@@ -37,6 +37,7 @@ _TURN_COMPLETE_CHARS = tuple('.!?…»)"')
 # Хвост, отбрасываемый перед добавлением "..." прерванной реплики.
 _TRAILING_TRIM = " ,;:–—-"
 _FULL_PARENTHETICAL_RE = re.compile(r"^\((?:[^()]*|\([^()]*\))*\)[.!?…]*$")
+_POLITE_VY = {"Вы", "Вас", "Вам", "Вами", "Ваш", "Ваша", "Ваше", "Ваши"}
 
 
 def _ends_sentence(text: str) -> bool:
@@ -58,8 +59,8 @@ def _finalize_turn_text(text: str, resumed: bool = False) -> str:
     if text == UNCLEAR_TEXT:
         return text + "."
     if resumed:
-        # Строчная только если слово не похоже на аббревиатуру (МХАТ)
-        if text[0].isupper() and not (len(text) > 1 and text[1].isalpha() and text[1].isupper()):
+        first_word = text.split()[0] if text.split() else ""
+        if text[0].isupper() and first_word not in _POLITE_VY and not (len(text) > 1 and text[1].isalpha() and text[1].isupper()):
             text = text[0].lower() + text[1:]
         text = "... " + text
     elif text[0].islower():
@@ -95,9 +96,11 @@ def build_turns(
     # Спикер, чья реплика была прервана тех-паузой посреди предложения, —
     # его следующая реплика начинается с «... » (эталон: «М: ... организации.»)
     resume_speaker: str | None = None
+    # (speaker, index_in_out) последней прерванной реплики (текст "...")
+    last_unfinished: tuple[str, int] | None = None
 
     def close_turn() -> dict | None:
-        nonlocal cur
+        nonlocal cur, last_unfinished
         closed = None
         if cur is not None:
             text = _finalize_turn_text(" ".join(cur["parts"]), resumed=cur.get("resumed", False))
@@ -108,6 +111,8 @@ def build_turns(
                     "text": text,
                 }
                 out.append(closed)
+                if text.endswith("..."):
+                    last_unfinished = (cur["speaker"], len(out) - 1)
             cur = None
         return closed
 
@@ -151,12 +156,19 @@ def build_turns(
             close_turn()
 
         if cur is None:
+            is_resumed = resume_speaker == ev["speaker"]
+            if not is_resumed and last_unfinished is not None:
+                uf_speaker, uf_idx = last_unfinished
+                if (uf_speaker == ev["speaker"]
+                        and len(out) - uf_idx == 2
+                        and out[uf_idx + 1]["text"] != TECH_BREAK_TEXT):
+                    is_resumed = True
             cur = {
                 "speaker": ev["speaker"],
                 "start_s": ev["start_s"],
                 "parts": [ev["text"]],
                 "last_tc_s": ev["start_s"],
-                "resumed": resume_speaker == ev["speaker"],
+                "resumed": is_resumed,
             }
             resume_speaker = None
             continue
