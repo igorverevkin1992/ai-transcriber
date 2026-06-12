@@ -25,6 +25,24 @@ def is_legend_excluded_name(name: str) -> bool:
     return bool(_LEGEND_EXCLUDE_NAME_RE.match(name.strip().upper()))
 
 
+def _set_paragraph_mark_rpr(paragraph):
+    """Свойства знака абзаца (14pt, cstheme) — как у всех абзацев эталона.
+
+    В эталонах даже ПУСТЫЕ абзацы-разделители несут rPr знака абзаца с
+    sz=28: без него высота пустой строки падает до 11pt и вертикальная
+    раскладка/разбиение на страницы расходятся с ручным оригиналом.
+    """
+    p_pr = paragraph._p.get_or_add_pPr()
+    rpr = p_pr.find(qn("w:rPr"))
+    if rpr is None:
+        # rPr знака абзаца идёт последним среди свойств абзаца (после jc).
+        rpr = OxmlElement("w:rPr")
+        p_pr.append(rpr)
+    rpr.append(OxmlElement("w:rFonts", {qn("w:cstheme"): "minorHAnsi"}))
+    rpr.append(OxmlElement("w:sz", {qn("w:val"): "28"}))
+    rpr.append(OxmlElement("w:szCs", {qn("w:val"): "28"}))
+
+
 def _configure_paragraph(paragraph):
     """Применяет к абзацу выравнивание JUSTIFY, line_spacing=1.0, space_after=0."""
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
@@ -32,6 +50,7 @@ def _configure_paragraph(paragraph):
     fmt.space_after = Pt(0)
     fmt.line_spacing_rule = WD_LINE_SPACING.SINGLE
     fmt.line_spacing = 1.0
+    _set_paragraph_mark_rpr(paragraph)
 
 
 def _add_run(paragraph, text: str, italic: bool = False):

@@ -289,6 +289,20 @@ class TestDocxStructure:
             styles_xml = z.read("word/styles.xml").decode("utf-8")
         assert 'w:val="ru-RU"' in styles_xml
 
+    def test_blank_paragraph_mark_is_14pt(self, tmp_path, sample_project):
+        # Reference paragraph marks (incl. blank separators) carry sz=28 so
+        # blank lines render at 14pt, not the 11pt document default.
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        blank = next(p for p in doc.paragraphs if not p.text.strip())
+        rpr = blank._p.get_or_add_pPr().find(qn("w:rPr"))
+        assert rpr is not None
+        sz = rpr.find(qn("w:sz"))
+        assert sz is not None and sz.get(qn("w:val")) == "28"
+        rfonts = rpr.find(qn("w:rFonts"))
+        assert rfonts is not None and rfonts.get(qn("w:cstheme")) == "minorHAnsi"
+
     def test_runs_have_szcs(self, tmp_path, sample_project):
         out = tmp_path / "out.docx"
         generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
