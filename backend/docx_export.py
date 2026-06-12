@@ -199,47 +199,114 @@ def _insert_page_break_markers(doc) -> None:
                 break
 
 
-def _inject_app_statistics(path: str) -> None:
-    """Вписывает реальную статистику в docProps/app.xml готового пакета.
+# Порядок частей в zip, как пишет Word (эталоны). Неизвестные части идут
+# в конец.
+_REFERENCE_PART_ORDER = (
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "word/_rels/document.xml.rels",
+    "word/document.xml",
+    "word/footnotes.xml",
+    "word/endnotes.xml",
+    "word/header1.xml",
+    "word/theme/theme1.xml",
+    "word/settings.xml",
+    "word/styles.xml",
+    "word/webSettings.xml",
+    "docProps/app.xml",
+    "docProps/core.xml",
+    "word/fontTable.xml",
+)
 
-    python-docx не моделирует app.xml и оставляет нули — Word же хранит
-    Words/Characters/Lines/Pages. Считаем по тексту тела; Lines и Pages
-    оценочны (эталоны: ~141 символ/строку, ~385 слов/страницу).
-    """
-    with zipfile.ZipFile(path) as zin:
-        items = [(i, zin.read(i.filename)) for i in zin.infolist()]
+# Декларация XML в стиле Word: двойные кавычки + CRLF (lxml пишет одинарные + LF).
+_WORD_XML_DECL = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
 
-    doc_xml = next(d for i, d in items if i.filename == "word/document.xml").decode("utf-8")
-    texts = re.findall(r"<w:t[^>]*>([^<]*)</w:t>", doc_xml)
-    full = "".join(texts)
+
+def _app_statistics(doc_xml: str) -> dict:
+    """Считает Words/Characters/Lines/Pages/... по тексту document.xml."""
+    full = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", doc_xml))
     words = len(full.split())
     chars_with_spaces = len(full)
-    chars_no_spaces = len(re.sub(r"\s", "", full))
     paragraphs = sum(1 for p in re.findall(r"<w:p\b.*?</w:p>", doc_xml, re.S) if "<w:t" in p)
-    stats = {
+    return {
         "TotalTime": max(60, words // 10),
         "Pages": max(1, round(words / _WORDS_PER_PAGE)),
         "Words": words,
-        "Characters": chars_no_spaces,
+        "Characters": len(re.sub(r"\s", "", full)),
         "Lines": max(1, round(chars_with_spaces / 141)),
         "Paragraphs": paragraphs,
         "CharactersWithSpaces": chars_with_spaces,
     }
 
-    new_items = []
-    for info, data in items:
-        if info.filename == "docProps/app.xml":
-            xml = data.decode("utf-8")
-            for tag in _APP_STAT_TAGS:
-                xml = re.sub(
-                    rf"<{tag}>[^<]*</{tag}>", f"<{tag}>{stats[tag]}</{tag}>", xml
-                )
-            data = xml.encode("utf-8")
-        new_items.append((info, data))
+
+def _normalize_xml_declaration(data: bytes) -> bytes:
+    """Приводит XML-декларацию к Word-стилю (двойные кавычки + CRLF)."""
+    if not data.startswith(b"<?xml"):
+        return data
+    end = data.find(b"?>")
+    if end == -1:
+        return data
+    rest = data[end + 2:]
+    if rest.startswith(b"\r\n"):
+        rest = rest[2:]
+    elif rest.startswith(b"\n"):
+        rest = rest[1:]
+    return _WORD_XML_DECL + rest
+
+
+def _finalize_package(path: str) -> None:
+    """Доводит готовый пакет до байтового вида Word.
+
+    python-docx собирает zip по-своему (порядок частей, Unix-таймстампы и
+    права, lxml-декларации с одинарными кавычками) — это выдаёт машину
+    через `unzip -l` за секунду. Здесь: вписываем статистику app.xml,
+    нормализуем XML-декларации и перепаковываем zip в эталонном порядке с
+    DOS-эпохой и Windows-метаданными записей.
+    """
+    with zipfile.ZipFile(path) as zin:
+        parts = {i.filename: zin.read(i.filename) for i in zin.infolist()}
+
+    stats = _app_statistics(parts["word/document.xml"].decode("utf-8"))
+    app = parts["docProps/app.xml"].decode("utf-8")
+    for tag in _APP_STAT_TAGS:
+        app = re.sub(rf"<{tag}>[^<]*</{tag}>", f"<{tag}>{stats[tag]}</{tag}>", app)
+    parts["docProps/app.xml"] = app.encode("utf-8")
+
+    parts = {name: _normalize_xml_declaration(data) for name, data in parts.items()}
+
+    ordered = [n for n in _REFERENCE_PART_ORDER if n in parts]
+    ordered += [n for n in parts if n not in _REFERENCE_PART_ORDER]
 
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
-        for info, data in new_items:
-            zout.writestr(info, data)
+        for name in ordered:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 0      # Windows (python-docx: 3 = Unix)
+            info.create_version = 45     # как Word 15
+            zout.writestr(info, parts[name])
+
+    # zipfile принудительно ставит external_attr=0o600<<16 для нулевого
+    # значения; Word пишет 0. Обнуляем поле в записях центрального каталога.
+    _zero_external_attrs(path)
+
+
+def _zero_external_attrs(path: str) -> None:
+    """Обнуляет external_attr во всех записях центрального каталога zip."""
+    with open(path, "rb") as f:
+        data = bytearray(f.read())
+    eocd = data.rfind(b"PK\x05\x06")
+    if eocd == -1:
+        return
+    cd_offset = int.from_bytes(data[eocd + 16:eocd + 20], "little")
+    pos = cd_offset
+    while True:
+        i = data.find(b"PK\x01\x02", pos)
+        if i == -1 or i >= eocd:
+            break
+        data[i + 38:i + 42] = b"\x00\x00\x00\x00"  # external_attr (4 байта)
+        pos = i + 46
+    with open(path, "wb") as f:
+        f.write(data)
 
 
 def _add_goback_bookmark(paragraph):
@@ -384,5 +451,5 @@ def generate_docx(
     _set_core_dates(doc, download_name)
 
     doc.save(output_path)
-    _inject_app_statistics(output_path)
+    _finalize_package(output_path)
     return download_name

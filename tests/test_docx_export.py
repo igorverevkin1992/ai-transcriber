@@ -7,7 +7,11 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt
 
-from backend.docx_export import generate_docx, is_legend_excluded_name
+from backend.docx_export import (
+    _REFERENCE_PART_ORDER,
+    generate_docx,
+    is_legend_excluded_name,
+)
 
 
 class TestGenerateDocx:
@@ -564,6 +568,46 @@ class TestTemplateSkeleton:
             hdr = z.read("word/header1.xml").decode("utf-8")
         assert "<w:sdt>" in hdr
         assert "<w:noProof/>" in hdr
+
+
+class TestPackageBytes:
+    """zip-контейнер собран как Word, а не Python (порядок/таймстампы/декларации)."""
+
+    def test_part_order_matches_reference(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            order = [i.filename for i in z.infolist()]
+        assert order == list(_REFERENCE_PART_ORDER)
+
+    def test_all_timestamps_dos_epoch(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            assert all(i.date_time == (1980, 1, 1, 0, 0, 0) for i in z.infolist())
+
+    def test_entries_are_windows_made(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            for i in z.infolist():
+                assert i.create_system == 0
+                assert i.external_attr == 0
+
+    def test_xml_declaration_word_style(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            raw = z.read("word/document.xml")
+        assert raw.startswith(b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n')
+
+    def test_package_integrity_preserved(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            assert z.testzip() is None
+        # python-docx по-прежнему открывает файл
+        assert len(Document(str(out)).paragraphs) > 0
 
 
 class TestLegendExcludedNames:
