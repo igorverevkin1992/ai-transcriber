@@ -1,6 +1,8 @@
 -r requirements.txt
 
 # Testing & linting (not installed in production image)
-pytest
-httpx
-ruff
+pytest==9.0.3
+httpx==0.28.1
+ruff==0.15.14
+mypy==2.1.0
+bandit==1.9.4
