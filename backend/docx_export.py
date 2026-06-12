@@ -93,11 +93,26 @@ def _apply_revision_ids(doc, seed_text: str) -> None:
         # Соседние абзацы чаще делят rsid (правка одной сессии) — инерция ~70%.
         if rng.random() > 0.7:
             current = rng.choice(pool)
+        # Порядок атрибутов как в эталонах: paraId, textId, rsidR, rsidRPr,
+        # rsidRDefault, rsidP.
         p.set(qn("w14:paraId"), _rand_paraid(rng, used_ids))
         p.set(qn("w14:textId"), _rand_paraid(rng, used_ids))
         p.set(qn("w:rsidR"), current)
+        p.set(qn("w:rsidRPr"), current)
         p.set(qn("w:rsidRDefault"), current)
         p.set(qn("w:rsidP"), rng.choice(pool))
+        # Run-уровневые rsid: эталоны несут их на ~97% runs.
+        for ri, r in enumerate(p.findall(qn("w:r"))):
+            if rng.random() < 0.03:
+                continue  # ~3% runs без атрибутов, как в эталоне
+            if ri > 0 and rng.random() < 0.2:
+                val = rng.choice(pool)
+                r.set(qn("w:rsidR"), val)
+                r.set(qn("w:rsidRPr"), val)
+            elif ri == 0:
+                r.set(qn("w:rsidRPr"), current)
+            else:
+                r.set(qn("w:rsidR"), current)
 
     sect = body.find(qn("w:sectPr"))
     if sect is not None:
@@ -179,6 +194,21 @@ def _inject_app_statistics(path: str) -> None:
             zout.writestr(info, data)
 
 
+def _add_goback_bookmark(paragraph):
+    """Закладка _GoBack в конце абзаца — артефакт курсора Word.
+
+    Все 4 эталона несут ровно одну пару bookmarkStart/End «_GoBack» (id=0)
+    в конце первого абзаца: Word ставит её на месте последней правки.
+    """
+    bm_start = OxmlElement("w:bookmarkStart")
+    bm_start.set(qn("w:id"), "0")
+    bm_start.set(qn("w:name"), "_GoBack")
+    bm_end = OxmlElement("w:bookmarkEnd")
+    bm_end.set(qn("w:id"), "0")
+    paragraph._p.append(bm_start)
+    paragraph._p.append(bm_end)
+
+
 def _add_run(paragraph, text: str, italic: bool = False):
     """Добавляет run с заданным текстом и опциональным курсивом."""
     run = paragraph.add_run(text)
@@ -242,6 +272,7 @@ def generate_docx(
     header_para = doc.add_paragraph()
     _configure_paragraph(header_para)
     _add_run(header_para, download_name)
+    _add_goback_bookmark(header_para)
 
     empty1 = doc.add_paragraph()
     _configure_paragraph(empty1)

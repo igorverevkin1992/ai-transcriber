@@ -396,6 +396,40 @@ class TestRevisionIds:
         for pid in re.findall(r'w14:paraId="([0-9A-F]{8})"', doc):
             assert pid[0] in "01234567"
 
+    def test_runs_carry_rsids(self, tmp_path, sample_project):
+        # Эталоны несут rsid на ~97% runs; раунд 11 ставил их только на абзацы.
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            doc = z.read("word/document.xml").decode("utf-8")
+        runs = re.findall(r"<w:r(?: [^>]*)?>", doc)
+        with_rsid = [r for r in runs if "w:rsid" in r]
+        assert len(runs) > 0
+        assert len(with_rsid) / len(runs) >= 0.9
+
+    def test_paragraphs_carry_rsidrpr(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            doc = z.read("word/document.xml").decode("utf-8")
+        for tag in re.findall(r"<w:p\b[^>]*>", doc):
+            assert "w:rsidRPr=" in tag
+
+
+class TestGoBackBookmark:
+    """Закладка _GoBack — артефакт курсора Word, есть во всех эталонах."""
+
+    def test_single_goback_at_end_of_first_paragraph(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            doc = z.read("word/document.xml").decode("utf-8")
+        assert doc.count('w:name="_GoBack"') == 1
+        assert doc.count("<w:bookmarkEnd") == 1
+        first_para = re.search(r"<w:p\b.*?</w:p>", doc, re.S).group(0)
+        assert "_GoBack" in first_para
+        assert first_para.rstrip().endswith('<w:bookmarkEnd w:id="0"/></w:p>')
+
 
 class TestDocumentMetadata:
     """app.xml/core.xml не выдают машинную генерацию (реальная статистика, даты)."""
