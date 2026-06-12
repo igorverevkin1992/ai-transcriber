@@ -354,6 +354,48 @@ class TestDocxStructure:
         assert rfonts.get(qn("w:cstheme")) == "minorHAnsi"
 
 
+class TestRevisionIds:
+    """rsid/paraId-«шум», как у реально редактировавшихся в Word эталонов."""
+
+    def test_every_body_paragraph_has_rsid_and_paraid(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            doc = z.read("word/document.xml").decode("utf-8")
+        opens = re.findall(r"<w:p\b[^>]*>", doc)
+        assert len(opens) > 0
+        for tag in opens:
+            assert "w:rsidR=" in tag
+            assert "w:rsidRDefault=" in tag
+            assert "w14:paraId=" in tag
+
+    def test_settings_rsids_table_populated(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            settings = z.read("word/settings.xml").decode("utf-8")
+        table = re.search(r"<w:rsids>.*?</w:rsids>", settings, re.S).group(0)
+        assert len(re.findall(r"<w:rsid ", table)) >= 25
+
+    def test_rsids_deterministic_for_same_filename(self, tmp_path, sample_project):
+        a, b = tmp_path / "a.docx", tmp_path / "b.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(a))
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(b))
+        with zipfile.ZipFile(str(a)) as z:
+            da = z.read("word/document.xml")
+        with zipfile.ZipFile(str(b)) as z:
+            db = z.read("word/document.xml")
+        assert da == db
+
+    def test_paraids_high_bit_zero(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            doc = z.read("word/document.xml").decode("utf-8")
+        for pid in re.findall(r'w14:paraId="([0-9A-F]{8})"', doc):
+            assert pid[0] in "01234567"
+
+
 class TestTemplateSkeleton:
     """Пакет наследует скелет эталона, а не дефолтного шаблона python-docx."""
 

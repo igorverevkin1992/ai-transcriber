@@ -1,3 +1,4 @@
+import random
 import re
 
 from docx import Document
@@ -51,6 +52,67 @@ def _configure_paragraph(paragraph):
     fmt.line_spacing_rule = WD_LINE_SPACING.SINGLE
     fmt.line_spacing = 1.0
     _set_paragraph_mark_rpr(paragraph)
+
+
+_HEX = "0123456789ABCDEF"
+
+
+def _rand_rsid(rng: random.Random) -> str:
+    """Сессионный rsid в формате Word: «00» + 6 hex (00xxxxxx)."""
+    return "00" + "".join(rng.choice(_HEX) for _ in range(6))
+
+
+def _rand_paraid(rng: random.Random, used: set) -> str:
+    """Уникальный w14:paraId/textId: 8 hex, старший бит 0 (первый нибл 0-7)."""
+    while True:
+        pid = rng.choice("01234567") + "".join(rng.choice(_HEX) for _ in range(7))
+        if pid not in used:
+            used.add(pid)
+            return pid
+
+
+def _apply_revision_ids(doc, seed_text: str) -> None:
+    """Проставляет rsid/paraId абзацам и пересобирает таблицу w:rsids.
+
+    Эталоны несут 1200-2900 rsid-атрибутов и таблицу из 150-780 rsid в
+    settings.xml — побочный продукт реального редактирования в Word. У
+    свежесгенерированного файла их нет (главный статистический маркер
+    машины). Засеваем ГПСЧ именем файла: один и тот же проект даёт
+    идентичный «шум» (детерминизм для тестов и воспроизводимости).
+    """
+    rng = random.Random(seed_text)
+    pool = [_rand_rsid(rng) for _ in range(rng.randint(25, 60))]
+    rsid_root = _rand_rsid(rng)
+
+    body = doc.element.body
+    used_ids: set = set()
+    current = rng.choice(pool)
+    for p in body.findall(qn("w:p")):
+        # Соседние абзацы чаще делят rsid (правка одной сессии) — инерция ~70%.
+        if rng.random() > 0.7:
+            current = rng.choice(pool)
+        p.set(qn("w14:paraId"), _rand_paraid(rng, used_ids))
+        p.set(qn("w14:textId"), _rand_paraid(rng, used_ids))
+        p.set(qn("w:rsidR"), current)
+        p.set(qn("w:rsidRDefault"), current)
+        p.set(qn("w:rsidP"), rng.choice(pool))
+
+    sect = body.find(qn("w:sectPr"))
+    if sect is not None:
+        sect.set(qn("w:rsidR"), rng.choice(pool))
+        sect.set(qn("w:rsidSect"), rsid_root)
+
+    rsids = doc.settings.element.find(qn("w:rsids"))
+    if rsids is not None:
+        for child in list(rsids):
+            rsids.remove(child)
+        root_el = OxmlElement("w:rsidRoot")
+        root_el.set(qn("w:val"), rsid_root)
+        rsids.append(root_el)
+        for val in [rsid_root, *pool]:
+            e = OxmlElement("w:rsid")
+            e.set(qn("w:val"), val)
+            rsids.append(e)
 
 
 def _add_run(paragraph, text: str, italic: bool = False):
@@ -173,6 +235,8 @@ def generate_docx(
     # (все 4 файла: 1-2 завершающих пустых абзаца).
     trailing = doc.add_paragraph()
     _configure_paragraph(trailing)
+
+    _apply_revision_ids(doc, download_name)
 
     doc.save(output_path)
     return download_name
