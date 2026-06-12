@@ -144,11 +144,59 @@ def _set_core_dates(doc, seed_text: str) -> None:
     doc.core_properties.revision = random.Random(seed_text + ":rev").randint(15, 40)
 
 
+# Оценочное число слов на страницу (эталоны: 311-394). Используется и для
+# Pages в app.xml, и для расстановки lastRenderedPageBreak — чтобы число
+# маркеров (Pages−1) было согласовано со статистикой.
+_WORDS_PER_PAGE = 385
+
 # Счётчики docProps/app.xml в порядке появления в XML.
 _APP_STAT_TAGS = (
     "TotalTime", "Pages", "Words", "Characters",
     "Lines", "Paragraphs", "CharactersWithSpaces",
 )
+
+
+def _para_word_count(p) -> int:
+    """Число слов в абзаце (по тексту всех его run-ов)."""
+    return sum(len((t.text or "").split()) for t in p.findall(".//" + qn("w:t")))
+
+
+def _mark_page_break(p) -> None:
+    """Вставляет lastRenderedPageBreak в первый run абзаца (после rPr)."""
+    r = p.find(qn("w:r"))
+    if r is None:
+        return
+    lrpb = OxmlElement("w:lastRenderedPageBreak")
+    rpr = r.find(qn("w:rPr"))
+    if rpr is not None:
+        rpr.addnext(lrpb)
+    else:
+        r.insert(0, lrpb)
+
+
+def _insert_page_break_markers(doc) -> None:
+    """Расставляет lastRenderedPageBreak на оценочных границах страниц.
+
+    Word при сохранении помечает фактические разрывы (эталоны: 9-23 маркера,
+    ~1 на страницу). Файл без них «не открывался в Word». Оцениваем границы
+    по накопителю слов; маркеров = Pages−1, согласовано с app.xml.
+    """
+    paras = doc.element.body.findall(qn("w:p"))
+    total = sum(_para_word_count(p) for p in paras)
+    markers_needed = max(1, round(total / _WORDS_PER_PAGE)) - 1
+    if markers_needed <= 0:
+        return
+    placed = 0
+    acc = 0
+    boundary = _WORDS_PER_PAGE
+    for p in paras:
+        acc += _para_word_count(p)
+        if acc >= boundary:
+            _mark_page_break(p)
+            placed += 1
+            boundary += _WORDS_PER_PAGE
+            if placed >= markers_needed:
+                break
 
 
 def _inject_app_statistics(path: str) -> None:
@@ -170,7 +218,7 @@ def _inject_app_statistics(path: str) -> None:
     paragraphs = sum(1 for p in re.findall(r"<w:p\b.*?</w:p>", doc_xml, re.S) if "<w:t" in p)
     stats = {
         "TotalTime": max(60, words // 10),
-        "Pages": max(1, round(words / 385)),
+        "Pages": max(1, round(words / _WORDS_PER_PAGE)),
         "Words": words,
         "Characters": chars_no_spaces,
         "Lines": max(1, round(chars_with_spaces / 141)),
@@ -331,6 +379,7 @@ def generate_docx(
     trailing = doc.add_paragraph()
     _configure_paragraph(trailing)
 
+    _insert_page_break_markers(doc)
     _apply_revision_ids(doc, download_name)
     _set_core_dates(doc, download_name)
 

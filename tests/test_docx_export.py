@@ -431,6 +431,52 @@ class TestGoBackBookmark:
         assert first_para.rstrip().endswith('<w:bookmarkEnd w:id="0"/></w:p>')
 
 
+class TestPageBreakMarkers:
+    """lastRenderedPageBreak — Word помечает фактические разрывы страниц."""
+
+    def _long_project(self):
+        segs = [
+            {"timecode": f"11:{i:02d}:00:00", "speaker": str(i % 2),
+             "text": ("слово " * 40).strip() + "."}
+            for i in range(20)
+        ]
+        return {
+            "original_filename": "Длинный_f9.mp4",
+            "result": {
+                "speakers": {
+                    "0": {"duration_sec": 100.0, "suggested_name": "Тестов"},
+                    "1": {"duration_sec": 50.0, "suggested_name": "Гость"},
+                },
+                "segments": segs,
+            },
+        }
+
+    def test_markers_equal_pages_minus_one(self, tmp_path):
+        out = tmp_path / "out.docx"
+        generate_docx(self._long_project(), {"0": "Т", "1": "Г"}, {"0": "Т", "1": "Г"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            doc = z.read("word/document.xml").decode("utf-8")
+            app = z.read("docProps/app.xml").decode("utf-8")
+        pages = int(re.search(r"<Pages>(\d+)</Pages>", app).group(1))
+        assert pages > 1
+        assert doc.count("lastRenderedPageBreak") == pages - 1
+
+    def test_short_document_has_no_markers(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            doc = z.read("word/document.xml").decode("utf-8")
+        assert "lastRenderedPageBreak" not in doc
+
+    def test_marker_sits_in_run_after_rpr(self, tmp_path):
+        out = tmp_path / "out.docx"
+        generate_docx(self._long_project(), {"0": "Т", "1": "Г"}, {"0": "Т", "1": "Г"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            doc = z.read("word/document.xml").decode("utf-8")
+        # маркер стоит сразу после </w:rPr> и перед <w:t> внутри run-а
+        assert re.search(r"</w:rPr><w:lastRenderedPageBreak/><w:t", doc)
+
+
 class TestDocumentMetadata:
     """app.xml/core.xml не выдают машинную генерацию (реальная статистика, даты)."""
 
