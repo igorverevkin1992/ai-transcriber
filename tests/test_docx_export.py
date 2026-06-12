@@ -420,6 +420,147 @@ class TestRevisionIds:
             assert "w:rsidRPr=" in tag
 
 
+class TestCapsFormatting:
+    """Заголовочный блок эталонов (имя файла, разделитель, легенда) несёт w:caps."""
+
+    def _generate(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        return Document(str(out))
+
+    def _pmark_has_caps(self, para):
+        rpr = para._p.get_or_add_pPr().find(qn("w:rPr"))
+        return rpr is not None and rpr.find(qn("w:caps")) is not None
+
+    def _run_has_caps(self, run):
+        rpr = run._element.find(qn("w:rPr"))
+        return rpr is not None and rpr.find(qn("w:caps")) is not None
+
+    def test_header_paragraph_has_caps(self, tmp_path, sample_project):
+        doc = self._generate(tmp_path, sample_project)
+        header = doc.paragraphs[0]
+        assert self._pmark_has_caps(header)
+        assert self._run_has_caps(header.runs[0])
+
+    def test_separator_after_header_has_caps_in_pmark(self, tmp_path, sample_project):
+        doc = self._generate(tmp_path, sample_project)
+        sep = doc.paragraphs[1]
+        assert not sep.runs
+        assert self._pmark_has_caps(sep)
+
+    def test_legend_has_caps(self, tmp_path, sample_project):
+        doc = self._generate(tmp_path, sample_project)
+        legend = [p for p in doc.paragraphs if " – " in p.text]
+        assert legend
+        for para in legend:
+            assert self._pmark_has_caps(para)
+            assert all(self._run_has_caps(r) for r in para.runs)
+
+    def test_content_and_second_separator_without_caps(self, tmp_path, sample_project):
+        doc = self._generate(tmp_path, sample_project)
+        # Разделитель после легенды (перед первой репликой) и реплики — без caps.
+        for para in doc.paragraphs:
+            if "11:04:" in para.text:
+                assert not self._pmark_has_caps(para)
+                assert not any(self._run_has_caps(r) for r in para.runs)
+        # последний абзац — завершающий пустой, тоже без caps
+        assert not self._pmark_has_caps(doc.paragraphs[-1])
+
+    def test_caps_sits_between_rfonts_and_sz(self, tmp_path, sample_project):
+        # Порядок элементов rPr как в эталонах: rFonts, caps, sz, szCs.
+        out_path = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out_path))
+        with zipfile.ZipFile(str(out_path)) as z:
+            xml = z.read("word/document.xml").decode("utf-8")
+        assert '<w:rFonts w:cstheme="minorHAnsi"/><w:caps/><w:sz w:val="28"/>' in xml
+
+
+class TestRunSplitPattern:
+    """Разбиение реплик на runs повторяет статистику эталонов (1/3/2-run)."""
+
+    def _many_segments_project(self, n=120):
+        segs = [
+            {"timecode": f"12:{i // 60:02d}:{i % 60:02d}:00", "speaker": str(i % 2),
+             "text": f"Реплика номер {i}, обычный текст без скобок."}
+            for i in range(n)
+        ]
+        return {
+            "original_filename": "Статистика_f1.mp4",
+            "result": {
+                "speakers": {
+                    "0": {"duration_sec": 100.0, "suggested_name": "Тестов"},
+                    "1": {"duration_sec": 50.0, "suggested_name": "Гость"},
+                },
+                "segments": segs,
+            },
+        }
+
+    def test_run_count_distribution(self, tmp_path):
+        out = tmp_path / "out.docx"
+        generate_docx(self._many_segments_project(), {"0": "Т", "1": "Г"},
+                      {"0": "Т", "1": "Г"}, str(out))
+        doc = Document(str(out))
+        turn_paras = [p for p in doc.paragraphs if p.text.startswith("12:")]
+        assert len(turn_paras) == 120
+        counts = {1: 0, 2: 0, 3: 0}
+        for p in turn_paras:
+            counts[len(p.runs)] = counts.get(len(p.runs), 0) + 1
+        # Цензус f7/f8: ~35% 1-run, ~45% 3-run, ~20% 2-run (допуск ±15 п.п.)
+        assert 0.20 <= counts[1] / 120 <= 0.50
+        assert 0.30 <= counts[3] / 120 <= 0.60
+        assert 0.05 <= counts[2] / 120 <= 0.35
+
+    def test_three_run_split_at_frames_boundary(self, tmp_path):
+        out = tmp_path / "out.docx"
+        generate_docx(self._many_segments_project(), {"0": "Т", "1": "Г"},
+                      {"0": "Т", "1": "Г"}, str(out))
+        doc = Document(str(out))
+        three_run = [p for p in doc.paragraphs
+                     if p.text.startswith("12:") and len(p.runs) == 3]
+        assert three_run
+        for p in three_run:
+            # run1 = «HH:MM:SS», run2 = «:FF » (с пробелом), run3 = «спикер: текст»
+            assert re.fullmatch(r"\d{2}:\d{2}:\d{2}", p.runs[0].text)
+            assert re.fullmatch(r":\d{2} ", p.runs[1].text)
+            assert ": " in p.runs[2].text
+
+    def test_frames_run_preserves_space(self, tmp_path):
+        out = tmp_path / "out.docx"
+        generate_docx(self._many_segments_project(), {"0": "Т", "1": "Г"},
+                      {"0": "Т", "1": "Г"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            xml = z.read("word/document.xml").decode("utf-8")
+        assert '<w:t xml:space="preserve">:00 </w:t>' in xml
+
+    def test_one_run_contains_full_turn(self, tmp_path):
+        out = tmp_path / "out.docx"
+        generate_docx(self._many_segments_project(), {"0": "Т", "1": "Г"},
+                      {"0": "Т", "1": "Г"}, str(out))
+        doc = Document(str(out))
+        one_run = [p for p in doc.paragraphs
+                   if p.text.startswith("12:") and len(p.runs) == 1]
+        assert one_run
+        for p in one_run:
+            assert re.match(r"\d{2}:\d{2}:\d{2}:\d{2} [ТГ]: ", p.runs[0].text)
+
+    def test_parenthetical_segments_never_one_run(self, tmp_path, sample_project):
+        # Курсивная скобочная ремарка не может жить в одном run-е с речью.
+        sample_project["result"]["segments"] = [
+            {"timecode": f"11:04:{i:02d}:00", "speaker": "0",
+             "text": "Текст (смеётся) продолжение."}
+            for i in range(30)
+        ]
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д"}, {"0": "М"}, str(out))
+        doc = Document(str(out))
+        for p in doc.paragraphs:
+            if p.text.startswith("11:04:"):
+                assert len(p.runs) >= 3
+                italic_runs = [r for r in p.runs if r.italic]
+                assert len(italic_runs) == 1
+                assert italic_runs[0].text == "(смеётся)"
+
+
 class TestGoBackBookmark:
     """Закладка _GoBack — артефакт курсора Word, есть во всех эталонах."""
 

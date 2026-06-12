@@ -28,12 +28,15 @@ def is_legend_excluded_name(name: str) -> bool:
     return bool(_LEGEND_EXCLUDE_NAME_RE.match(name.strip().upper()))
 
 
-def _set_paragraph_mark_rpr(paragraph):
+def _set_paragraph_mark_rpr(paragraph, caps: bool = False):
     """Свойства знака абзаца (14pt, cstheme) — как у всех абзацев эталона.
 
     В эталонах даже ПУСТЫЕ абзацы-разделители несут rPr знака абзаца с
     sz=28: без него высота пустой строки падает до 11pt и вертикальная
     раскладка/разбиение на страницы расходятся с ручным оригиналом.
+
+    caps=True — для заголовочного блока (имя файла, разделитель после него,
+    легенда): эталоны несут там <w:caps/> между rFonts и sz.
     """
     p_pr = paragraph._p.get_or_add_pPr()
     rpr = p_pr.find(qn("w:rPr"))
@@ -42,18 +45,20 @@ def _set_paragraph_mark_rpr(paragraph):
         rpr = OxmlElement("w:rPr")
         p_pr.append(rpr)
     rpr.append(OxmlElement("w:rFonts", {qn("w:cstheme"): "minorHAnsi"}))
+    if caps:
+        rpr.append(OxmlElement("w:caps"))
     rpr.append(OxmlElement("w:sz", {qn("w:val"): "28"}))
     rpr.append(OxmlElement("w:szCs", {qn("w:val"): "28"}))
 
 
-def _configure_paragraph(paragraph):
+def _configure_paragraph(paragraph, caps: bool = False):
     """Применяет к абзацу выравнивание JUSTIFY, line_spacing=1.0, space_after=0."""
     paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     fmt = paragraph.paragraph_format
     fmt.space_after = Pt(0)
     fmt.line_spacing_rule = WD_LINE_SPACING.SINGLE
     fmt.line_spacing = 1.0
-    _set_paragraph_mark_rpr(paragraph)
+    _set_paragraph_mark_rpr(paragraph, caps=caps)
 
 
 _HEX = "0123456789ABCDEF"
@@ -324,28 +329,61 @@ def _add_goback_bookmark(paragraph):
     paragraph._p.append(bm_end)
 
 
-def _add_run(paragraph, text: str, italic: bool = False):
-    """Добавляет run с заданным текстом и опциональным курсивом."""
+def _add_run(paragraph, text: str, italic: bool = False, caps: bool = False):
+    """Добавляет run с заданным текстом и опциональным курсивом/капсом."""
     run = paragraph.add_run(text)
     run.font.size = Pt(14)
     rpr = run._element.find(qn("w:rPr"))
     rpr.append(OxmlElement("w:szCs", {qn("w:val"): "28"}))
+    if caps:
+        rpr.insert(0, OxmlElement("w:caps"))
     rpr.insert(0, OxmlElement("w:rFonts", {qn("w:cstheme"): "minorHAnsi"}))
     if italic:
         run.italic = True
     return run
 
 
-def _add_text_with_italics(paragraph, text: str):
-    """Добавляет текст в абзац, выделяя курсивом фрагменты в скобках (...)."""
+def _add_text_with_italics(paragraph, text: str, lead: str = ""):
+    """Добавляет текст в абзац, выделяя курсивом фрагменты в скобках (...).
+
+    lead — префикс (спикер), который вливается в первый НЕкурсивный фрагмент
+    одним run-ом (эталонный паттерн: «АЗК: Договариваться или?» — один run).
+    """
     if not text:
+        if lead:
+            _add_run(paragraph, lead)
         return
-    parts = PARENTHETICAL_RE.split(text)
-    for part in parts:
-        if not part:
-            continue
+    parts = [p for p in PARENTHETICAL_RE.split(text) if p]
+    for i, part in enumerate(parts):
         is_parenthetical = part.startswith("(") and ")" in part and not part.startswith(UNCLEAR_TEXT)
+        if i == 0 and lead:
+            if is_parenthetical:
+                _add_run(paragraph, lead)
+            else:
+                _add_run(paragraph, lead + part)
+                continue
         _add_run(paragraph, part, italic=is_parenthetical)
+
+
+def _add_turn_runs(paragraph, timecode: str, speaker_prefix: str, text: str, rng: random.Random):
+    """Разбивает реплику на runs по статистике эталонов.
+
+    Цензус f7/f8: ~35% turn-абзацев — один run целиком, ~45% — split на
+    границе кадров тайм-кода («11:27:06» | «:00 » | «АЗК: текст»), ~20% —
+    split после префикса спикера. Наш прежний постоянный 2-run split
+    встречается в эталонах лишь в 3-5% абзацев — статистический маркер машины.
+    """
+    roll = rng.random()
+    plain = not PARENTHETICAL_RE.search(text)
+    if plain and roll < 0.35:
+        _add_run(paragraph, f"{timecode} {speaker_prefix}{text}")
+    elif roll < 0.80:
+        _add_run(paragraph, timecode[:-3])
+        _add_run(paragraph, f"{timecode[-3:]} ")
+        _add_text_with_italics(paragraph, text, lead=speaker_prefix)
+    else:
+        _add_run(paragraph, f"{timecode} {speaker_prefix}")
+        _add_text_with_italics(paragraph, text)
 
 
 def generate_docx(
@@ -384,13 +422,16 @@ def generate_docx(
     original_filename = project.get("original_filename", "transcript")
     download_name = strip_extension(original_filename) + ".docx"
 
+    # Заголовочный блок (имя файла, разделитель, легенда) в эталонах несёт
+    # <w:caps/> — отображается ПРОПИСНЫМИ (f7/f8/ф14-15; разделитель после
+    # легенды и реплики — уже без caps).
     header_para = doc.add_paragraph()
-    _configure_paragraph(header_para)
-    _add_run(header_para, download_name)
+    _configure_paragraph(header_para, caps=True)
+    _add_run(header_para, download_name, caps=True)
     _add_goback_bookmark(header_para)
 
     empty1 = doc.add_paragraph()
-    _configure_paragraph(empty1)
+    _configure_paragraph(empty1, caps=True)
 
     speakers_info = project["result"].get("speakers", {})
     segments = segments_override if segments_override is not None else project["result"]["segments"]
@@ -417,11 +458,15 @@ def generate_docx(
         abbr = abbr_map.get(speaker_id, "")
         legend_text = f"{name} – {abbr}." if abbr else f"{name}."
         legend_para = doc.add_paragraph()
-        _configure_paragraph(legend_para)
-        _add_run(legend_para, legend_text)
+        _configure_paragraph(legend_para, caps=True)
+        _add_run(legend_para, legend_text, caps=True)
 
     empty2 = doc.add_paragraph()
     _configure_paragraph(empty2)
+
+    # Свой ГПСЧ для выбора паттерна разбиения на runs (сид от имени файла —
+    # детерминизм; отдельный от rsid-ГПСЧ, чтобы не сцеплять потоки).
+    split_rng = random.Random(download_name + ":runsplit")
 
     for seg in segments:
         speaker_id = seg["speaker"]
@@ -438,8 +483,7 @@ def generate_docx(
             _add_run(p, f"{seg['timecode']} ")
             _add_text_with_italics(p, text)
         else:
-            _add_run(p, f"{seg['timecode']} {display_name}: ")
-            _add_text_with_italics(p, text)
+            _add_turn_runs(p, seg["timecode"], f"{display_name}: ", text, split_rng)
 
     # Эталоны заканчиваются пустым абзацем после последней реплики
     # (все 4 файла: 1-2 завершающих пустых абзаца).
