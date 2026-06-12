@@ -1,5 +1,7 @@
 import random
 import re
+import zipfile
+from datetime import datetime, timedelta, timezone
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
@@ -113,6 +115,68 @@ def _apply_revision_ids(doc, seed_text: str) -> None:
             e = OxmlElement("w:rsid")
             e.set(qn("w:val"), val)
             rsids.append(e)
+
+
+def _set_core_dates(doc, seed_text: str) -> None:
+    """Свежие даты и правдоподобный revision в core.xml.
+
+    Дефолт python-docx — created/modified 2013-12-23, revision 1. Эталоны:
+    created на 1-2 дня раньше modified, секунды :00, revision 17-36.
+    """
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    doc.core_properties.created = now - timedelta(days=2)
+    doc.core_properties.modified = now
+    doc.core_properties.revision = random.Random(seed_text + ":rev").randint(15, 40)
+
+
+# Счётчики docProps/app.xml в порядке появления в XML.
+_APP_STAT_TAGS = (
+    "TotalTime", "Pages", "Words", "Characters",
+    "Lines", "Paragraphs", "CharactersWithSpaces",
+)
+
+
+def _inject_app_statistics(path: str) -> None:
+    """Вписывает реальную статистику в docProps/app.xml готового пакета.
+
+    python-docx не моделирует app.xml и оставляет нули — Word же хранит
+    Words/Characters/Lines/Pages. Считаем по тексту тела; Lines и Pages
+    оценочны (эталоны: ~141 символ/строку, ~385 слов/страницу).
+    """
+    with zipfile.ZipFile(path) as zin:
+        items = [(i, zin.read(i.filename)) for i in zin.infolist()]
+
+    doc_xml = next(d for i, d in items if i.filename == "word/document.xml").decode("utf-8")
+    texts = re.findall(r"<w:t[^>]*>([^<]*)</w:t>", doc_xml)
+    full = "".join(texts)
+    words = len(full.split())
+    chars_with_spaces = len(full)
+    chars_no_spaces = len(re.sub(r"\s", "", full))
+    paragraphs = sum(1 for p in re.findall(r"<w:p\b.*?</w:p>", doc_xml, re.S) if "<w:t" in p)
+    stats = {
+        "TotalTime": max(60, words // 10),
+        "Pages": max(1, round(words / 385)),
+        "Words": words,
+        "Characters": chars_no_spaces,
+        "Lines": max(1, round(chars_with_spaces / 141)),
+        "Paragraphs": paragraphs,
+        "CharactersWithSpaces": chars_with_spaces,
+    }
+
+    new_items = []
+    for info, data in items:
+        if info.filename == "docProps/app.xml":
+            xml = data.decode("utf-8")
+            for tag in _APP_STAT_TAGS:
+                xml = re.sub(
+                    rf"<{tag}>[^<]*</{tag}>", f"<{tag}>{stats[tag]}</{tag}>", xml
+                )
+            data = xml.encode("utf-8")
+        new_items.append((info, data))
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info, data in new_items:
+            zout.writestr(info, data)
 
 
 def _add_run(paragraph, text: str, italic: bool = False):
@@ -237,6 +301,8 @@ def generate_docx(
     _configure_paragraph(trailing)
 
     _apply_revision_ids(doc, download_name)
+    _set_core_dates(doc, download_name)
 
     doc.save(output_path)
+    _inject_app_statistics(output_path)
     return download_name

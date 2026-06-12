@@ -1,5 +1,6 @@
 import re
 import zipfile
+from datetime import datetime, timezone
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -394,6 +395,42 @@ class TestRevisionIds:
             doc = z.read("word/document.xml").decode("utf-8")
         for pid in re.findall(r'w14:paraId="([0-9A-F]{8})"', doc):
             assert pid[0] in "01234567"
+
+
+class TestDocumentMetadata:
+    """app.xml/core.xml не выдают машинную генерацию (реальная статистика, даты)."""
+
+    def test_app_word_count_matches_body_text(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            app = z.read("docProps/app.xml").decode("utf-8")
+            doc = z.read("word/document.xml").decode("utf-8")
+        body_text = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", doc))
+        words = int(re.search(r"<Words>(\d+)</Words>", app).group(1))
+        assert words > 0
+        assert words == len(body_text.split())
+
+    def test_app_application_is_word(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        with zipfile.ZipFile(str(out)) as z:
+            app = z.read("docProps/app.xml").decode("utf-8")
+        assert "<Application>Microsoft Office Word</Application>" in app
+
+    def test_core_dates_are_current(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        cp = doc.core_properties
+        assert cp.created.year == datetime.now(timezone.utc).year
+        assert cp.modified >= cp.created
+
+    def test_core_revision_in_plausible_range(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(sample_project, {"0": "Д", "1": "Г"}, {"0": "М", "1": "А"}, str(out))
+        doc = Document(str(out))
+        assert 15 <= doc.core_properties.revision <= 40
 
 
 class TestTemplateSkeleton:
