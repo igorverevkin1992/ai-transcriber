@@ -22,7 +22,7 @@ export const SpeakerMatrix: React.FC<Props> = ({
     if (s.candidate_id) {
       return candidates.find(c => c.id === s.candidate_id)?.name || UNKNOWN_SPEAKER_NAME;
     }
-    return s.custom_name || `Speaker ${s.tag_id}`;
+    return s.custom_name || `Спикер ${s.tag_id}`;
   };
 
   const getSpeakerAbbr = (s: SpeakerInfo) => {
@@ -58,7 +58,7 @@ export const SpeakerMatrix: React.FC<Props> = ({
                       {speaker.is_tech ? <Mic2 className="w-4 h-4 text-gray-600" /> : <User className="w-4 h-4 text-blue-600" />}
                     </div>
                     <div>
-                      <span className="text-xs font-bold text-gray-400 block">TAG ID: {speaker.tag_id}</span>
+                      <span className="text-xs font-bold text-gray-400 block">Спикер #{speaker.tag_id}</span>
                       <div className="text-xs text-gray-500 font-medium">Доля эфира: {speaker.percentage}%</div>
                     </div>
                   </div>
@@ -90,7 +90,7 @@ export const SpeakerMatrix: React.FC<Props> = ({
                   {/* Manual Edits (Visible if Custom or just to override Abbr) */}
                   <div className="grid grid-cols-3 gap-2">
                     <div className="col-span-2">
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Имя (Display Name)</label>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Отображаемое имя</label>
                       <input 
                         type="text" 
                         className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border"

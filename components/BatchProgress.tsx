@@ -22,6 +22,7 @@ interface Props {
   whisperModel?: string;
   onDone: (projectIds: string[]) => void;
   onError: (msg: string) => void;
+  onPhaseChange?: (phase: UploadState) => void;
   recoveredProjectIds?: string[];
   recoveredFileNames?: string[];
 }
@@ -75,7 +76,7 @@ const STEP_LABELS: Record<string, string> = {
   error: 'Ошибка',
 };
 
-export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whisperModel = 'small', onDone, onError, recoveredProjectIds, recoveredFileNames }) => {
+export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whisperModel = 'small', onDone, onError, onPhaseChange, recoveredProjectIds, recoveredFileNames }) => {
   const isRecovery = !!recoveredProjectIds && recoveredProjectIds.length > 0;
   const [state, setState] = useState<UploadState>(isRecovery ? 'processing' : 'uploading');
   const [trackers, setTrackers] = useState<FileTracker[]>(() => {
@@ -105,6 +106,10 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   const pollFailCountRef = useRef(0);
   const trackersRef = useRef<FileTracker[]>(trackers);
   trackersRef.current = trackers;
+
+  useEffect(() => {
+    onPhaseChange?.(state);
+  }, [state, onPhaseChange]);
 
   const addLog = useCallback((msg: string) => {
     const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });

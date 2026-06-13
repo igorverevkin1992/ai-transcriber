@@ -67,7 +67,7 @@ export const TranscriptPreview: React.FC<Props> = ({
       <div className="p-3 md:p-4 border-b border-gray-100 bg-gray-50 rounded-t-lg flex justify-between items-center gap-2">
         <h2 className="text-xs md:text-sm font-semibold uppercase tracking-wide text-gray-500 flex items-center gap-2">
           <FileText className="w-4 h-4" />
-          <span className="hidden sm:inline">Live Preview</span>
+          <span className="hidden sm:inline">Предпросмотр</span>
         </h2>
         <button
           onClick={onDownload}

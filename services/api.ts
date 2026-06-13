@@ -137,7 +137,7 @@ export const api = {
 
     const candidates: Candidate[] = detected_speakers.map(s => ({
       id: s.tag_id,
-      name: s.custom_name || `Speaker ${s.tag_id}`,
+      name: s.custom_name || `Спикер ${s.tag_id}`,
       abbr: (s.custom_name || `S${s.tag_id}`).substring(0, 3).toUpperCase(),
     }));
 

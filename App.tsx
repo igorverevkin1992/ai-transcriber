@@ -5,6 +5,7 @@ import { BatchProgress } from './components/BatchProgress';
 import { BatchVerification } from './components/BatchVerification';
 import { ProcessingStatus } from './components/ProcessingStatus';
 import { VerificationDashboard } from './components/VerificationDashboard';
+import { StepIndicator } from './components/StepIndicator';
 import { ToastContainer, ToastMessage } from './components/Toast';
 import { ProcessingStatus as StatusType, ProjectData } from './types';
 import { api } from './services/api';
@@ -25,6 +26,7 @@ const App: React.FC = () => {
   const [isDownloadingSaved, setIsDownloadingSaved] = useState(false);
   const [recoveredSession, setRecoveredSession] = useState<BatchSession | null>(null);
   const [batchProjectIds, setBatchProjectIds] = useState<string[]>([]);
+  const [batchPhase, setBatchPhase] = useState<'uploading' | 'processing' | 'done'>('uploading');
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -114,6 +116,16 @@ const App: React.FC = () => {
     }
   };
 
+  const showStepper = status !== 'IDLE';
+  const stepperStep: 1 | 2 | 3 = (() => {
+    if (status === 'BATCH_PROCESSING' && batchPhase === 'uploading') return 1;
+    if (status === 'BATCH_PROCESSING' || status === 'PROCESSING') return 2;
+    if (status === 'BATCH_VERIFICATION' || status === 'VERIFICATION') return 3;
+    if (status === 'COMPLETED') return 3;
+    return 1;
+  })();
+  const stepperAllComplete = status === 'COMPLETED';
+
   return (
     <div className="h-screen bg-gray-50 flex flex-col">
       <ToastContainer messages={toasts} onDismiss={dismissToast} />
@@ -124,9 +136,14 @@ const App: React.FC = () => {
             AI
           </div>
           <span className="font-semibold text-gray-900">ABTGS</span>
-          <span className="text-gray-400 mx-2 hidden sm:inline">/</span>
-          <span className="text-sm text-gray-500 hidden sm:inline">Генерация монтажных листов</span>
         </div>
+
+        {showStepper && (
+          <div className="hidden md:flex">
+            <StepIndicator currentStep={stepperStep} allComplete={stepperAllComplete} />
+          </div>
+        )}
+
         <div className="flex items-center gap-3">
           <button
             onClick={handleDownloadSaved}
@@ -140,6 +157,12 @@ const App: React.FC = () => {
           <div className="text-xs text-gray-400 font-mono">v1.2.0</div>
         </div>
       </header>
+
+      {showStepper && (
+        <div className="md:hidden bg-white border-b border-gray-200 px-4 py-2">
+          <StepIndicator currentStep={stepperStep} allComplete={stepperAllComplete} />
+        </div>
+      )}
 
       <main className="flex-1 overflow-hidden relative">
         {/* Recovery banner */}
@@ -226,6 +249,7 @@ const App: React.FC = () => {
               setStatus('BATCH_VERIFICATION');
             }}
             onError={(msg) => addToast('error', msg)}
+            onPhaseChange={setBatchPhase}
             recoveredProjectIds={recoveredSession?.projectIds}
             recoveredFileNames={recoveredSession?.fileNames}
           />

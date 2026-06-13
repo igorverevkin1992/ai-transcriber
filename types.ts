@@ -6,8 +6,8 @@ export interface ProcessingStep {
 }
 
 // Фоллбеки для спикера без сопоставленного кандидата
-export const UNKNOWN_SPEAKER_NAME = 'Unknown';
-export const UNKNOWN_SPEAKER_ABBR = 'UNK';
+export const UNKNOWN_SPEAKER_NAME = 'Неизвестный';
+export const UNKNOWN_SPEAKER_ABBR = 'НИЗ';
 
 // Data structures from PRD Section 6
 export interface Candidate {

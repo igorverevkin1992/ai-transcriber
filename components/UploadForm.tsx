@@ -31,13 +31,13 @@ export const UploadForm: React.FC<Props> = ({ onUpload }) => {
             <UploadCloud className="w-8 h-8 text-blue-600" />
           </div>
           <h1 className="text-2xl font-bold text-gray-900">ABTGS</h1>
-          <p className="text-gray-500 mt-2">Automated Broadcast Transcript Generation System</p>
+          <p className="text-gray-500 mt-2">Автоматическая генерация монтажных листов</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Ссылка на исходник (Yandex.Disk)
+              Ссылка на исходник (Яндекс.Диск)
             </label>
             <div className="relative rounded-md shadow-sm">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
