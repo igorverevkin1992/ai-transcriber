@@ -158,7 +158,7 @@ export const TranscriptPreview: React.FC<Props> = ({
                       </div>
                       <button
                         onClick={() => startEdit(idx, seg.text)}
-                        className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity p-1 text-gray-400 hover:text-blue-600 shrink-0"
+                        className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 transition-opacity p-1 text-gray-400 hover:text-blue-600 shrink-0"
                         title="Редактировать"
                         aria-label={`Редактировать реплику ${seg.timecode}`}
                       >
