@@ -25,6 +25,7 @@ const App: React.FC = () => {
   const [recoveredSession, setRecoveredSession] = useState<BatchSession | null>(null);
   const [batchProjectIds, setBatchProjectIds] = useState<string[]>([]);
   const [batchPhase, setBatchPhase] = useState<'uploading' | 'processing' | 'done'>('uploading');
+  const [lastCompletedInfo, setLastCompletedInfo] = useState<{ filename: string; speakerCount: number; segmentCount: number } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -83,6 +84,13 @@ const App: React.FC = () => {
   };
 
   const handleFinish = () => {
+    if (projectData) {
+      setLastCompletedInfo({
+        filename: projectData.original_filename,
+        speakerCount: projectData.detected_speakers.length,
+        segmentCount: projectData.preview_transcript.length,
+      });
+    }
     setStatus('COMPLETED');
     addToast('success', 'Монтажный лист успешно сформирован');
   };
@@ -253,13 +261,31 @@ const App: React.FC = () => {
               <CheckCircle2 className="w-10 h-10 text-green-600" />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">Готово!</h2>
-            <p className="text-gray-500 mt-2 mb-8 text-center">Монтажный лист успешно сформирован и скачан.</p>
-            <button
-              onClick={resetToIdle}
-              className="px-6 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
-            >
-              Обработать следующий файл
-            </button>
+            <p className="text-gray-500 mt-2 text-center">Монтажный лист успешно сформирован и скачан.</p>
+
+            {lastCompletedInfo && (
+              <div className="mt-4 mb-6 bg-gray-50 rounded-lg px-6 py-3 text-sm text-gray-600 text-center">
+                <p className="font-medium text-gray-800">{lastCompletedInfo.filename.replace(/\.[^.]+$/, '.docx')}</p>
+                <p className="mt-1">{lastCompletedInfo.speakerCount} спикеров, {lastCompletedInfo.segmentCount} сегментов</p>
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row gap-3 mt-2">
+              <button
+                onClick={resetToIdle}
+                className="px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+              >
+                Обработать следующий
+              </button>
+              <button
+                onClick={handleDownloadSaved}
+                disabled={isDownloadingSaved}
+                className="flex items-center justify-center gap-2 px-5 py-2.5 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                {isDownloadingSaved ? 'Скачивание...' : 'Скачать все готовые'}
+              </button>
+            </div>
           </div>
         )}
       </main>

@@ -31,6 +31,7 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [hasEdits, setHasEdits] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [exportSuccess, setExportSuccess] = useState(false);
 
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
@@ -94,6 +95,7 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
 
       const blob = await api.batchExportWithMappings(exportData);
       downloadBlob(blob, 'transcripts.zip');
+      setExportSuccess(true);
     } catch (e: unknown) {
       onError(e instanceof Error ? e.message : 'Ошибка экспорта');
     } finally {
@@ -182,6 +184,19 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {exportSuccess && (
+        <div className="bg-green-50 border border-green-200 rounded-lg px-4 py-3 flex items-center gap-3">
+          <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" />
+          <span className="text-sm font-medium text-green-800">Архив успешно скачан!</span>
+          <button
+            onClick={onDone}
+            className="ml-auto text-sm text-green-700 hover:text-green-900 font-medium"
+          >
+            Обработать следующие
+          </button>
         </div>
       )}
 
