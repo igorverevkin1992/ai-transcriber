@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { UploadForm } from './components/UploadForm';
 import { BatchUploadForm, EngineType, WhisperModel } from './components/BatchUploadForm';
 import { BatchProgress } from './components/BatchProgress';
 import { BatchVerification } from './components/BatchVerification';
@@ -15,7 +14,6 @@ import { CheckCircle2, Download, RefreshCw } from 'lucide-react';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<StatusType>('IDLE');
-  const [mode, setMode] = useState<'single' | 'batch'>('batch');
   const [progressStep, setProgressStep] = useState<string>('');
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [projectData, setProjectData] = useState<ProjectData | null>(null);
@@ -201,25 +199,11 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {status === 'IDLE' && mode === 'batch' && (
+        {status === 'IDLE' && (
           <BatchUploadForm
             onStartBatch={handleStartBatch}
-            onSwitchToSingle={() => setMode('single')}
+            onUploadLink={handleUpload}
           />
-        )}
-
-        {status === 'IDLE' && mode === 'single' && (
-          <div>
-            <UploadForm onUpload={handleUpload} />
-            <div className="text-center -mt-2 pb-4">
-              <button
-                onClick={() => setMode('batch')}
-                className="text-sm text-gray-500 hover:text-gray-700"
-              >
-                Пакетная обработка нескольких файлов
-              </button>
-            </div>
-          </div>
         )}
 
         {status === 'PROCESSING' && (

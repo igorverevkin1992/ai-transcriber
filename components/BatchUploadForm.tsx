@@ -1,17 +1,19 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, FolderOpen, AlertCircle, X, Cpu, Cloud } from 'lucide-react';
+import { UploadCloud, Link as LinkIcon, AlertCircle, X, Cpu, Cloud, ChevronDown, ChevronUp } from 'lucide-react';
 
 export type EngineType = 'whisper' | 'speechkit';
 export type WhisperModel = 'small' | 'medium' | 'large';
 
 interface Props {
   onStartBatch: (files: File[], engine: EngineType, whisperModel: WhisperModel) => void;
-  onSwitchToSingle: () => void;
+  onUploadLink: (link: string) => void;
 }
 
 const ALLOWED_EXTENSIONS = new Set([
   '.mp3', '.wav', '.mov', '.mxf', '.mp4', '.wmv', '.avi', '.mkv', '.ogg', '.flac',
 ]);
+
+const MAX_FILE_SIZE = 1024 * 1024 * 1024; // 1 GB
 
 const WHISPER_MODELS: { value: WhisperModel; label: string; desc: string }[] = [
   { value: 'small', label: 'Small', desc: '~1 ГБ RAM, ~10 мин/час аудио, хорошее качество' },
@@ -19,35 +21,51 @@ const WHISPER_MODELS: { value: WhisperModel; label: string; desc: string }[] = [
   { value: 'large', label: 'Large', desc: '~4 ГБ RAM, ~60 мин/час аудио, лучшее качество' },
 ];
 
-export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingle }) => {
+export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onUploadLink }) => {
+  const [tab, setTab] = useState<'files' | 'link'>('files');
   const [files, setFiles] = useState<File[]>([]);
+  const [link, setLink] = useState('');
   const [error, setError] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [engine, setEngine] = useState<EngineType>('whisper');
   const [whisperModel, setWhisperModel] = useState<WhisperModel>('small');
+  const [showSettings, setShowSettings] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
 
-  const filterValidFiles = (fileList: FileList | File[]): File[] => {
+  const filterValidFiles = (fileList: FileList | File[]): { valid: File[]; oversized: string[] } => {
     const arr = Array.from(fileList);
-    return arr.filter(f => {
+    const valid: File[] = [];
+    const oversized: string[] = [];
+    for (const f of arr) {
       const ext = '.' + f.name.split('.').pop()?.toLowerCase();
-      return ALLOWED_EXTENSIONS.has(ext);
-    });
+      if (!ALLOWED_EXTENSIONS.has(ext)) continue;
+      if (f.size > MAX_FILE_SIZE) {
+        oversized.push(f.name);
+      } else {
+        valid.push(f);
+      }
+    }
+    return { valid, oversized };
   };
 
   const addFiles = (newFiles: File[]) => {
-    const valid = filterValidFiles(newFiles);
-    if (valid.length === 0) {
+    const { valid, oversized } = filterValidFiles(newFiles);
+    if (oversized.length > 0) {
+      setError(`Файлы превышают лимит 1 ГБ: ${oversized.join(', ')}`);
+    }
+    if (valid.length === 0 && oversized.length === 0) {
       setError('Не найдено поддерживаемых медиафайлов');
       return;
     }
-    setFiles(prev => {
-      const existing = new Set(prev.map(f => `${f.name}_${f.size}`));
-      const unique = valid.filter(f => !existing.has(`${f.name}_${f.size}`));
-      return [...prev, ...unique];
-    });
-    setError('');
+    if (valid.length > 0) {
+      setFiles(prev => {
+        const existing = new Set(prev.map(f => `${f.name}_${f.size}`));
+        const unique = valid.filter(f => !existing.has(`${f.name}_${f.size}`));
+        return [...prev, ...unique];
+      });
+      if (oversized.length === 0) setError('');
+    }
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -93,12 +111,26 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  const handleSubmit = () => {
+  const handleSubmitFiles = () => {
     if (files.length === 0) {
       setError('Выберите файлы для обработки');
       return;
     }
     onStartBatch(files, engine, whisperModel);
+  };
+
+  const handleSubmitLink = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = link.trim();
+    if (!trimmed) {
+      setError('Вставьте ссылку на файл');
+      return;
+    }
+    if (!trimmed.includes('yadi.sk') && !trimmed.includes('disk.yandex')) {
+      setError('Пожалуйста, введите корректную публичную ссылку на Яндекс.Диск');
+      return;
+    }
+    onUploadLink(trimmed);
   };
 
   const totalSize = files.reduce((acc, f) => acc + f.size, 0);
@@ -108,189 +140,261 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onSwitchToSingl
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ГБ`;
   };
 
+  const engineSummary = engine === 'whisper' ? `Whisper (${whisperModel})` : 'SpeechKit';
+
   return (
     <div className="flex flex-col h-full overflow-y-auto">
       <div className="flex-1 flex items-start justify-center py-6 px-4">
-        <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-3xl border border-gray-100">
+        <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl w-full max-w-3xl border border-gray-100">
           <div className="text-center mb-6">
-            <div className="bg-purple-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-              <FolderOpen className="w-8 h-8 text-purple-600" />
+            <div className="bg-blue-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+              <UploadCloud className="w-8 h-8 text-blue-600" />
             </div>
-            <h1 className="text-2xl font-bold text-gray-900">Пакетная обработка</h1>
-            <p className="text-gray-500 mt-2">Загрузите несколько файлов для автоматической расшифровки</p>
+            <h1 className="text-2xl font-bold text-gray-900">Загрузка материалов</h1>
+            <p className="text-gray-500 mt-2">Автоматическая генерация монтажных листов</p>
           </div>
 
-        {/* Engine selector */}
-        <div className="mb-5">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Движок распознавания</label>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Tabs */}
+          <div className="flex border-b border-gray-200 mb-6">
             <button
-              type="button"
-              onClick={() => setEngine('whisper')}
-              className={`flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors ${
-                engine === 'whisper'
-                  ? 'border-green-500 bg-green-50'
-                  : 'border-gray-200 hover:border-gray-300'
+              onClick={() => { setTab('files'); setError(''); }}
+              className={`flex-1 pb-3 text-sm font-medium text-center border-b-2 transition-colors ${
+                tab === 'files'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              <Cpu className={`w-5 h-5 flex-shrink-0 ${engine === 'whisper' ? 'text-green-600' : 'text-gray-400'}`} />
-              <div>
-                <div className={`text-sm font-semibold ${engine === 'whisper' ? 'text-green-900' : 'text-gray-700'}`}>
-                  Whisper
-                </div>
-                <div className="text-xs text-gray-500">Бесплатно, локально</div>
-              </div>
+              Загрузить файлы
             </button>
             <button
-              type="button"
-              onClick={() => setEngine('speechkit')}
-              className={`flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors ${
-                engine === 'speechkit'
-                  ? 'border-blue-500 bg-blue-50'
-                  : 'border-gray-200 hover:border-gray-300'
+              onClick={() => { setTab('link'); setError(''); }}
+              className={`flex-1 pb-3 text-sm font-medium text-center border-b-2 transition-colors ${
+                tab === 'link'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              <Cloud className={`w-5 h-5 flex-shrink-0 ${engine === 'speechkit' ? 'text-blue-600' : 'text-gray-400'}`} />
-              <div>
-                <div className={`text-sm font-semibold ${engine === 'speechkit' ? 'text-blue-900' : 'text-gray-700'}`}>
-                  SpeechKit
-                </div>
-                <div className="text-xs text-gray-500">Облако, диаризация</div>
-              </div>
+              Ссылка на Яндекс.Диск
             </button>
           </div>
 
-          {/* Whisper model selector */}
-          {engine === 'whisper' && (
-            <div className="mt-3">
-              <label className="block text-xs font-medium text-gray-600 mb-1.5">Модель Whisper</label>
-              <select
-                value={whisperModel}
-                onChange={e => setWhisperModel(e.target.value as WhisperModel)}
-                aria-label="Выбор модели Whisper"
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-green-500 focus:border-green-500"
-              >
-                {WHISPER_MODELS.map(m => (
-                  <option key={m.value} value={m.value}>
-                    {m.label} — {m.desc}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-        </div>
+          {/* Tab: Files */}
+          {tab === 'files' && (
+            <>
+              <input
+                ref={inputRef}
+                type="file"
+                multiple
+                accept=".mp3,.wav,.mov,.mxf,.mp4,.wmv,.avi,.mkv,.ogg,.flac"
+                className="hidden"
+                aria-label="Выберите медиафайлы"
+                onChange={handleFileSelect}
+              />
 
-        {/* Hidden file input */}
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          accept=".mp3,.wav,.mov,.mxf,.mp4,.wmv,.avi,.mkv,.ogg,.flac"
-          className="hidden"
-          aria-label="Выберите медиафайлы"
-          onChange={handleFileSelect}
-        />
-
-        {/* Drop zone */}
-        <div
-          onDragEnter={handleDragEnter}
-          onDragLeave={handleDragLeave}
-          onDragOver={handleDragOver}
-          onDrop={handleDrop}
-        >
-          {files.length === 0 ? (
-            <button
-              onClick={() => inputRef.current?.click()}
-              className={`w-full border-2 border-dashed rounded-xl p-10 transition-colors flex flex-col items-center gap-3 ${
-                isDragging
-                  ? 'border-purple-500 bg-purple-50 scale-[1.02]'
-                  : 'border-gray-300 hover:border-purple-400 hover:bg-purple-50'
-              }`}
-            >
-              <UploadCloud className={`w-10 h-10 ${isDragging ? 'text-purple-500' : 'text-gray-400'}`} />
-              <span className={`font-medium ${isDragging ? 'text-purple-700' : 'text-gray-600'}`}>
-                {isDragging ? 'Отпустите файлы здесь' : 'Перетащите файлы сюда или нажмите для выбора'}
-              </span>
-              <span className="text-xs text-gray-400">Поддержка: .mp3, .wav, .mov, .mxf, .mp4, .wmv, .avi, .mkv, .ogg, .flac</span>
-            </button>
-          ) : (
-            <div className="space-y-4">
-              {/* Summary */}
-              <div className="flex items-center justify-between bg-purple-50 rounded-lg px-4 py-3">
-                <div>
-                  <span className="font-semibold text-purple-900">{files.length} файлов</span>
-                  <span className="text-purple-600 ml-2 text-sm">({formatSize(totalSize)})</span>
-                </div>
-                <button
-                  onClick={() => inputRef.current?.click()}
-                  className="text-sm text-purple-600 hover:text-purple-800 font-medium"
-                >
-                  Добавить ещё
-                </button>
-              </div>
-
-              {/* Drag-to-add hint */}
               <div
-                className={`border-2 border-dashed rounded-lg p-4 text-center transition-colors ${
-                  isDragging
-                    ? 'border-purple-500 bg-purple-50'
-                    : 'border-gray-200 hover:border-gray-300'
-                }`}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+                className="relative"
               >
-                <span className={`text-sm ${isDragging ? 'text-purple-600 font-medium' : 'text-gray-400'}`}>
-                  {isDragging ? 'Отпустите чтобы добавить файлы' : 'Перетащите сюда ещё файлы'}
-                </span>
-              </div>
-
-              {/* File list (scrollable) */}
-              <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
-                {files.map((file, i) => (
-                  <div key={`${file.name}_${file.size}_${file.lastModified}`} className="flex items-center justify-between px-3 py-2 hover:bg-gray-50">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-gray-700 truncate">{file.name}</p>
-                      <p className="text-xs text-gray-400">{formatSize(file.size)}</p>
+                {files.length === 0 ? (
+                  <button
+                    onClick={() => inputRef.current?.click()}
+                    className={`w-full border-2 border-dashed rounded-xl p-10 transition-colors flex flex-col items-center gap-3 ${
+                      isDragging
+                        ? 'border-blue-500 bg-blue-50 scale-[1.02]'
+                        : 'border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+                    }`}
+                  >
+                    <UploadCloud className={`w-10 h-10 ${isDragging ? 'text-blue-500' : 'text-gray-400'}`} />
+                    <span className={`font-medium ${isDragging ? 'text-blue-700' : 'text-gray-600'}`}>
+                      {isDragging ? 'Отпустите файлы здесь' : 'Перетащите файлы сюда или нажмите для выбора'}
+                    </span>
+                    <span className="text-xs text-gray-400">
+                      Поддержка: .mp3, .wav, .mov, .mxf, .mp4 и др. (до 1 ГБ на файл)
+                    </span>
+                  </button>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between bg-blue-50 rounded-lg px-4 py-3">
+                      <div>
+                        <span className="font-semibold text-blue-900">{files.length} файлов</span>
+                        <span className="text-blue-600 ml-2 text-sm">({formatSize(totalSize)})</span>
+                      </div>
+                      <button
+                        onClick={() => inputRef.current?.click()}
+                        className="text-sm text-blue-600 hover:text-blue-800 font-medium"
+                      >
+                        Добавить ещё
+                      </button>
                     </div>
-                    <button
-                      onClick={() => handleRemoveFile(i)}
-                      aria-label={`Удалить ${file.name}`}
-                      className="ml-2 p-1 text-gray-400 hover:text-red-500"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
+
+                    <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
+                      {files.map((file, i) => (
+                        <div key={`${file.name}_${file.size}_${file.lastModified}`} className="flex items-center justify-between px-3 py-2 hover:bg-gray-50">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-gray-700 truncate">{file.name}</p>
+                            <p className="text-xs text-gray-400">{formatSize(file.size)}</p>
+                          </div>
+                          <button
+                            onClick={() => handleRemoveFile(i)}
+                            aria-label={`Удалить ${file.name}`}
+                            className="ml-2 p-1 text-gray-400 hover:text-red-500"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    {isDragging && (
+                      <div className="absolute inset-0 bg-blue-50/80 border-2 border-dashed border-blue-500 rounded-xl flex items-center justify-center z-10">
+                        <span className="text-blue-600 font-medium">Отпустите чтобы добавить файлы</span>
+                      </div>
+                    )}
                   </div>
-                ))}
+                )}
               </div>
-            </div>
+
+              {/* Engine settings — collapsible */}
+              <div className="mt-4">
+                <button
+                  onClick={() => setShowSettings(!showSettings)}
+                  className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 transition-colors w-full"
+                >
+                  {showSettings ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                  <span>Настройки: <strong>{engineSummary}</strong></span>
+                </button>
+
+                {showSettings && (
+                  <div className="mt-3 p-4 border border-gray-200 rounded-lg bg-gray-50 space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Движок распознавания</label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setEngine('whisper')}
+                          className={`flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors ${
+                            engine === 'whisper'
+                              ? 'border-green-500 bg-green-50'
+                              : 'border-gray-200 hover:border-gray-300'
+                          }`}
+                        >
+                          <Cpu className={`w-5 h-5 flex-shrink-0 ${engine === 'whisper' ? 'text-green-600' : 'text-gray-400'}`} />
+                          <div>
+                            <div className={`text-sm font-semibold ${engine === 'whisper' ? 'text-green-900' : 'text-gray-700'}`}>
+                              Whisper
+                            </div>
+                            <div className="text-xs text-gray-500">Бесплатно, локально</div>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEngine('speechkit')}
+                          className={`flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors ${
+                            engine === 'speechkit'
+                              ? 'border-blue-500 bg-blue-50'
+                              : 'border-gray-200 hover:border-gray-300'
+                          }`}
+                        >
+                          <Cloud className={`w-5 h-5 flex-shrink-0 ${engine === 'speechkit' ? 'text-blue-600' : 'text-gray-400'}`} />
+                          <div>
+                            <div className={`text-sm font-semibold ${engine === 'speechkit' ? 'text-blue-900' : 'text-gray-700'}`}>
+                              SpeechKit
+                            </div>
+                            <div className="text-xs text-gray-500">Облако, диаризация</div>
+                          </div>
+                        </button>
+                      </div>
+                    </div>
+
+                    {engine === 'whisper' && (
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1.5">Модель Whisper</label>
+                        <select
+                          value={whisperModel}
+                          onChange={e => setWhisperModel(e.target.value as WhisperModel)}
+                          aria-label="Выбор модели Whisper"
+                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                        >
+                          {WHISPER_MODELS.map(m => (
+                            <option key={m.value} value={m.value}>
+                              {m.label} — {m.desc}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {error && (
+                <div className="mt-3 text-sm text-red-600 flex items-center gap-1">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  {error}
+                </div>
+              )}
+
+              <button
+                onClick={handleSubmitFiles}
+                disabled={files.length === 0}
+                className="w-full mt-6 flex justify-center py-3 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+              >
+                Обработать {files.length > 0 ? `${files.length} файлов` : 'файлы'}
+              </button>
+            </>
           )}
-        </div>
 
-        {error && (
-          <div className="mt-3 text-sm text-red-600 flex items-center gap-1">
-            <AlertCircle className="w-4 h-4" />
-            {error}
-          </div>
-        )}
+          {/* Tab: Link */}
+          {tab === 'link' && (
+            <form onSubmit={handleSubmitLink} className="space-y-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Публичная ссылка на Яндекс.Диск
+                </label>
+                <div className="relative rounded-md shadow-sm">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <LinkIcon className="h-5 w-5 text-gray-400" />
+                  </div>
+                  <input
+                    type="text"
+                    aria-label="Ссылка на Яндекс.Диск"
+                    className="focus:ring-blue-500 focus:border-blue-500 block w-full pl-10 sm:text-sm border-gray-300 rounded-md py-3 border"
+                    placeholder="https://yadi.sk/d/..."
+                    value={link}
+                    onChange={(e) => {
+                      setLink(e.target.value);
+                      setError('');
+                    }}
+                  />
+                </div>
+                {error && (
+                  <div className="mt-2 text-sm text-red-600 flex items-center gap-1">
+                    <AlertCircle className="w-4 h-4" />
+                    {error}
+                  </div>
+                )}
+              </div>
 
-        <button
-          onClick={handleSubmit}
-          disabled={files.length === 0}
-          className={`w-full mt-6 flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors ${
-            engine === 'whisper'
-              ? 'bg-green-600 hover:bg-green-700'
-              : 'bg-purple-600 hover:bg-purple-700'
-          }`}
-        >
-          {engine === 'whisper' ? `Whisper: обработать ${files.length} файлов` : `SpeechKit: обработать ${files.length} файлов`}
-        </button>
+              <button
+                type="submit"
+                className="w-full flex justify-center py-3 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-colors"
+              >
+                Обработать материал
+              </button>
 
-        <div className="mt-4 text-center">
-          <button
-            onClick={onSwitchToSingle}
-            className="text-sm text-gray-500 hover:text-gray-700"
-          >
-            Обработать один файл по ссылке
-          </button>
-        </div>
+              <div className="border-t border-gray-100 pt-4">
+                <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Технические требования</h4>
+                <ul className="text-xs text-gray-500 space-y-1 list-disc pl-4">
+                  <li>Поддерживаемые форматы: .mp3, .wav, .mov, .mxf, .mp4, .wmv, .avi, .mkv, .ogg, .flac</li>
+                  <li>Максимальный размер файла: 1 ГБ</li>
+                  <li>Расчет таймкода: SMPTE 25 FPS (PAL)</li>
+                </ul>
+              </div>
+            </form>
+          )}
         </div>
       </div>
     </div>
