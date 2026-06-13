@@ -7,6 +7,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Отключаем HuggingFace Xet-протокол по умолчанию: его Rust-загрузчик
+# (ReqwestMiddleware) часто падает на Windows ("CAS service error ... Request
+# failed after 5 retries") и не использует Python-requests, поэтому игнорирует
+# наш обход системного прокси. Классический HTTPS-путь надёжнее. Должно быть
+# выставлено ДО импорта huggingface_hub. Можно вернуть Xet через окружение.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 
 class JsonFormatter(logging.Formatter):
     """Структурированный JSON-вывод для логов (для парсинга в ELK / Cloud Logging)."""
