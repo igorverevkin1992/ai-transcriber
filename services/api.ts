@@ -52,11 +52,11 @@ async function parseJson<T>(response: Response): Promise<T> {
 }
 
 export const api = {
-  uploadFile: async (link: string): Promise<string> => {
+  uploadFile: async (link: string, engine: string = 'speechkit', whisperModel: string = 'medium'): Promise<string> => {
     const response = await fetch(`${API_BASE_URL}/projects`, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ url: link }),
+      body: JSON.stringify({ url: link, engine, whisper_model: whisperModel }),
     });
 
     if (!response.ok) {

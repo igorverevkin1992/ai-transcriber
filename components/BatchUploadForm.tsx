@@ -6,7 +6,7 @@ export type WhisperModel = 'small' | 'medium' | 'large';
 
 interface Props {
   onStartBatch: (files: File[], engine: EngineType, whisperModel: WhisperModel) => void;
-  onUploadLink: (link: string) => void;
+  onUploadLink: (link: string, engine: EngineType, whisperModel: WhisperModel) => void;
 }
 
 const ALLOWED_EXTENSIONS = new Set([
@@ -130,7 +130,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onUploadLink })
       setError('Пожалуйста, введите корректную публичную ссылку на Яндекс.Диск');
       return;
     }
-    onUploadLink(trimmed);
+    onUploadLink(trimmed, engine, whisperModel);
   };
 
   const totalSize = files.reduce((acc, f) => acc + f.size, 0);
@@ -141,6 +141,68 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onUploadLink })
   };
 
   const engineSummary = engine === 'whisper' ? `Whisper (${whisperModel})` : 'SpeechKit';
+
+  // Настройки движка — общие для обеих вкладок (файлы и ссылка).
+  const engineSettings = (
+    <div className="mb-5">
+      <button
+        onClick={() => setShowSettings(!showSettings)}
+        className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 transition-colors w-full"
+      >
+        {showSettings ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+        <span>Движок распознавания: <strong>{engineSummary}</strong></span>
+      </button>
+
+      {showSettings && (
+        <div className="mt-3 p-4 border border-gray-200 rounded-lg bg-gray-50 space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setEngine('whisper')}
+              className={`flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors ${
+                engine === 'whisper' ? 'border-green-500 bg-green-50' : 'border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              <Cpu className={`w-5 h-5 flex-shrink-0 ${engine === 'whisper' ? 'text-green-600' : 'text-gray-400'}`} />
+              <div>
+                <div className={`text-sm font-semibold ${engine === 'whisper' ? 'text-green-900' : 'text-gray-700'}`}>Whisper</div>
+                <div className="text-xs text-gray-500">Бесплатно, локально</div>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setEngine('speechkit')}
+              className={`flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors ${
+                engine === 'speechkit' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              <Cloud className={`w-5 h-5 flex-shrink-0 ${engine === 'speechkit' ? 'text-blue-600' : 'text-gray-400'}`} />
+              <div>
+                <div className={`text-sm font-semibold ${engine === 'speechkit' ? 'text-blue-900' : 'text-gray-700'}`}>SpeechKit</div>
+                <div className="text-xs text-gray-500">Облако, диаризация</div>
+              </div>
+            </button>
+          </div>
+
+          {engine === 'whisper' && (
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1.5">Модель Whisper</label>
+              <select
+                value={whisperModel}
+                onChange={e => setWhisperModel(e.target.value as WhisperModel)}
+                aria-label="Выбор модели Whisper"
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-green-500 focus:border-green-500"
+              >
+                {WHISPER_MODELS.map(m => (
+                  <option key={m.value} value={m.value}>{m.label} — {m.desc}</option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="flex flex-col h-full overflow-y-auto">
@@ -177,6 +239,9 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onUploadLink })
               Ссылка на Яндекс.Диск
             </button>
           </div>
+
+          {/* Общие настройки движка (применяются к обеим вкладкам) */}
+          {engineSettings}
 
           {/* Tab: Files */}
           {tab === 'files' && (
@@ -251,79 +316,6 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onUploadLink })
                     {isDragging && (
                       <div className="absolute inset-0 bg-blue-50/80 border-2 border-dashed border-blue-500 rounded-xl flex items-center justify-center z-10">
                         <span className="text-blue-600 font-medium">Отпустите чтобы добавить файлы</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Engine settings — collapsible */}
-              <div className="mt-4">
-                <button
-                  onClick={() => setShowSettings(!showSettings)}
-                  className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 transition-colors w-full"
-                >
-                  {showSettings ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                  <span>Настройки: <strong>{engineSummary}</strong></span>
-                </button>
-
-                {showSettings && (
-                  <div className="mt-3 p-4 border border-gray-200 rounded-lg bg-gray-50 space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Движок распознавания</label>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <button
-                          type="button"
-                          onClick={() => setEngine('whisper')}
-                          className={`flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors ${
-                            engine === 'whisper'
-                              ? 'border-green-500 bg-green-50'
-                              : 'border-gray-200 hover:border-gray-300'
-                          }`}
-                        >
-                          <Cpu className={`w-5 h-5 flex-shrink-0 ${engine === 'whisper' ? 'text-green-600' : 'text-gray-400'}`} />
-                          <div>
-                            <div className={`text-sm font-semibold ${engine === 'whisper' ? 'text-green-900' : 'text-gray-700'}`}>
-                              Whisper
-                            </div>
-                            <div className="text-xs text-gray-500">Бесплатно, локально</div>
-                          </div>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEngine('speechkit')}
-                          className={`flex items-center gap-3 p-3 rounded-lg border-2 text-left transition-colors ${
-                            engine === 'speechkit'
-                              ? 'border-blue-500 bg-blue-50'
-                              : 'border-gray-200 hover:border-gray-300'
-                          }`}
-                        >
-                          <Cloud className={`w-5 h-5 flex-shrink-0 ${engine === 'speechkit' ? 'text-blue-600' : 'text-gray-400'}`} />
-                          <div>
-                            <div className={`text-sm font-semibold ${engine === 'speechkit' ? 'text-blue-900' : 'text-gray-700'}`}>
-                              SpeechKit
-                            </div>
-                            <div className="text-xs text-gray-500">Облако, диаризация</div>
-                          </div>
-                        </button>
-                      </div>
-                    </div>
-
-                    {engine === 'whisper' && (
-                      <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1.5">Модель Whisper</label>
-                        <select
-                          value={whisperModel}
-                          onChange={e => setWhisperModel(e.target.value as WhisperModel)}
-                          aria-label="Выбор модели Whisper"
-                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-green-500 focus:border-green-500"
-                        >
-                          {WHISPER_MODELS.map(m => (
-                            <option key={m.value} value={m.value}>
-                              {m.label} — {m.desc}
-                            </option>
-                          ))}
-                        </select>
                       </div>
                     )}
                   </div>

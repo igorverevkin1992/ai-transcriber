@@ -42,6 +42,17 @@ from backend.utils import sanitize_filename, validate_file_extension, validate_u
 router = APIRouter(prefix="/api/v1")
 limiter = Limiter(key_func=get_remote_address)
 
+VALID_ENGINES = {"whisper", "speechkit"}
+VALID_WHISPER_MODELS = {"tiny", "base", "small", "medium", "large", "large-v2", "large-v3"}
+
+
+def _validate_engine_model(engine: str, whisper_model: str) -> None:
+    """Проверяет engine и whisper_model, бросает HTTPException при ошибке."""
+    if engine not in VALID_ENGINES:
+        raise HTTPException(status_code=400, detail=f"Неверный engine: {engine}. Допустимые: {', '.join(VALID_ENGINES)}")
+    if whisper_model not in VALID_WHISPER_MODELS:
+        raise HTTPException(status_code=400, detail=f"Неверная модель: {whisper_model}. Допустимые: {', '.join(sorted(VALID_WHISPER_MODELS))}")
+
 
 def _safe_unlink(path: str) -> None:
     """Удаляет файл, игнорируя ошибки (для background-cleanup ZIP-архивов)."""
@@ -65,19 +76,25 @@ async def create_project(request: Request, req: CreateProjectRequest):
     if url_error:
         raise HTTPException(status_code=400, detail=url_error)
 
+    engine = req.engine or "speechkit"
+    whisper_model = req.whisper_model or "medium"
+    _validate_engine_model(engine, whisper_model)
+
     pid = str(uuid.uuid4())
+    task_kwargs = {"engine": engine, "whisper_model": whisper_model}
     projects_db.create(pid, {
         "id": pid,
         "status": ProjectStatusEnum.QUEUED,
         "created_at": time.time(),
         "retry_count": 0,
+        "engine": engine,
         "task_func": "process_video_task",
         "task_args": (pid, req.url),
-        "task_kwargs": {},
+        "task_kwargs": task_kwargs,
     })
     from backend.security import mask_url
-    submit_task(process_video_task, pid, req.url, project_id=pid)
-    logger.info("Проект создан: %s для URL: %s", pid[:8], mask_url(req.url))
+    submit_task(process_video_task, pid, req.url, project_id=pid, **task_kwargs)
+    logger.info("Проект создан: %s для URL: %s (engine=%s)", pid[:8], mask_url(req.url), engine)
     return CreateProjectResponse(id=pid)
 
 
@@ -167,13 +184,7 @@ async def upload_file(
     if not file.filename:
         raise HTTPException(status_code=400, detail="Имя файла не указано")
 
-    valid_engines = {"whisper", "speechkit"}
-    if engine not in valid_engines:
-        raise HTTPException(status_code=400, detail=f"Неверный engine: {engine}. Допустимые: {', '.join(valid_engines)}")
-
-    valid_models = {"tiny", "base", "small", "medium", "large", "large-v2", "large-v3"}
-    if whisper_model not in valid_models:
-        raise HTTPException(status_code=400, detail=f"Неверная модель: {whisper_model}. Допустимые: {', '.join(sorted(valid_models))}")
+    _validate_engine_model(engine, whisper_model)
 
     safe_filename = sanitize_filename(file.filename)
 

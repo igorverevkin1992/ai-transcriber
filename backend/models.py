@@ -27,6 +27,8 @@ STATUS_LABELS_RU = {
 
 class CreateProjectRequest(BaseModel):
     url: str
+    engine: Optional[str] = None  # 'whisper' | 'speechkit'; speechkit если не задан
+    whisper_model: Optional[str] = None  # 'small' | 'medium' | 'large' ...
 
 
 class SpeakerMapping(BaseModel):

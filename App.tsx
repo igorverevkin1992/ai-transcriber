@@ -45,7 +45,7 @@ const App: React.FC = () => {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
 
-  const handleUpload = async (link: string) => {
+  const handleUpload = async (link: string, engine: EngineType = 'speechkit', whisperModel: WhisperModel = 'medium') => {
     setStatus('PROCESSING');
     setProgressStep('');
     setProgressPercent(0);
@@ -53,7 +53,7 @@ const App: React.FC = () => {
     abortRef.current = controller;
 
     try {
-      const projectId = await api.uploadFile(link);
+      const projectId = await api.uploadFile(link, engine, whisperModel);
 
       await api.pollStatus(
         projectId,

@@ -787,11 +787,15 @@ def _cleanup_old_projects():
         logger.info("TTL-очистка: удалено %d старых проектов", deleted)
 
 
-def process_video_task(project_id: str, disk_url: str):
-    """Фоновая задача: скачивание -> конвертация -> распознавание с диаризацией."""
+def process_video_task(project_id: str, disk_url: str, engine: str = "speechkit", whisper_model: str = "medium"):
+    """Фоновая задача: скачивание -> распознавание выбранным движком.
+
+    engine='whisper': скачивание -> Whisper (без конвертации)
+    engine='speechkit': скачивание -> OPUS -> gRPC v3 (диаризация, платно)
+    """
     local_video_path = TEMP_DIR / f"{project_id}_video"
     local_audio_path = TEMP_DIR / f"{project_id}.opus"
-    projects_total.labels(engine="speechkit").inc()
+    projects_total.labels(engine=engine).inc()
     active_projects.inc()
     task_start = time.time()
 
@@ -804,15 +808,32 @@ def process_video_task(project_id: str, disk_url: str):
         logger.info("[%s] Скачивание файла с Яндекс.Диска...", project_id[:8])
         original_filename = _download_from_yadisk(project_id, disk_url, local_video_path)
 
-        # 2. КОНВЕРТАЦИЯ
-        projects_db.update_status(project_id, ProjectStatusEnum.CONVERTING)
-        projects_db.update_field(project_id, "progress_percent", None)
-        _convert_to_opus(project_id, local_video_path, local_audio_path)
+        # 2-3. РАСПОЗНАВАНИЕ (по выбранному движку)
+        if engine == "whisper":
+            projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
+            projects_db.update_field(project_id, "progress_percent", None)
+            initial_prompt = _build_whisper_prompt(original_filename)
+            if WHISPERX_AVAILABLE:
+                logger.info("[%s] WhisperX (с диаризацией): модель %s", project_id[:8], whisper_model)
+                segments = _transcribe_with_whisperx(
+                    project_id, local_video_path, whisper_model,
+                    initial_prompt=initial_prompt,
+                    original_filename=original_filename,
+                )
+            else:
+                logger.info("[%s] faster-whisper (без диаризации): модель %s", project_id[:8], whisper_model)
+                segments = _transcribe_with_whisper(
+                    project_id, local_video_path, whisper_model,
+                    initial_prompt=initial_prompt,
+                )
+        else:
+            projects_db.update_status(project_id, ProjectStatusEnum.CONVERTING)
+            projects_db.update_field(project_id, "progress_percent", None)
+            _convert_to_opus(project_id, local_video_path, local_audio_path)
 
-        # 3. РАСПОЗНАВАНИЕ (gRPC v3 с диаризацией)
-        projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
-        logger.info("[%s] Распознавание с диаризацией...", project_id[:8])
-        segments = _transcribe_with_speechkit(project_id, local_audio_path)
+            projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
+            logger.info("[%s] Распознавание с диаризацией...", project_id[:8])
+            segments = _transcribe_with_speechkit(project_id, local_audio_path)
 
         # 4. ПОСТОБРАБОТКА ТЕКСТА
         from backend.postprocess import postprocess_segments
@@ -822,7 +843,7 @@ def process_video_task(project_id: str, disk_url: str):
         # 5. ОБРАБОТКА РЕЗУЛЬТАТА
         _process_recognition_result(project_id, segments, original_filename, local_video_path)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
-        transcribe_duration.labels(engine="speechkit").observe(time.time() - task_start)
+        transcribe_duration.labels(engine=engine).observe(time.time() - task_start)
 
     except Exception as e:
         project_errors.labels(stage="video_task").inc()

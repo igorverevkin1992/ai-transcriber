@@ -165,6 +165,33 @@ class TestProcessVideoTask:
         assert calls.get("postprocess") is True
         assert store["pv1"]["status"] == ProjectStatusEnum.COMPLETED
 
+    def test_whisper_engine_for_link(self, fresh_store, monkeypatch):
+        """Путь по ссылке с engine='whisper' должен звать Whisper, а не SpeechKit."""
+        store, _, _ = fresh_store
+        store.create("pv2", {"id": "pv2", "status": ProjectStatusEnum.QUEUED, "created_at": 1.0})
+
+        used = {}
+        monkeypatch.setattr(services, "_download_from_yadisk",
+                            lambda pid, url, path: "Иванов.mp4")
+        monkeypatch.setattr(services, "WHISPERX_AVAILABLE", False)
+        monkeypatch.setattr(services, "_build_whisper_prompt", lambda fn: "")
+        monkeypatch.setattr(services, "_transcribe_with_whisper",
+                            lambda pid, path, model, **kw: used.update(model=model) or [_seg("0", "привет.", 0, 1000)])
+
+        def boom(*a, **k):
+            raise AssertionError("SpeechKit не должен вызываться при engine=whisper")
+
+        monkeypatch.setattr(services, "_transcribe_with_speechkit", boom)
+        monkeypatch.setattr(services, "_convert_to_opus", boom)
+
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "postprocess_segments", lambda segments, use_gemini=True: segments)
+
+        services.process_video_task("pv2", "http://disk", engine="whisper", whisper_model="large")
+
+        assert used.get("model") == "large"
+        assert store["pv2"]["status"] == ProjectStatusEnum.COMPLETED
+
 
 class TestDownloadFromYadisk:
     def test_bypasses_system_proxy_when_configured(self, tmp_path, monkeypatch):
