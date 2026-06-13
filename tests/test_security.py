@@ -69,6 +69,20 @@ class TestValidateExternalUrl:
         assert err is not None
 
 
+class TestProxyDetectionDisabled:
+    def test_getproxies_neutralized_when_ignore_system_proxy(self):
+        # config импортируется с IGNORE_SYSTEM_PROXY=true по умолчанию → getproxies
+        # должен быть нейтрализован, чтобы requests/huggingface не лезли в реестр.
+        import backend.config as config
+
+        if not config.IGNORE_SYSTEM_PROXY:
+            import pytest as _pt
+            _pt.skip("IGNORE_SYSTEM_PROXY отключён в окружении")
+
+        import requests.utils
+        assert requests.utils.getproxies() == {}
+
+
 def _fake_response(status_code, location=None):
     resp = MagicMock()
     resp.status_code = status_code

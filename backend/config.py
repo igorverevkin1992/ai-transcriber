@@ -57,10 +57,29 @@ RECOVER_INFLIGHT_ON_STARTUP = os.getenv("RECOVER_INFLIGHT_ON_STARTUP", "true").l
 
 # --- Network ---
 # Игнорировать системный/окруженческий прокси (env + реестр Windows) при
-# скачивании с Яндекс.Диска. Я.Диск доступен напрямую, а «хвост» от VPN в
-# системных настройках Windows иначе ломает загрузку (в т.ч. требует PySocks
-# для SOCKS-прокси). Кому прокси действительно нужен — выставить false.
+# сетевых запросах. Я.Диск и HuggingFace доступны напрямую, а «хвост» от VPN в
+# системных настройках Windows иначе ломает загрузку файлов И моделей (ошибка
+# "Missing dependencies for SOCKS support"). Кому прокси нужен — выставить false.
 IGNORE_SYSTEM_PROXY = os.getenv("IGNORE_SYSTEM_PROXY", "true").lower() in ("1", "true", "yes")
+
+if IGNORE_SYSTEM_PROXY:
+    # Глобально отключаем определение прокси для всех requests-совместимых
+    # библиотек (requests, huggingface_hub, faster-whisper). Иначе каждая из них
+    # читает прокси из реестра Windows своей сессией и падает на SOCKS.
+    # getproxies() начинает возвращать пустой словарь — прокси не используется.
+    def _disable_proxy_detection() -> None:
+        try:
+            import requests.utils as _rqu
+            _rqu.getproxies = lambda: {}
+        except Exception as e:  # pragma: no cover
+            logger.warning("Не удалось отключить системный прокси для requests: %s", e)
+        try:
+            import urllib.request as _urlreq
+            _urlreq.getproxies = lambda: {}
+        except Exception:  # pragma: no cover
+            pass
+
+    _disable_proxy_detection()
 
 # --- Turn building (склейка реплик в абзацы, как в эталонных стенограммах) ---
 TURN_MERGE_ENABLED = os.getenv("TURN_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
