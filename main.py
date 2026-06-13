@@ -10,7 +10,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.auth import ApiKeyMiddleware
-from backend.config import API_KEY, CORS_ORIGINS, OUTPUT_DIR, SQLITE_DB_PATH, TEMP_DIR, YANDEX_API_KEY, logger
+from backend.config import (
+    API_KEY,
+    CORS_ORIGINS,
+    OUTPUT_DIR,
+    RECOVER_INFLIGHT_ON_STARTUP,
+    SQLITE_DB_PATH,
+    TEMP_DIR,
+    YANDEX_API_KEY,
+    logger,
+)
 from backend.metrics import CONTENT_TYPE_LATEST, generate_latest
 from backend.models import HealthResponse, ProjectStatusEnum
 from backend.routes import router
@@ -68,12 +77,32 @@ def _cleanup_old_docx():
 
 
 def _recover_inflight_projects():
-    """Mark projects that were in-flight at shutdown and schedule retries."""
+    """Mark projects that were in-flight at shutdown and schedule retries.
+
+    Если RECOVER_INFLIGHT_ON_STARTUP=false — задачи не возобновляются, а
+    помечаются ERROR, чтобы не висеть в статусе «в очереди» после ручного
+    закрытия бэкенда.
+    """
     in_flight_statuses = (
         ProjectStatusEnum.DOWNLOADING,
         ProjectStatusEnum.CONVERTING,
         ProjectStatusEnum.TRANSCRIBING,
     )
+
+    if not RECOVER_INFLIGHT_ON_STARTUP:
+        aborted = 0
+        for pid, proj in projects_db.items():
+            status = proj.get("status")
+            if status in in_flight_statuses or status == ProjectStatusEnum.QUEUED:
+                projects_db.update_status(
+                    pid, ProjectStatusEnum.ERROR,
+                    error="Сервер был перезапущен, обработка прервана",
+                )
+                aborted += 1
+        if aborted:
+            logger.info("Авто-восстановление отключено: %d задач помечено как прерванные", aborted)
+        return
+
     recovered = 0
     for pid, proj in projects_db.items():
         status = proj.get("status")
