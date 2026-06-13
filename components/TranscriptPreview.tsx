@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { TranscriptSegment, SpeakerInfo, Candidate } from '../types';
+import { TranscriptSegment, SpeakerInfo, Candidate, UNKNOWN_SPEAKER_ABBR } from '../types';
 import { FileText, Download, Pencil } from 'lucide-react';
 
 interface Props {
@@ -37,14 +37,14 @@ export const TranscriptPreview: React.FC<Props> = ({
     const speaker = speakerByTag.get(tagId);
     if (!speaker) return tagId;
     if (speaker.candidate_id) {
-      return candidateById.get(speaker.candidate_id)?.abbr || 'UNK';
+      return candidateById.get(speaker.candidate_id)?.abbr || UNKNOWN_SPEAKER_ABBR;
     }
     return speaker.custom_abbr || `S${tagId}`;
   };
 
   // Полная скобочная ремарка «(Технические моменты).» — как в backend/turns.py;
   // частичная «(пауза) и потом...» рендерится как обычная речь.
-  const isFullParenthetical = (text: string) => /^\((?:[^()]*|\([^()]*\))*\)[.!?…]*$/.test(text);
+  const isFullParenthetical = (text: string) => /^\((?:[^()]|\([^()]*\))*\)[.!?…]*$/.test(text);
 
   const startEdit = (idx: number, text: string) => {
     setEditingIndex(idx);
@@ -67,7 +67,7 @@ export const TranscriptPreview: React.FC<Props> = ({
       <div className="p-3 md:p-4 border-b border-gray-100 bg-gray-50 rounded-t-lg flex justify-between items-center gap-2">
         <h2 className="text-xs md:text-sm font-semibold uppercase tracking-wide text-gray-500 flex items-center gap-2">
           <FileText className="w-4 h-4" />
-          <span className="hidden sm:inline">Live Preview</span>
+          <span className="hidden sm:inline">Предпросмотр</span>
         </h2>
         <button
           onClick={onDownload}
@@ -104,6 +104,9 @@ export const TranscriptPreview: React.FC<Props> = ({
           </div>
 
           <div className="space-y-3 text-base md:text-lg leading-relaxed">
+            {segments.length === 0 && (
+              <div className="text-center py-12 text-gray-400 text-sm">Сегменты отсутствуют</div>
+            )}
             {segments.map((seg, idx) => {
               const abbr = getSpeakerAbbr(seg.tag_id);
               const isTechRemark = isFullParenthetical(seg.text) && !seg.text.startsWith('(неразборчиво)');
@@ -118,6 +121,7 @@ export const TranscriptPreview: React.FC<Props> = ({
                       </div>
                       <textarea
                         className="w-full border border-blue-300 rounded p-2 text-base font-times focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        aria-label="Редактирование текста сегмента"
                         value={editText}
                         onChange={(e) => setEditText(e.target.value)}
                         rows={3}
@@ -157,7 +161,7 @@ export const TranscriptPreview: React.FC<Props> = ({
                       </div>
                       <button
                         onClick={() => startEdit(idx, seg.text)}
-                        className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity p-1 text-gray-400 hover:text-blue-600 shrink-0"
+                        className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 transition-opacity p-1 text-gray-400 hover:text-blue-600 shrink-0"
                         title="Редактировать"
                         aria-label={`Редактировать реплику ${seg.timecode}`}
                       >

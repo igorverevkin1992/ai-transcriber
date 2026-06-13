@@ -139,7 +139,7 @@ async def export_docx(pid: str, req: ExportRequest, background_tasks: Background
         segments_override=segments_override,
     )
 
-    background_tasks.add_task(os.unlink, output_path)
+    background_tasks.add_task(_safe_unlink, output_path)
 
     return FileResponse(
         path=output_path,
@@ -327,11 +327,7 @@ async def batch_download(
                     zf.write(output_path, download_name)
                     exported_count += 1
             finally:
-                try:
-                    if os.path.exists(output_path):
-                        os.unlink(output_path)
-                except OSError:
-                    pass
+                _safe_unlink(output_path)
 
     if exported_count == 0:
         try:
@@ -451,11 +447,7 @@ async def batch_export_with_mappings(
                     zf.write(output_path, download_name)
                     exported_count += 1
             finally:
-                try:
-                    if os.path.exists(output_path):
-                        os.unlink(output_path)
-                except OSError:
-                    pass
+                _safe_unlink(output_path)
 
     if exported_count == 0:
         try:

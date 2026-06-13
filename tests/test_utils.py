@@ -158,6 +158,11 @@ class TestParseFilenameMetadata:
         result = parse_filename_metadata("Имя_15.mp4")
         assert result["speakers"] == ["Имя"]
 
+    def test_huge_filename_guarded(self):
+        # Гард по длине: аномально длинное имя не должно нагружать регекспы
+        result = parse_filename_metadata("Иванов_" + "a" * 100_000 + ".mp4")
+        assert "Иванов" in result["speakers"]
+
 
 class TestStripExtension:
     def test_basic(self):
@@ -227,6 +232,15 @@ class TestSanitizeFilename:
     def test_base_dir_escape_blocked(self, tmp_path):
         result = sanitize_filename("../escape.txt", base_dir=str(tmp_path))
         assert result == "escape.txt"
+
+    def test_long_name_truncated_preserving_extension(self):
+        result = sanitize_filename("a" * 1000 + ".mp4")
+        assert len(result) <= 255
+        assert result.endswith(".mp4")
+
+    def test_long_name_without_extension_truncated(self):
+        result = sanitize_filename("a" * 1000)
+        assert len(result) <= 255
 
 
 def _ffprobe_result(payload: dict, returncode: int = 0):

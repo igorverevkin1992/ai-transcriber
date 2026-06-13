@@ -188,4 +188,5 @@ if __name__ == "__main__":
     import uvicorn
 
     logger.info("Запуск ABTGS Backend на http://localhost:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Привязка к 0.0.0.0 намеренная: контейнерный деплой, порт публикуется через docker-compose
+    uvicorn.run(app, host="0.0.0.0", port=8000)  # nosec B104

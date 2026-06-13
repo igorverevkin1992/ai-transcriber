@@ -15,7 +15,9 @@ from backend.utils import strip_extension
 
 # Parenthetical remark, optionally followed by sentence punctuation that the
 # human reference also italicizes (e.g. the whole "(...)." including the dot).
-PARENTHETICAL_RE = re.compile("(\\((?:[^()]*|\\([^()]*\\))*\\)[.!?…]*)")
+# Альтернативы внутри (?:...) не перекрываются (один символ либо вложенная
+# скобка) — линейный матчинг без катастрофического бэктрекинга.
+PARENTHETICAL_RE = re.compile(r"(\((?:[^()]|\([^()]*\))*\)[.!?…]*)")
 
 # Служебные и эпизодические говорящие не входят в легенду эталонов:
 # АЗК/ГЗК (автор/голос за кадром) и безымянные метки М1, М2, М3, Ж, ММ

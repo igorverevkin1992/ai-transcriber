@@ -19,6 +19,12 @@ class ProjectStore:
 
     Hot data (progress_percent) lives only in cache.
     Persistent writes happen on: create, status change, result storage, delete.
+
+    Concurrency contract: all mutations go through ``self._lock``. Read methods
+    (``get``/``__getitem__``/``__contains__``/``items``/``__len__``) deliberately
+    skip the lock — single dict operations are atomic under the GIL, and
+    ``items()`` returns a snapshot list. Callers may observe a value that is
+    being concurrently replaced, but never a corrupted cache.
     """
 
     def __init__(self, db_path: str = "projects.db"):
@@ -151,7 +157,7 @@ class ProjectStore:
     def cleanup_old(self, ttl_seconds: float, terminal_statuses: set | None = None) -> int:
         now = time.time()
         if terminal_statuses is None:
-            terminal_statuses = {"completed", "error"}
+            terminal_statuses = {ProjectStatusEnum.COMPLETED.value, ProjectStatusEnum.ERROR.value}
 
         to_delete = []
         for pid, proj in self.items():

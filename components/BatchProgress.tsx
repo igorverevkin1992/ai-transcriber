@@ -7,7 +7,6 @@ import {
   AlertCircle,
   Clock,
   Zap,
-  FileAudio,
   Timer,
   Activity,
 } from 'lucide-react';
@@ -22,6 +21,7 @@ interface Props {
   whisperModel?: string;
   onDone: (projectIds: string[]) => void;
   onError: (msg: string) => void;
+  onPhaseChange?: (phase: UploadState) => void;
   recoveredProjectIds?: string[];
   recoveredFileNames?: string[];
 }
@@ -75,7 +75,7 @@ const STEP_LABELS: Record<string, string> = {
   error: 'Ошибка',
 };
 
-export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whisperModel = 'small', onDone, onError, recoveredProjectIds, recoveredFileNames }) => {
+export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whisperModel = 'small', onDone, onError, onPhaseChange, recoveredProjectIds, recoveredFileNames }) => {
   const isRecovery = !!recoveredProjectIds && recoveredProjectIds.length > 0;
   const [state, setState] = useState<UploadState>(isRecovery ? 'processing' : 'uploading');
   const [trackers, setTrackers] = useState<FileTracker[]>(() => {
@@ -96,6 +96,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   const [startTime] = useState(() => Date.now());
   const [elapsedSec, setElapsedSec] = useState(0);
   const [logMessages, setLogMessages] = useState<string[]>([]);
+  const [logExpanded, setLogExpanded] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval>>();
   const timerRef = useRef<ReturnType<typeof setInterval>>();
@@ -105,6 +106,10 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   const pollFailCountRef = useRef(0);
   const trackersRef = useRef<FileTracker[]>(trackers);
   trackersRef.current = trackers;
+
+  useEffect(() => {
+    onPhaseChange?.(state);
+  }, [state, onPhaseChange]);
 
   const addLog = useCallback((msg: string) => {
     const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -322,11 +327,6 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     ? ((state === 'uploading' ? uploadedCount : doneTotal) / (elapsedSec / 60)).toFixed(1)
     : null;
 
-  // Currently active files (being processed right now)
-  const activeFiles = batchFiles.filter(
-    f => f.status !== 'completed' && f.status !== 'error' && f.status !== 'queued'
-  );
-
   // Build unified file status list
   const fileStatuses = trackers.map((t, idx) => {
     const key = t.projectId || `${t.file.name}_${idx}`;
@@ -447,24 +447,14 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
               <span>Скорость: <strong>{filesPerMin} файлов/мин</strong></span>
             </div>
           )}
-          {state !== 'done' && (
-            <div className="flex items-center gap-1.5 text-blue-600">
+          {state === 'uploading' && currentUploadName && (
+            <div className="flex items-center gap-1.5 text-amber-600">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              <span>Обновление каждые 2 сек</span>
+              <span className="truncate max-w-[200px]">{currentUploadName}</span>
             </div>
           )}
         </div>
       </div>
-
-      {/* === MIDDLE: Currently active + currently uploading === */}
-      {state === 'uploading' && currentUploadName && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex items-center gap-3">
-          <Loader2 className="w-4 h-4 text-amber-600 animate-spin flex-shrink-0" />
-          <span className="text-sm text-amber-800 truncate">
-            Загружается: <strong>{currentUploadName}</strong>
-          </span>
-        </div>
-      )}
 
       {pollError && state === 'processing' && (
         <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between" role="alert">
@@ -483,28 +473,8 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         </div>
       )}
 
-      {state === 'processing' && activeFiles.length > 0 && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
-          <div className="text-xs font-medium text-blue-700 mb-2 flex items-center gap-1.5">
-            <FileAudio className="w-3.5 h-3.5" />
-            Сейчас обрабатываются:
-          </div>
-          <div className="space-y-1.5">
-            {activeFiles.map(af => (
-              <div key={af.id} className="flex items-center gap-2">
-                <Loader2 className="w-3 h-3 text-blue-500 animate-spin flex-shrink-0" />
-                <span className="text-sm text-blue-900 truncate flex-1">{af.filename}</span>
-                <span className="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full flex-shrink-0">
-                  {STEP_LABELS[af.status] || af.status_label}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* === BOTTOM: Two columns — file list + log === */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4 min-h-0">
+      {/* === BOTTOM: File list + collapsible log === */}
+      <div className="flex-1 flex flex-col gap-4 min-h-0">
         {/* File list */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col min-h-0">
           <div className="px-4 py-2.5 border-b border-gray-200 bg-gray-50 flex items-center justify-between flex-shrink-0">
@@ -541,18 +511,24 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-gray-800 truncate">{fs.name}</p>
-                  {/* Mini step indicator for active files */}
                   {fs.step > 0 && fs.step < TOTAL_STEPS && (
-                    <div className="flex gap-0.5 mt-1">
-                      {Array.from({ length: TOTAL_STEPS }, (_, i) => i + 1).map(s => (
-                        <div key={s} className={`h-1 flex-1 rounded-full ${
-                          s <= fs.step
-                            ? 'bg-blue-500'
-                            : s === fs.step + 1
-                            ? 'bg-blue-200 animate-pulse'
-                            : 'bg-gray-200'
-                        }`} />
-                      ))}
+                    <div className="mt-1">
+                      <div className="flex gap-0.5">
+                        {Array.from({ length: TOTAL_STEPS }, (_, i) => i + 1).map(s => (
+                          <div key={s} className={`h-1 flex-1 rounded-full ${
+                            s <= fs.step
+                              ? 'bg-blue-500'
+                              : s === fs.step + 1
+                              ? 'bg-blue-200 animate-pulse'
+                              : 'bg-gray-200'
+                          }`} />
+                        ))}
+                      </div>
+                      <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+                        <span>Конвертация</span>
+                        <span>Распознавание</span>
+                        <span>Готово</span>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -576,35 +552,47 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
           </div>
         </div>
 
-        {/* Activity log */}
-        <div className="bg-gray-900 rounded-xl shadow-sm border border-gray-700 overflow-hidden flex flex-col min-h-0" role="log" aria-live="off" aria-label="Журнал обработки">
-          <div className="px-4 py-2.5 border-b border-gray-700 bg-gray-800 flex items-center gap-2 flex-shrink-0">
+        {/* Collapsible activity log */}
+        <div className="bg-gray-900 rounded-xl shadow-sm border border-gray-700 overflow-hidden flex flex-col" role="log" aria-live="polite" aria-label="Журнал обработки">
+          <button
+            onClick={() => setLogExpanded(!logExpanded)}
+            className="px-4 py-2.5 border-b border-gray-700 bg-gray-800 flex items-center gap-2 flex-shrink-0 w-full text-left hover:bg-gray-750 transition-colors"
+          >
             <Activity className="w-3.5 h-3.5 text-green-400" />
-            <span className="text-sm font-medium text-gray-300">Журнал</span>
+            <span className="text-sm font-medium text-gray-300">
+              {logExpanded ? 'Скрыть журнал' : 'Показать журнал'}
+            </span>
+            {!logExpanded && logMessages.length > 0 && (
+              <span className="text-xs text-gray-500 truncate flex-1 ml-2 font-mono">
+                {logMessages[logMessages.length - 1]}
+              </span>
+            )}
             {state !== 'done' && (
-              <span className="ml-auto relative flex h-2 w-2">
+              <span className="ml-auto relative flex h-2 w-2 flex-shrink-0">
                 <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-green-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
               </span>
             )}
-          </div>
-          <div ref={logScrollRef} className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-relaxed">
-            {logMessages.length === 0 ? (
-              <p className="text-gray-600">Ожидание...</p>
-            ) : (
-              logMessages.map((msg, i) => (
-                <div key={i} className={`${
-                  msg.includes('✓') ? 'text-green-400' :
-                  msg.includes('✗') ? 'text-red-400' :
-                  msg.includes('→') ? 'text-blue-400' :
-                  'text-gray-400'
-                }`}>
-                  {msg}
-                </div>
-              ))
-            )}
-            <div ref={logEndRef} />
-          </div>
+          </button>
+          {logExpanded && (
+            <div ref={logScrollRef} className="overflow-y-auto p-3 font-mono text-xs leading-relaxed max-h-64">
+              {logMessages.length === 0 ? (
+                <p className="text-gray-600">Ожидание...</p>
+              ) : (
+                logMessages.map((msg, i) => (
+                  <div key={i} className={`${
+                    msg.includes('✓') ? 'text-green-400' :
+                    msg.includes('✗') ? 'text-red-400' :
+                    msg.includes('→') ? 'text-blue-400' :
+                    'text-gray-400'
+                  }`}>
+                    {msg}
+                  </div>
+                ))
+              )}
+              <div ref={logEndRef} />
+            </div>
+          )}
         </div>
       </div>
 

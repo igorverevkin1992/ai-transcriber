@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ProjectData, SpeakerInfo, TranscriptSegment } from '../types';
+import { MappingDecision, ProjectData, SpeakerInfo, TranscriptSegment } from '../types';
 import { SpeakerMatrix } from './SpeakerMatrix';
 import { TranscriptPreview } from './TranscriptPreview';
 import { api } from '../services/api';
@@ -12,7 +12,15 @@ interface Props {
 }
 
 export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError }) => {
-  const [speakers, setSpeakers] = useState<SpeakerInfo[]>(data.detected_speakers);
+  const [speakers, setSpeakers] = useState<SpeakerInfo[]>(() =>
+    data.detected_speakers.map(s => {
+      if (s.candidate_id) {
+        const c = data.candidates.find(c => c.id === s.candidate_id);
+        return { ...s, custom_name: c?.name || s.custom_name, custom_abbr: c?.abbr || s.custom_abbr };
+      }
+      return s;
+    })
+  );
   const [segments, setSegments] = useState<TranscriptSegment[]>(data.preview_transcript);
   const [isDownloading, setIsDownloading] = useState(false);
 
@@ -54,26 +62,6 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
     }));
   };
 
-  const handleCandidateSelect = (tagId: string, candidateId: string) => {
-    if (candidateId === 'custom') {
-      setSpeakers(prev => prev.map(s => {
-        if (s.tag_id !== tagId) return s;
-        return { ...s, candidate_id: null, custom_name: 'Новый спикер', custom_abbr: 'НОВ' };
-      }));
-    } else {
-      setSpeakers(prev => prev.map(s => {
-        if (s.tag_id !== tagId) return s;
-        const candidate = data.candidates.find(c => c.id === candidateId);
-        return {
-          ...s,
-          candidate_id: candidateId,
-          custom_name: candidate?.name,
-          custom_abbr: candidate?.abbr,
-        };
-      }));
-    }
-  };
-
   const handleEditSegment = (index: number, newText: string) => {
     setSegments(prev => prev.map((seg, i) => (i === index ? { ...seg, text: newText } : seg)));
   };
@@ -83,15 +71,11 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
     try {
       const mapping = speakers.reduce((acc, s) => {
         acc[s.tag_id] = {
-          name: (s.candidate_id
-            ? data.candidates.find(c => c.id === s.candidate_id)?.name
-            : s.custom_name) || `Спикер ${s.tag_id}`,
-          abbreviation: (s.candidate_id
-            ? data.candidates.find(c => c.id === s.candidate_id)?.abbr
-            : s.custom_abbr) || '',
+          name: s.custom_name || `Спикер ${s.tag_id}`,
+          abbreviation: s.custom_abbr || '',
         };
         return acc;
-      }, {} as any);
+      }, {} as MappingDecision);
 
       const editedSegments = segments.map(seg => ({
         timecode: seg.timecode,
@@ -117,7 +101,6 @@ export const VerificationDashboard: React.FC<Props> = ({ data, onFinish, onError
           candidates={data.candidates}
           onSwap={handleSwap}
           onUpdateSpeaker={handleUpdateSpeaker}
-          onCandidateSelect={handleCandidateSelect}
         />
       </div>
       <div className="lg:col-span-8 lg:h-full">

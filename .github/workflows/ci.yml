@@ -22,15 +22,12 @@ jobs:
       - name: Lint with ruff
         run: ruff check backend/ main.py tests/
 
+      # mypy is advisory while annotations are rolled out incrementally
       - name: Type check with mypy
-        run: |
-          pip install mypy
-          mypy backend/ main.py --ignore-missing-imports --no-strict-optional || true
+        run: mypy backend/ main.py --ignore-missing-imports --no-strict-optional || true
 
       - name: Security check with bandit
-        run: |
-          pip install bandit
-          bandit -r backend/ main.py -ll || true
+        run: bandit -r backend/ main.py -ll
 
       - name: Run tests
         run: python -m pytest tests/ -v

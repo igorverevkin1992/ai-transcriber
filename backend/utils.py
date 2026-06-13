@@ -10,6 +10,9 @@ _FILENAME_BAD_CHARS_RE = re.compile(
     "[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\ufeff]"
 )
 
+# \u041b\u0438\u043c\u0438\u0442 \u0434\u043b\u0438\u043d\u044b \u0438\u043c\u0435\u043d\u0438 \u0444\u0430\u0439\u043b\u0430 (\u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432) \u2014 \u0442\u0438\u043f\u0438\u0447\u043d\u044b\u0439 \u043f\u0440\u0435\u0434\u0435\u043b \u0444\u0430\u0439\u043b\u043e\u0432\u044b\u0445 \u0441\u0438\u0441\u0442\u0435\u043c.
+_MAX_FILENAME_LEN = 255
+
 FILENAME_STOP_WORDS = {
     "лайф", "лайфы", "интер", "синхрон", "снх", "бз",
     "f8", "wav", "mp3", "mp4", "mov", "wmv", "mxf",
@@ -33,6 +36,9 @@ def _validate_tc_parts(h: int, m: int, s: int, f: int) -> bool:
 def parse_filename_metadata(filename: str) -> dict:
     """Извлекает имена спикеров и стартовый таймкод из названия файла."""
     result = {"speakers": [], "start_tc": "00:00:00:00"}
+    # Гард от регекспов по аномально длинному пользовательскому вводу:
+    # легитимные имена файлов не превышают 255 байт (лимит файловых систем).
+    filename = filename[:_MAX_FILENAME_LEN]
 
     tc_match = _FILENAME_TC_RE.search(filename)
     if tc_match:
@@ -104,6 +110,13 @@ def sanitize_filename(filename: str, base_dir: str | None = None) -> str:
     name = name.strip(". ")
     if not name:
         return "unnamed_file"
+    if len(name) > _MAX_FILENAME_LEN:
+        # Обрезаем с сохранением расширения
+        stem, dot, ext = name.rpartition(".")
+        if dot and len(ext) <= 16:
+            name = stem[: _MAX_FILENAME_LEN - len(ext) - 1] + "." + ext
+        else:
+            name = name[:_MAX_FILENAME_LEN]
     if base_dir:
         resolved = os.path.realpath(os.path.join(base_dir, name))
         if not resolved.startswith(os.path.realpath(base_dir)):

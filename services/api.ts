@@ -42,6 +42,15 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
   return h;
 }
 
+/** Разбирает JSON успешного ответа с понятной ошибкой вместо SyntaxError. */
+async function parseJson<T>(response: Response): Promise<T> {
+  try {
+    return await response.json();
+  } catch {
+    throw new Error('Сервер вернул некорректный ответ (ожидался JSON)');
+  }
+}
+
 export const api = {
   uploadFile: async (link: string): Promise<string> => {
     const response = await fetch(`${API_BASE_URL}/projects`, {
@@ -55,7 +64,7 @@ export const api = {
       throw new Error(errorBody.detail || `Ошибка при создании проекта: ${response.statusText}`);
     }
 
-    const data = await response.json();
+    const data = await parseJson<{ id: string }>(response);
     return data.id;
   },
 
@@ -77,7 +86,7 @@ export const api = {
         throw new Error(`Ошибка проверки статуса: ${response.statusText}`);
       }
 
-      const data = await response.json();
+      const data = await parseJson<{ status: string; status_label: string; progress_percent?: number; error?: string }>(response);
 
       if (data.status === 'error') {
         throw new Error(data.error || 'Ошибка обработки на сервере');
@@ -107,7 +116,7 @@ export const api = {
     const response = await fetch(`${API_BASE_URL}/projects/${projectId}`, { headers: authHeaders() });
     if (!response.ok) throw new Error('Не удалось получить данные проекта');
 
-    const result: ProjectResult = await response.json();
+    const result = await parseJson<ProjectResult>(response);
 
     const speakersDict: SpeakerDict = result.speakers || {};
     const totalDuration = Object.values(speakersDict).reduce(
@@ -128,7 +137,7 @@ export const api = {
 
     const candidates: Candidate[] = detected_speakers.map(s => ({
       id: s.tag_id,
-      name: s.custom_name || `Speaker ${s.tag_id}`,
+      name: s.custom_name || `Спикер ${s.tag_id}`,
       abbr: (s.custom_name || `S${s.tag_id}`).substring(0, 3).toUpperCase(),
     }));
 
@@ -196,14 +205,14 @@ export const api = {
       throw new Error(errorBody.detail || `Ошибка загрузки файла: ${file.name}`);
     }
 
-    const data = await response.json();
+    const data = await parseJson<{ id: string }>(response);
     return data.id;
   },
 
   batchStatus: async (projectIds: string[]): Promise<BatchStatus> => {
     const response = await fetch(`${API_BASE_URL}/batch/status?ids=${encodeURIComponent(projectIds.join(','))}`, { headers: authHeaders() });
     if (!response.ok) throw new Error('Ошибка получения статуса пакета');
-    return await response.json();
+    return await parseJson<BatchStatus>(response);
   },
 
   preloadWhisperModel: async (model: string = 'medium'): Promise<void> => {
@@ -234,7 +243,7 @@ export const api = {
   batchVerificationData: async (projectIds: string[]): Promise<BatchVerificationResponse> => {
     const response = await fetch(`${API_BASE_URL}/batch/verification-data?ids=${encodeURIComponent(projectIds.join(','))}`, { headers: authHeaders() });
     if (!response.ok) throw new Error('Ошибка получения данных верификации');
-    return await response.json();
+    return await parseJson<BatchVerificationResponse>(response);
   },
 
   batchExportWithMappings: async (projects: Array<{ project_id: string; mappings: Array<{ speaker_id: string; name: string; abbr: string }> }>): Promise<Blob> => {

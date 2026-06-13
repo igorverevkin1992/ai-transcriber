@@ -300,3 +300,28 @@ class TestSentenceBoundary:
         # Реплика, кончающаяся «»», не получает искусственное «...»
         out = _build([_ev("0", "снимать «Вечную любовь»", 0, 2)])
         assert out[0]["text"] == "Снимать «Вечную любовь»"
+
+
+class TestParentheticalRegexSafety:
+    def test_pathological_input_linear_time(self):
+        # Регрессия ReDoS: незакрытая скобка не должна вызывать
+        # катастрофический бэктрекинг (старый паттерн зависал уже на ~30 символах).
+        import time
+
+        from backend.docx_export import PARENTHETICAL_RE
+        from backend.turns import _FULL_PARENTHETICAL_RE
+
+        evil = "(" + "а" * 100_000
+        start = time.monotonic()
+        assert _FULL_PARENTHETICAL_RE.match(evil) is None
+        assert PARENTHETICAL_RE.search(evil) is None
+        assert time.monotonic() - start < 1.0
+
+    def test_semantics_unchanged(self):
+        from backend.turns import _FULL_PARENTHETICAL_RE
+
+        assert _FULL_PARENTHETICAL_RE.match("(смех)")
+        assert _FULL_PARENTHETICAL_RE.match("(Технические моменты (перерыв)).")
+        assert _FULL_PARENTHETICAL_RE.match("(пауза)…")
+        assert not _FULL_PARENTHETICAL_RE.match("(пауза) и потом")
+        assert not _FULL_PARENTHETICAL_RE.match("обычный текст")

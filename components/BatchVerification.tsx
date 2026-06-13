@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { CheckCircle2, Download, Edit3, ChevronDown, ChevronUp, ArrowLeft } from 'lucide-react';
+import { CheckCircle2, Download, Edit3, ChevronDown, ChevronUp, ArrowLeft, ChevronsUpDown } from 'lucide-react';
 import { api } from '../services/api';
 import { downloadBlob } from '../services/download';
 
@@ -28,9 +28,10 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
   const [projects, setProjects] = useState<ProjectVerification[]>([]);
   const [loading, setLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [hasEdits, setHasEdits] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [exportSuccess, setExportSuccess] = useState(false);
 
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
@@ -94,6 +95,7 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
 
       const blob = await api.batchExportWithMappings(exportData);
       downloadBlob(blob, 'transcripts.zip');
+      setExportSuccess(true);
     } catch (e: unknown) {
       onError(e instanceof Error ? e.message : 'Ошибка экспорта');
     } finally {
@@ -135,6 +137,19 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
               Назад
             </button>
             <button
+              onClick={() => {
+                if (expandedIds.size === projects.length) {
+                  setExpandedIds(new Set());
+                } else {
+                  setExpandedIds(new Set(projects.map(p => p.project_id)));
+                }
+              }}
+              className="flex items-center gap-2 px-4 py-2.5 text-gray-600 hover:text-gray-800 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition-colors"
+            >
+              <ChevronsUpDown className="w-4 h-4" />
+              {expandedIds.size === projects.length ? 'Свернуть все' : 'Развернуть все'}
+            </button>
+            <button
               onClick={onExportClick}
               disabled={isExporting || projects.length === 0}
               className="flex items-center gap-2 px-5 py-2.5 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white rounded-lg font-medium transition-colors"
@@ -172,12 +187,30 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
         </div>
       )}
 
+      {exportSuccess && (
+        <div className="bg-green-50 border border-green-200 rounded-lg px-4 py-3 flex items-center gap-3">
+          <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" />
+          <span className="text-sm font-medium text-green-800">Архив успешно скачан!</span>
+          <button
+            onClick={onDone}
+            className="ml-auto text-sm text-green-700 hover:text-green-900 font-medium"
+          >
+            Обработать следующие
+          </button>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto space-y-3">
         {projects.map(proj => (
           <div key={proj.project_id} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
             <button
-              onClick={() => setExpandedId(expandedId === proj.project_id ? null : proj.project_id)}
-              aria-expanded={expandedId === proj.project_id}
+              onClick={() => setExpandedIds(prev => {
+                const next = new Set(prev);
+                if (next.has(proj.project_id)) next.delete(proj.project_id);
+                else next.add(proj.project_id);
+                return next;
+              })}
+              aria-expanded={expandedIds.has(proj.project_id)}
               aria-controls={`panel-${proj.project_id}`}
               className="w-full px-5 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
             >
@@ -196,14 +229,14 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
                     </span>
                   ))}
                 </div>
-                {expandedId === proj.project_id
+                {expandedIds.has(proj.project_id)
                   ? <ChevronUp className="w-4 h-4 text-gray-400" />
                   : <ChevronDown className="w-4 h-4 text-gray-400" />
                 }
               </div>
             </button>
 
-            {expandedId === proj.project_id && (
+            {expandedIds.has(proj.project_id) && (
               <div id={`panel-${proj.project_id}`} role="region" aria-label={`Спикеры: ${proj.filename}`} className="border-t border-gray-100 px-5 py-4">
                 <div className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3 flex items-center gap-1.5">
                   <Edit3 className="w-3 h-3" />
