@@ -47,6 +47,7 @@ docker compose --profile dev up   # dev: separate Vite dev server
 - `MAX_RETRIES` — retry failed tasks (default: 3)
 - `SQLITE_DB_PATH` — database location (default: projects.db)
 - `MIN_RAM_MB` — low-RAM warning threshold (default: 500)
+- `IGNORE_SYSTEM_PROXY` — bypass system/env proxy (incl. Windows registry) for Yandex.Disk downloads (default: true; set false if you genuinely need a proxy)
 - `TURN_MERGE_ENABLED` — merge same-speaker segments into turn paragraphs (default: true)
 - `TURN_INLINE_TC_SECONDS` / `TECH_BREAK_GAP_SECONDS` — inline timecode interval / tech-break gap (60 / 30)
 - `WHISPER_BEAM_SIZE` / `WHISPER_INITIAL_PROMPT` — ASR accuracy tuning

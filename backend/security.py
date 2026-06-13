@@ -96,6 +96,7 @@ def stream_with_safe_redirects(
     *,
     timeout: int = 600,
     max_redirects: int = 5,
+    session: "requests.Session | None" = None,
     **kwargs,
 ) -> requests.Response:
     """Скачивает URL в потоковом режиме, вручную следуя по редиректам.
@@ -104,16 +105,20 @@ def stream_with_safe_redirects(
     validate_external_url — легитимные CDN-редиректы (напр. Яндекс.Диск)
     проходят, а попытки увести запрос на приватный IP блокируются (SSRF).
 
+    session: если передан — используется для запросов (напр. с trust_env=False,
+    чтобы обойти системный прокси). Иначе используется модульный requests.
+
     Возвращает открытый stream-Response финального хопа (закрывать вызывающему).
     Бросает RuntimeError при SSRF-нарушении или превышении лимита редиректов.
     """
+    getter = session.get if session is not None else requests.get
     current_url = url
     for _ in range(max_redirects + 1):
         ssrf_err = validate_external_url(current_url)
         if ssrf_err:
             raise RuntimeError(f"SSRF protection: {ssrf_err}")
 
-        resp = requests.get(
+        resp = getter(
             current_url, stream=True, timeout=timeout, allow_redirects=False, **kwargs
         )
         if resp.status_code in _REDIRECT_STATUSES:

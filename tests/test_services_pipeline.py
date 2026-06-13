@@ -166,6 +166,50 @@ class TestProcessVideoTask:
         assert store["pv1"]["status"] == ProjectStatusEnum.COMPLETED
 
 
+class TestDownloadFromYadisk:
+    def test_bypasses_system_proxy_when_configured(self, tmp_path, monkeypatch):
+        """IGNORE_SYSTEM_PROXY=true → сессия с trust_env=False (обход прокси)."""
+        from unittest.mock import MagicMock
+
+        import backend.security as security
+
+        monkeypatch.setattr(services, "IGNORE_SYSTEM_PROXY", True)
+
+        fake_session = MagicMock()
+        fake_session.trust_env = True  # дефолт сессии; код должен переключить в False
+        api_resp = MagicMock(status_code=200)
+        api_resp.json.return_value = {"href": "https://downloader.example.com/file"}
+        meta_resp = MagicMock(status_code=200)
+        meta_resp.json.return_value = {"name": "Иванов_Петров.mp4", "size": 1000}
+        fake_session.get.side_effect = [api_resp, meta_resp]
+        monkeypatch.setattr(services.requests, "Session", lambda: fake_session)
+
+        # stream_with_safe_redirects и validate_external_url импортируются внутри
+        # функции из backend.security — патчим там.
+        monkeypatch.setattr(security, "validate_external_url", lambda u: None)
+
+        stream = MagicMock()
+        stream.__enter__.return_value = MagicMock(
+            status_code=200, headers={"content-length": "0"}, raise_for_status=lambda: None,
+            iter_content=lambda chunk_size: iter([]),
+        )
+        stream.__exit__.return_value = False
+        captured = {}
+
+        def fake_stream(url, **kwargs):
+            captured.update(kwargs)
+            return stream
+
+        monkeypatch.setattr(security, "stream_with_safe_redirects", fake_stream)
+
+        out = tmp_path / "v.mp4"
+        name = services._download_from_yadisk("p1", "https://disk.yandex.ru/i/abc", out)
+
+        assert name == "Иванов_Петров.mp4"
+        assert fake_session.trust_env is False
+        assert captured.get("session") is fake_session
+
+
 class TestCancelProject:
     def test_returns_false_for_missing(self, fresh_store):
         assert services.cancel_project("ghost") is False

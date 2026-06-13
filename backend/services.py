@@ -13,6 +13,7 @@ import requests
 from backend.config import (
     HALLUCINATION_BLACKLIST,
     HF_TOKEN,
+    IGNORE_SYSTEM_PROXY,
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
     NO_SPEECH_PROB_THRESHOLD,
@@ -180,8 +181,14 @@ def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> s
     """Скачивает файл с Яндекс.Диска. Возвращает оригинальное имя файла."""
     from backend.security import mask_url, stream_with_safe_redirects, validate_external_url
 
+    # Отдельная сессия: при IGNORE_SYSTEM_PROXY=true trust_env=False заставляет
+    # requests игнорировать системный прокси (env + реестр Windows), который
+    # иначе ломает загрузку (стрелка на мёртвый VPN-прокси / нехватка PySocks).
+    session = requests.Session()
+    session.trust_env = not IGNORE_SYSTEM_PROXY
+
     api_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
-    resp = requests.get(api_url, params={"public_key": disk_url}, timeout=30, allow_redirects=False)
+    resp = session.get(api_url, params={"public_key": disk_url}, timeout=30, allow_redirects=False)
     if resp.status_code in (301, 302, 303, 307, 308):
         raise RuntimeError("Я.Диск API вернул редирект — отказано (SSRF protection)")
     resp.raise_for_status()
@@ -194,7 +201,7 @@ def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> s
     original_filename = "video_source.mp4"
     try:
         meta_url = "https://cloud-api.yandex.net/v1/disk/public/resources"
-        meta_resp = requests.get(meta_url, params={"public_key": disk_url}, timeout=15, allow_redirects=False)
+        meta_resp = session.get(meta_url, params={"public_key": disk_url}, timeout=15, allow_redirects=False)
         if meta_resp.status_code == 200:
             meta_data = meta_resp.json()
             original_filename = meta_data.get("name", original_filename)
@@ -212,7 +219,7 @@ def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> s
         raise ValueError(ext_error)
 
     downloaded_size = 0
-    with stream_with_safe_redirects(download_url, timeout=600) as r:
+    with stream_with_safe_redirects(download_url, timeout=600, session=session) as r:
         r.raise_for_status()
         content_length = int(r.headers.get("content-length", 0))
         with open(local_video_path, "wb") as f:

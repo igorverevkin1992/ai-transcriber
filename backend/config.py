@@ -48,6 +48,13 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # --- Limits ---
 MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
 
+# --- Network ---
+# Игнорировать системный/окруженческий прокси (env + реестр Windows) при
+# скачивании с Яндекс.Диска. Я.Диск доступен напрямую, а «хвост» от VPN в
+# системных настройках Windows иначе ломает загрузку (в т.ч. требует PySocks
+# для SOCKS-прокси). Кому прокси действительно нужен — выставить false.
+IGNORE_SYSTEM_PROXY = os.getenv("IGNORE_SYSTEM_PROXY", "true").lower() in ("1", "true", "yes")
+
 # --- Turn building (склейка реплик в абзацы, как в эталонных стенограммах) ---
 TURN_MERGE_ENABLED = os.getenv("TURN_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
 TURN_INLINE_TC_SECONDS = float(os.getenv("TURN_INLINE_TC_SECONDS", "60"))
