@@ -1,6 +1,8 @@
 import ipaddress
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+
+import requests
 
 from backend.config import logger
 
@@ -84,6 +86,46 @@ def validate_external_url(url: str) -> str | None:
             return "URL ведёт на приватный IP — запрещено"
 
     return None
+
+
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+
+def stream_with_safe_redirects(
+    url: str,
+    *,
+    timeout: int = 600,
+    max_redirects: int = 5,
+    **kwargs,
+) -> requests.Response:
+    """Скачивает URL в потоковом режиме, вручную следуя по редиректам.
+
+    В отличие от запрета редиректов целиком, каждый хоп проверяется через
+    validate_external_url — легитимные CDN-редиректы (напр. Яндекс.Диск)
+    проходят, а попытки увести запрос на приватный IP блокируются (SSRF).
+
+    Возвращает открытый stream-Response финального хопа (закрывать вызывающему).
+    Бросает RuntimeError при SSRF-нарушении или превышении лимита редиректов.
+    """
+    current_url = url
+    for _ in range(max_redirects + 1):
+        ssrf_err = validate_external_url(current_url)
+        if ssrf_err:
+            raise RuntimeError(f"SSRF protection: {ssrf_err}")
+
+        resp = requests.get(
+            current_url, stream=True, timeout=timeout, allow_redirects=False, **kwargs
+        )
+        if resp.status_code in _REDIRECT_STATUSES:
+            location = resp.headers.get("Location")
+            resp.close()
+            if not location:
+                raise RuntimeError("Редирект без заголовка Location")
+            current_url = urljoin(current_url, location)
+            continue
+        return resp
+
+    raise RuntimeError(f"Слишком много редиректов (>{max_redirects})")
 
 
 def mask_url(url: str, prefix_len: int = 30) -> str:

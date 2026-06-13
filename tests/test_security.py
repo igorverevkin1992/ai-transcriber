@@ -1,4 +1,14 @@
-from backend.security import ALLOWED_MIME_TYPES, is_private_ip, mask_url, validate_external_url
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from backend.security import (
+    ALLOWED_MIME_TYPES,
+    is_private_ip,
+    mask_url,
+    stream_with_safe_redirects,
+    validate_external_url,
+)
 
 
 class TestAllowedMimeTypes:
@@ -57,3 +67,70 @@ class TestValidateExternalUrl:
     def test_unresolvable_hostname(self):
         err = validate_external_url("http://nonexistent-host-xyzabc-12345.invalid")
         assert err is not None
+
+
+def _fake_response(status_code, location=None):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.headers = {"Location": location} if location else {}
+    return resp
+
+
+class TestStreamWithSafeRedirects:
+    @patch("backend.security.socket.getaddrinfo")
+    @patch("backend.security.requests.get")
+    def test_direct_response_returned(self, mock_get, mock_dns):
+        # Публичный IP, нет редиректа — возвращается сразу
+        mock_dns.return_value = [(2, 1, 6, "", ("8.8.8.8", 0))]
+        mock_get.return_value = _fake_response(200)
+
+        resp = stream_with_safe_redirects("https://cdn.example.com/file.mp4")
+        assert resp.status_code == 200
+        assert mock_get.call_count == 1
+
+    @patch("backend.security.socket.getaddrinfo")
+    @patch("backend.security.requests.get")
+    def test_legitimate_redirect_followed(self, mock_get, mock_dns):
+        # CDN-редирект на публичный хост должен следоваться (как у Я.Диска)
+        mock_dns.return_value = [(2, 1, 6, "", ("8.8.8.8", 0))]
+        mock_get.side_effect = [
+            _fake_response(302, "https://storage.example.com/real.mp4"),
+            _fake_response(200),
+        ]
+
+        resp = stream_with_safe_redirects("https://downloader.example.com/file")
+        assert resp.status_code == 200
+        assert mock_get.call_count == 2
+
+    @patch("backend.security.socket.getaddrinfo")
+    @patch("backend.security.requests.get")
+    def test_redirect_to_private_ip_blocked(self, mock_get, mock_dns):
+        # Первый хоп публичный, редирект ведёт на приватный IP — блок
+        def resolve(host, *a, **k):
+            if host == "downloader.example.com":
+                return [(2, 1, 6, "", ("8.8.8.8", 0))]
+            return [(2, 1, 6, "", ("169.254.169.254", 0))]  # AWS metadata
+
+        mock_dns.side_effect = resolve
+        mock_get.return_value = _fake_response(302, "http://internal.evil/latest/meta-data")
+
+        with pytest.raises(RuntimeError, match="SSRF"):
+            stream_with_safe_redirects("https://downloader.example.com/file")
+
+    @patch("backend.security.socket.getaddrinfo")
+    @patch("backend.security.requests.get")
+    def test_redirect_without_location_raises(self, mock_get, mock_dns):
+        mock_dns.return_value = [(2, 1, 6, "", ("8.8.8.8", 0))]
+        mock_get.return_value = _fake_response(302, None)
+
+        with pytest.raises(RuntimeError, match="Location"):
+            stream_with_safe_redirects("https://cdn.example.com/file")
+
+    @patch("backend.security.socket.getaddrinfo")
+    @patch("backend.security.requests.get")
+    def test_too_many_redirects_raises(self, mock_get, mock_dns):
+        mock_dns.return_value = [(2, 1, 6, "", ("8.8.8.8", 0))]
+        mock_get.return_value = _fake_response(302, "https://cdn.example.com/loop")
+
+        with pytest.raises(RuntimeError, match="редирект"):
+            stream_with_safe_redirects("https://cdn.example.com/start", max_redirects=2)

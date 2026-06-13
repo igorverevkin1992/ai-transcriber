@@ -178,7 +178,7 @@ def _check_disk_space(required_bytes: int, target_dir: Path = None) -> None:
 
 def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> str:
     """Скачивает файл с Яндекс.Диска. Возвращает оригинальное имя файла."""
-    from backend.security import mask_url, validate_external_url
+    from backend.security import mask_url, stream_with_safe_redirects, validate_external_url
 
     api_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
     resp = requests.get(api_url, params={"public_key": disk_url}, timeout=30, allow_redirects=False)
@@ -212,9 +212,7 @@ def _download_from_yadisk(project_id: str, disk_url: str, local_video_path) -> s
         raise ValueError(ext_error)
 
     downloaded_size = 0
-    with requests.get(download_url, stream=True, timeout=600, allow_redirects=False) as r:
-        if r.status_code in (301, 302, 303, 307, 308):
-            raise RuntimeError("Download URL вернул редирект — отказано (SSRF protection)")
+    with stream_with_safe_redirects(download_url, timeout=600) as r:
         r.raise_for_status()
         content_length = int(r.headers.get("content-length", 0))
         with open(local_video_path, "wb") as f:
