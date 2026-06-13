@@ -104,6 +104,9 @@ export const TranscriptPreview: React.FC<Props> = ({
           </div>
 
           <div className="space-y-3 text-base md:text-lg leading-relaxed">
+            {segments.length === 0 && (
+              <div className="text-center py-12 text-gray-400 text-sm">Сегменты отсутствуют</div>
+            )}
             {segments.map((seg, idx) => {
               const abbr = getSpeakerAbbr(seg.tag_id);
               const isTechRemark = isFullParenthetical(seg.text) && !seg.text.startsWith('(неразборчиво)');

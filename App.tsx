@@ -171,38 +171,39 @@ const App: React.FC = () => {
       )}
 
       <main className="flex-1 overflow-hidden relative">
-        {/* Recovery banner */}
         {status === 'IDLE' && recoveredSession && (
-          <div className="mx-4 mt-4 bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <RefreshCw className="w-5 h-5 text-amber-600" />
-              <div>
-                <p className="text-sm font-medium text-amber-900">
-                  Найдена незавершённая обработка ({recoveredSession.projectIds.length} файлов)
-                </p>
-                <p className="text-xs text-amber-600 mt-0.5">Можно продолжить отслеживание прогресса</p>
+          <div className="mx-4 mt-4 bg-white border border-amber-300 rounded-xl shadow-sm p-5">
+            <div className="flex items-start gap-4">
+              <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center flex-shrink-0">
+                <RefreshCw className="w-5 h-5 text-amber-600" />
               </div>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  clearBatchSession();
-                  setRecoveredSession(null);
-                }}
-                className="px-3 py-1.5 text-xs text-gray-600 hover:text-gray-800 bg-white border border-gray-200 rounded-md"
-              >
-                Отклонить
-              </button>
-              <button
-                onClick={() => {
-                  setBatchEngine(recoveredSession.engine as EngineType);
-                  setBatchWhisperModel(recoveredSession.whisperModel as WhisperModel);
-                  setStatus('BATCH_PROCESSING');
-                }}
-                className="px-3 py-1.5 text-xs text-white bg-amber-600 hover:bg-amber-700 rounded-md font-medium"
-              >
-                Продолжить
-              </button>
+              <div className="flex-1">
+                <h3 className="text-sm font-bold text-gray-900">Незавершённая обработка</h3>
+                <p className="text-sm text-gray-600 mt-1">
+                  {recoveredSession.projectIds.length} файлов ожидают завершения. Продолжить отслеживание прогресса?
+                </p>
+                <div className="flex gap-3 mt-4">
+                  <button
+                    onClick={() => {
+                      setBatchEngine(recoveredSession.engine as EngineType);
+                      setBatchWhisperModel(recoveredSession.whisperModel as WhisperModel);
+                      setStatus('BATCH_PROCESSING');
+                    }}
+                    className="px-5 py-2.5 text-sm text-white bg-amber-600 hover:bg-amber-700 rounded-lg font-medium transition-colors"
+                  >
+                    Продолжить обработку
+                  </button>
+                  <button
+                    onClick={() => {
+                      clearBatchSession();
+                      setRecoveredSession(null);
+                    }}
+                    className="px-4 py-2 text-sm text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
+                  >
+                    Отклонить
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         )}
