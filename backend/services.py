@@ -937,10 +937,25 @@ def process_uploaded_file_task(
 
     finally:
         active_projects.dec()
-        for path in (local_video_path, local_audio_path):
+        # Сгенерированный .opus пересоздаётся на каждом запуске — удаляем всегда.
+        try:
+            if local_audio_path.exists():
+                local_audio_path.unlink()
+        except OSError:
+            pass
+        # Загруженный исходник нельзя перекачать. Если задача будет повторена
+        # (_maybe_retry вызывается уже после этого finally), сохраняем файл —
+        # иначе повтор мгновенно падает с «Файл не найден».
+        proj = projects_db.get(project_id)
+        will_retry = (
+            proj is not None
+            and proj.get("status") == ProjectStatusEnum.ERROR
+            and proj.get("retry_count", 0) < MAX_RETRIES
+        )
+        if not will_retry:
             try:
-                if path.exists():
-                    path.unlink()
+                if local_video_path.exists():
+                    local_video_path.unlink()
             except OSError:
                 pass
 
