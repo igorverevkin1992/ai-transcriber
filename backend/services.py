@@ -459,6 +459,25 @@ def _normalize_speaker_id(raw: str) -> str:
     return m.group(1) if m else raw
 
 
+def _set_transcription_option(options, name: str, value):
+    """Вернуть копию опций транскрипции с изменённым полем.
+
+    В новых версиях faster-whisper `TranscriptionOptions` стал dataclass
+    (нет метода `_replace`, как у NamedTuple). Поддерживаем оба варианта,
+    а также прямую мутацию как последний фолбэк.
+    """
+    if hasattr(options, "_replace"):  # NamedTuple (старые версии)
+        return options._replace(**{name: value})
+    import dataclasses
+    if dataclasses.is_dataclass(options):  # dataclass (новые версии)
+        try:
+            return dataclasses.replace(options, **{name: value})
+        except (TypeError, ValueError):
+            pass
+    setattr(options, name, value)  # обычный объект / frozen-фолбэк
+    return options
+
+
 def _transcribe_with_whisperx(
     project_id: str,
     file_path,
@@ -493,7 +512,9 @@ def _transcribe_with_whisperx(
             )
             _whisperx_model_name = model_name
         if initial_prompt and hasattr(_whisperx_model, "options"):
-            _whisperx_model.options = _whisperx_model.options._replace(initial_prompt=initial_prompt)
+            _whisperx_model.options = _set_transcription_option(
+                _whisperx_model.options, "initial_prompt", initial_prompt
+            )
         audio = whisperx.load_audio(str(file_path))
         result = _whisperx_model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
     logger.info("[%s] WhisperX: транскрипция завершена, %d сегментов", project_id[:8], len(result["segments"]))

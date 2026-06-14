@@ -151,11 +151,14 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
   // Phase 1: Preload Whisper model (if needed), then upload files to server
   // Skip entirely in recovery mode — files already uploaded, go straight to polling
   const uploadStartedRef = useRef(false);
+  const cancelledRef = useRef(false);
   useEffect(() => {
     if (isRecovery) return;
+    // Reset BEFORE the run-once guard so React 18 StrictMode's double mount
+    // (mount → cleanup → mount) doesn't leave the live upload run cancelled.
+    cancelledRef.current = false;
     if (uploadStartedRef.current) return;
     uploadStartedRef.current = true;
-    let cancelled = false;
 
     const uploadAll = async () => {
       const queue = [...files];
@@ -174,13 +177,13 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
           setState('done');
           return;
         }
-        if (cancelled) return;
+        if (cancelledRef.current) return;
       }
 
       addLog(`Начинаем загрузку ${queue.length} файлов на сервер...`);
 
       const uploadOne = async (index: number) => {
-        if (cancelled) return;
+        if (cancelledRef.current) return;
         const file = queue[index];
         setCurrentUploadName(file.name);
         addLog(`Загрузка: ${file.name} (${formatSize(file.size)})`);
@@ -193,7 +196,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
           addLog(`✗ Ошибка загрузки: ${file.name} — ${e.message}`);
         }
         doneCount++;
-        if (!cancelled) {
+        if (!cancelledRef.current) {
           setTrackers([...updated]);
           setUploadedCount(doneCount);
         }
@@ -201,7 +204,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
 
       // Upload in batches of CONCURRENT_UPLOADS
       for (let i = 0; i < queue.length; i += CONCURRENT_UPLOADS) {
-        if (cancelled) break;
+        if (cancelledRef.current) break;
         const batch = [];
         for (let j = i; j < Math.min(i + CONCURRENT_UPLOADS, queue.length); j++) {
           batch.push(uploadOne(j));
@@ -209,7 +212,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         await Promise.all(batch);
       }
 
-      if (!cancelled) {
+      if (!cancelledRef.current) {
         setTrackers([...updated]);
         setCurrentUploadName('');
         addLog(`Все файлы загружены на сервер. Начинается обработка...`);
@@ -223,7 +226,7 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
     };
 
     uploadAll();
-    return () => { cancelled = true; };
+    return () => { cancelledRef.current = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Phase 2: Poll for processing status
