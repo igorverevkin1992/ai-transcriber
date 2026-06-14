@@ -498,7 +498,10 @@ def _transcribe_with_whisperx(
             )
             _whisperx_model_name = model_name
         if initial_prompt and hasattr(_whisperx_model, "options"):
-            _whisperx_model.options = _whisperx_model.options._replace(initial_prompt=initial_prompt)
+            import copy
+            new_opts = copy.copy(_whisperx_model.options)
+            new_opts.initial_prompt = initial_prompt
+            _whisperx_model.options = new_opts
         audio = whisperx.load_audio(str(file_path))
         result = _whisperx_model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
     logger.info("[%s] WhisperX: транскрипция завершена, %d сегментов", project_id[:8], len(result["segments"]))
