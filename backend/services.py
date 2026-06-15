@@ -90,6 +90,12 @@ GRPC_CHUNK_SIZE = 4000  # 4 KB chunks for streaming audio
 GRPC_TIMEOUT = 7200  # 2 hours max for recognition
 
 # --- WhisperX (transcription + diarization) / faster-whisper fallback ---
+# Xet — новый backend загрузки HuggingFace — нестабилен за прокси и часто
+# падает с "CAS service error". Переключаемся на классическую загрузку до
+# импорта huggingface_hub (он читает эти переменные при импорте). setdefault
+# позволяет переопределить значения снаружи при необходимости.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 try:
     import whisperx
     WHISPERX_AVAILABLE = True
