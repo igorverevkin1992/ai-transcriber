@@ -484,6 +484,34 @@ def _set_transcription_option(options, name: str, value):
     return options
 
 
+def _get_diarization_pipeline_cls():
+    """Вернуть класс DiarizationPipeline.
+
+    В whisperx >= 3.2 он переехал из корня пакета (`whisperx.DiarizationPipeline`)
+    в подмодуль `whisperx.diarize`. Поддерживаем оба расположения.
+    """
+    cls = getattr(whisperx, "DiarizationPipeline", None)
+    if cls is not None:
+        return cls
+    try:
+        from whisperx.diarize import DiarizationPipeline
+        return DiarizationPipeline
+    except ImportError as e:
+        raise RuntimeError(
+            "Не удалось найти DiarizationPipeline в whisperx — "
+            "несовместимая версия пакета"
+        ) from e
+
+
+def _get_assign_word_speakers():
+    """Вернуть функцию assign_word_speakers (корень или whisperx.diarize)."""
+    fn = getattr(whisperx, "assign_word_speakers", None)
+    if fn is not None:
+        return fn
+    from whisperx.diarize import assign_word_speakers
+    return assign_word_speakers
+
+
 def _transcribe_with_whisperx(
     project_id: str,
     file_path,
@@ -544,7 +572,8 @@ def _transcribe_with_whisperx(
                 logger.warning("[%s] HF_TOKEN не задан — диаризация недоступна, все сегменты = speaker 0", project_id[:8])
             else:
                 logger.info("[%s] Загрузка diarization pipeline...", project_id[:8])
-                _whisperx_diarize_pipeline = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
+                _diarize_cls = _get_diarization_pipeline_cls()
+                _whisperx_diarize_pipeline = _diarize_cls(use_auth_token=hf_token, device=device)
 
     if _whisperx_diarize_pipeline is not None:
         diarize_kwargs = {}
@@ -557,7 +586,7 @@ def _transcribe_with_whisperx(
                 logger.info("[%s] Диаризация: хинт %d-%d спикеров из имени файла",
                             project_id[:8], num_speakers, num_speakers + 1)
         diarize_segments = _whisperx_diarize_pipeline(audio, **diarize_kwargs)
-        result = whisperx.assign_word_speakers(diarize_segments, result)
+        result = _get_assign_word_speakers()(diarize_segments, result)
         logger.info("[%s] WhisperX: диаризация завершена", project_id[:8])
 
     segments = []
