@@ -184,9 +184,16 @@ const App: React.FC = () => {
                 </p>
                 <div className="flex gap-3 mt-4">
                   <button
-                    onClick={() => {
+                    onClick={async () => {
                       setBatchEngine(recoveredSession.engine as EngineType);
                       setBatchWhisperModel(recoveredSession.whisperModel as WhisperModel);
+                      const results = await Promise.allSettled(
+                        recoveredSession.projectIds.map(id => api.resumeProject(id))
+                      );
+                      const failed = results.filter(r => r.status === 'rejected').length;
+                      if (failed > 0) {
+                        addToast('error', `Не удалось возобновить ${failed} из ${recoveredSession.projectIds.length} файлов`);
+                      }
                       setStatus('BATCH_PROCESSING');
                     }}
                     className="px-5 py-2.5 text-sm text-white bg-amber-600 hover:bg-amber-700 rounded-lg font-medium transition-colors"

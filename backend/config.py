@@ -115,6 +115,10 @@ MAX_CONCURRENT_TASKS = _auto_detect_concurrent_tasks()
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".mov", ".mxf", ".mp4", ".wmv", ".avi", ".mkv", ".ogg", ".flac"}
 ALLOWED_URL_HOSTS = {"yadi.sk", "disk.yandex.ru", "disk.yandex.com"}
 
+# При старте автоматически возобновлять прерванные задачи (true) или только
+# помечать их как прерванные, оставляя ручной запуск через кнопку «Продолжить» (false).
+AUTO_RECOVER_ON_STARTUP = os.getenv("AUTO_RECOVER_ON_STARTUP", "false").lower() in ("1", "true", "yes")
+
 # --- CORS ---
 SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "projects.db")
 

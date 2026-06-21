@@ -1115,6 +1115,39 @@ def cancel_project(project_id: str) -> bool:
     return True
 
 
+def resume_project(project_id: str) -> tuple[bool, str]:
+    """Вручную возобновить прерванную задачу.
+
+    Возвращает (ok, message). ok=False, если проект не найден, не может быть
+    восстановлен (нет сохранённой задачи) или исходный файл уже отсутствует.
+    """
+    proj = projects_db.get(project_id)
+    if not proj:
+        return False, "Проект не найден"
+
+    task_func_name = proj.get("task_func")
+    task_args = proj.get("task_args")
+    if not task_func_name or task_func_name not in _TASK_REGISTRY or not task_args:
+        return False, "Задача не может быть восстановлена (нет сохранённых параметров)"
+
+    # Для загруженных файлов проверяем, что исходник ещё на диске.
+    if task_func_name == "process_uploaded_file_task" and len(task_args) >= 2:
+        src = Path(task_args[1])
+        if not src.exists():
+            return False, "Исходный файл отсутствует — загрузите его заново"
+
+    func = _TASK_REGISTRY[task_func_name]
+    task_kwargs = proj.get("task_kwargs", {})
+
+    projects_db.update_field(project_id, "retry_count", 0, persist=True)
+    projects_db.update_field(project_id, "error", None)
+    projects_db.update_status(project_id, ProjectStatusEnum.QUEUED)
+
+    submit_task(func, *task_args, project_id=project_id, **task_kwargs)
+    logger.info("[%s] Задача возобновлена вручную", project_id[:8])
+    return True, "Задача возобновлена"
+
+
 def shutdown_executor():
     """Graceful shutdown: persist in-flight projects, then stop executor."""
     logger.info("Завершение фоновых задач...")

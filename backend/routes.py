@@ -35,6 +35,7 @@ from backend.services import (
     process_uploaded_file_task,
     process_video_task,
     projects_db,
+    resume_project,
     submit_task,
 )
 from backend.utils import sanitize_filename, validate_file_extension, validate_url
@@ -113,6 +114,17 @@ async def delete_project(pid: str):
     if not cancel_project(pid):
         raise HTTPException(status_code=404, detail="Проект не найден")
     return {"status": "deleted", "id": pid}
+
+
+@router.post("/projects/{pid}/resume")
+@limiter.limit("30/minute")
+async def resume_project_endpoint(request: Request, pid: str):
+    """Вручную возобновляет прерванную задачу (после рестарта сервера)."""
+    ok, message = resume_project(pid)
+    if not ok:
+        status_code = 404 if message == "Проект не найден" else 400
+        raise HTTPException(status_code=status_code, detail=message)
+    return {"status": "resumed", "id": pid, "message": message}
 
 
 @router.post("/projects/{pid}/export")

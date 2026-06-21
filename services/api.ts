@@ -215,6 +215,17 @@ export const api = {
     return await parseJson<BatchStatus>(response);
   },
 
+  resumeProject: async (projectId: string): Promise<void> => {
+    const response = await fetch(`${API_BASE_URL}/projects/${projectId}/resume`, {
+      method: 'POST',
+      headers: authHeaders(),
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.detail || 'Не удалось возобновить обработку');
+    }
+  },
+
   preloadWhisperModel: async (model: string = 'medium'): Promise<void> => {
     const formData = new FormData();
     formData.append('model', model);

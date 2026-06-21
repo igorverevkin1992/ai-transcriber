@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.auth import ApiKeyMiddleware
-from backend.config import API_KEY, CORS_ORIGINS, OUTPUT_DIR, SQLITE_DB_PATH, TEMP_DIR, YANDEX_API_KEY, logger
+from backend.config import API_KEY, AUTO_RECOVER_ON_STARTUP, CORS_ORIGINS, OUTPUT_DIR, SQLITE_DB_PATH, TEMP_DIR, YANDEX_API_KEY, logger
 from backend.metrics import CONTENT_TYPE_LATEST, generate_latest
 from backend.models import HealthResponse, ProjectStatusEnum
 from backend.routes import router
@@ -68,30 +68,51 @@ def _cleanup_old_docx():
 
 
 def _recover_inflight_projects():
-    """Mark projects that were in-flight at shutdown and schedule retries."""
+    """Обработать задачи, прерванные рестартом сервера.
+
+    AUTO_RECOVER_ON_STARTUP=true — автоматически пере-отправить их в очередь.
+    AUTO_RECOVER_ON_STARTUP=false (по умолчанию) — только пометить как
+    прерванные, сохранив task_func/task_args, чтобы пользователь мог запустить
+    продолжение вручную (эндпоинт /projects/{pid}/resume).
+    """
     in_flight_statuses = (
         ProjectStatusEnum.DOWNLOADING,
         ProjectStatusEnum.CONVERTING,
         ProjectStatusEnum.TRANSCRIBING,
     )
     recovered = 0
+    interrupted = 0
     for pid, proj in projects_db.items():
         status = proj.get("status")
-        if status in in_flight_statuses or status == ProjectStatusEnum.QUEUED:
-            task_func_name = proj.get("task_func")
-            task_args = proj.get("task_args")
-            if task_func_name and task_func_name in _TASK_REGISTRY and task_args:
-                func = _TASK_REGISTRY[task_func_name]
-                task_kwargs = proj.get("task_kwargs", {})
-                projects_db.update_status(pid, ProjectStatusEnum.QUEUED)
-                submit_task(func, *task_args, project_id=pid, **task_kwargs)
-                recovered += 1
-                logger.info("[%s] Восстановлен из '%s' → QUEUED", pid[:8], status.value if hasattr(status, "value") else status)
-            else:
-                projects_db.update_status(pid, ProjectStatusEnum.ERROR,
-                                          error="Сервер перезапущен, задача не может быть восстановлена")
+        if status not in in_flight_statuses and status != ProjectStatusEnum.QUEUED:
+            continue
+
+        task_func_name = proj.get("task_func")
+        task_args = proj.get("task_args")
+        resumable = bool(task_func_name and task_func_name in _TASK_REGISTRY and task_args)
+
+        if not resumable:
+            projects_db.update_status(pid, ProjectStatusEnum.ERROR,
+                                      error="Сервер перезапущен, задача не может быть восстановлена")
+            continue
+
+        if AUTO_RECOVER_ON_STARTUP:
+            func = _TASK_REGISTRY[task_func_name]
+            task_kwargs = proj.get("task_kwargs", {})
+            projects_db.update_status(pid, ProjectStatusEnum.QUEUED)
+            submit_task(func, *task_args, project_id=pid, **task_kwargs)
+            recovered += 1
+            logger.info("[%s] Восстановлен из '%s' → QUEUED", pid[:8], status.value if hasattr(status, "value") else status)
+        else:
+            # Не запускаем — оставляем task_args для ручного возобновления.
+            projects_db.update_status(pid, ProjectStatusEnum.ERROR,
+                                      error="Прервано перезапуском сервера. Нажмите «Продолжить» для возобновления.")
+            interrupted += 1
+
     if recovered:
         logger.info("Восстановлено %d задач после рестарта", recovered)
+    if interrupted:
+        logger.info("Авто-восстановление отключено: %d задач помечено как прерванные", interrupted)
 
 
 async def _periodic_cleanup():
