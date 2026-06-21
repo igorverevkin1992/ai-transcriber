@@ -1,3 +1,4 @@
+import inspect
 import os
 import re
 import shutil
@@ -517,6 +518,27 @@ def _get_assign_word_speakers():
     return assign_word_speakers
 
 
+def _make_diarize_pipeline(cls, hf_token, device):
+    """Создать DiarizationPipeline, подобрав имя аргумента для HF-токена.
+
+    В разных версиях whisperx конструктор принимает токен под именем
+    `use_auth_token` (старые) либо `token` (новые, >= 3.4). Определяем по
+    сигнатуре, с запасным перебором обоих вариантов.
+    """
+    try:
+        params = inspect.signature(cls.__init__).parameters
+    except (ValueError, TypeError):
+        params = {}
+    if "token" in params:
+        return cls(token=hf_token, device=device)
+    if "use_auth_token" in params:
+        return cls(use_auth_token=hf_token, device=device)
+    try:
+        return cls(token=hf_token, device=device)
+    except TypeError:
+        return cls(use_auth_token=hf_token, device=device)
+
+
 def _transcribe_with_whisperx(
     project_id: str,
     file_path,
@@ -586,7 +608,7 @@ def _transcribe_with_whisperx(
                 try:
                     logger.info("[%s] Загрузка diarization pipeline...", project_id[:8])
                     _diarize_cls = _get_diarization_pipeline_cls()
-                    _whisperx_diarize_pipeline = _diarize_cls(use_auth_token=hf_token, device=device)
+                    _whisperx_diarize_pipeline = _make_diarize_pipeline(_diarize_cls, hf_token, device)
                 except Exception as e:
                     if STRICT_DIARIZATION:
                         raise RuntimeError(

@@ -188,6 +188,33 @@ class TestBuildWhisperPrompt:
         assert result[1]["timecode"] == "00:00:05:00"
 
 
+class TestMakeDiarizePipeline:
+    """Конструктор DiarizationPipeline переименовал use_auth_token -> token
+    между версиями whisperx; помощник должен подобрать правильный аргумент."""
+
+    def test_uses_token_kwarg(self):
+        captured = {}
+
+        class FakePipeline:
+            def __init__(self, model_name=None, token=None, device="cpu"):
+                captured["token"] = token
+                captured["device"] = device
+
+        services._make_diarize_pipeline(FakePipeline, "hf_abc", "cpu")
+        assert captured == {"token": "hf_abc", "device": "cpu"}
+
+    def test_uses_use_auth_token_kwarg(self):
+        captured = {}
+
+        class FakePipeline:
+            def __init__(self, model_name=None, use_auth_token=None, device="cpu"):
+                captured["use_auth_token"] = use_auth_token
+                captured["device"] = device
+
+        services._make_diarize_pipeline(FakePipeline, "hf_xyz", "cpu")
+        assert captured == {"use_auth_token": "hf_xyz", "device": "cpu"}
+
+
 class TestProcessVideoTask:
     def test_runs_postprocessing(self, fresh_store, monkeypatch):
         """Регрессия: SpeechKit-путь (Яндекс.Диск) должен прогонять постобработку."""
