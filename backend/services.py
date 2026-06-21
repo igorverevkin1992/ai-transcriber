@@ -119,6 +119,11 @@ _whisper_model_name = None
 _whisper_lock = threading.Lock()
 _whisperx_model = None
 _whisperx_model_name = None
+_whisperx_model_device = None
+# CTranslate2 (faster-whisper) использует собственный CUDA-рантайм, отдельный от
+# PyTorch. На некоторых драйверах он падает с "invalid device ordinal", хотя
+# torch.cuda работает. Запоминаем это, чтобы дальше сразу транскрибировать на CPU.
+_whisperx_ct2_cuda_broken = False
 _whisperx_align_model = None
 _whisperx_align_meta = None
 _whisperx_diarize_pipeline = None
@@ -548,6 +553,34 @@ def _make_diarize_pipeline(cls, hf_token, device):
         return cls(use_auth_token=hf_token, **kwargs)
 
 
+def _is_cuda_error(exc) -> bool:
+    """Похоже ли исключение на сбой CUDA/CTranslate2 (а не на обычную ошибку)."""
+    msg = str(exc).lower()
+    return any(s in msg for s in (
+        "cuda", "invalid device ordinal", "cublas", "cudnn", "device ordinal",
+    ))
+
+
+def _load_whisperx_model(project_id: str, model_name: str, dev: str, initial_prompt):
+    """Загрузить (с кэшированием по имени и device) модель whisperx и применить prompt."""
+    global _whisperx_model, _whisperx_model_name, _whisperx_model_device
+    compute_type = "float16" if dev == "cuda" else "int8"
+    if (_whisperx_model is None or _whisperx_model_name != model_name
+            or _whisperx_model_device != dev):
+        logger.info("[%s] Загрузка WhisperX модели '%s' (device: %s)...",
+                    project_id[:8], model_name, dev)
+        _whisperx_model = whisperx.load_model(
+            model_name, dev, compute_type=compute_type, language="ru",
+        )
+        _whisperx_model_name = model_name
+        _whisperx_model_device = dev
+    if initial_prompt and hasattr(_whisperx_model, "options"):
+        _whisperx_model.options = _set_transcription_option(
+            _whisperx_model.options, "initial_prompt", initial_prompt
+        )
+    return _whisperx_model
+
+
 def _transcribe_with_whisperx(
     project_id: str,
     file_path,
@@ -559,7 +592,7 @@ def _transcribe_with_whisperx(
 
     Возвращает сегменты с channel_tag = speaker label (нормализованный: "0", "1", ...).
     """
-    global _whisperx_model, _whisperx_model_name
+    global _whisperx_model, _whisperx_model_name, _whisperx_ct2_cuda_broken
     global _whisperx_align_model, _whisperx_align_meta, _whisperx_diarize_pipeline
 
     file_path = Path(file_path)
@@ -573,20 +606,29 @@ def _transcribe_with_whisperx(
     logger.info("[%s] WhisperX: файл %s (%d МБ, модель: %s, device: %s)...",
                 project_id[:8], file_path.name, file_size_mb, model_name, device)
 
-    compute_type = "float16" if device == "cuda" else "int8"
+    # Транскрипция (CTranslate2). Если CUDA-рантайм CTranslate2 уже ломался —
+    # сразу на CPU. Иначе пробуем GPU и при CUDA-сбое откатываемся на CPU
+    # (alignment и диаризация на torch остаются на GPU).
+    transcribe_device = "cpu" if _whisperx_ct2_cuda_broken else device
     with _whisper_lock:
-        if _whisperx_model is None or _whisperx_model_name != model_name:
-            logger.info("[%s] Загрузка WhisperX модели '%s'...", project_id[:8], model_name)
-            _whisperx_model = whisperx.load_model(
-                model_name, device, compute_type=compute_type, language="ru",
-            )
-            _whisperx_model_name = model_name
-        if initial_prompt and hasattr(_whisperx_model, "options"):
-            _whisperx_model.options = _set_transcription_option(
-                _whisperx_model.options, "initial_prompt", initial_prompt
-            )
         audio = whisperx.load_audio(str(file_path))
-        result = _whisperx_model.transcribe(audio, batch_size=16 if device == "cuda" else 4, language="ru")
+        model = _load_whisperx_model(project_id, model_name, transcribe_device, initial_prompt)
+        try:
+            result = model.transcribe(
+                audio, batch_size=16 if transcribe_device == "cuda" else 4, language="ru",
+            )
+        except RuntimeError as e:
+            if transcribe_device == "cuda" and _is_cuda_error(e):
+                logger.warning(
+                    "[%s] CTranslate2 не смог использовать CUDA (%s) — "
+                    "транскрипция переключена на CPU (диаризация останется на GPU)",
+                    project_id[:8], e,
+                )
+                _whisperx_ct2_cuda_broken = True
+                model = _load_whisperx_model(project_id, model_name, "cpu", initial_prompt)
+                result = model.transcribe(audio, batch_size=4, language="ru")
+            else:
+                raise
     logger.info("[%s] WhisperX: транскрипция завершена, %d сегментов", project_id[:8], len(result["segments"]))
 
     with _whisper_lock:

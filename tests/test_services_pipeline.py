@@ -241,6 +241,20 @@ class TestMakeDiarizePipeline:
         assert captured == {"use_auth_token": "hf_old", "device": "cpu"}
 
 
+class TestIsCudaError:
+    """Детектор CUDA-сбоев для отката транскрипции на CPU."""
+
+    def test_invalid_device_ordinal(self):
+        exc = RuntimeError("parallel_for failed: cudaErrorInvalidDevice: invalid device ordinal")
+        assert services._is_cuda_error(exc)
+
+    def test_cudnn_error(self):
+        assert services._is_cuda_error(RuntimeError("Could not load library cudnn_ops64_9.dll"))
+
+    def test_unrelated_error_not_matched(self):
+        assert not services._is_cuda_error(RuntimeError("Файл не найден"))
+
+
 class TestProcessVideoTask:
     def test_runs_postprocessing(self, fresh_store, monkeypatch):
         """Регрессия: SpeechKit-путь (Яндекс.Диск) должен прогонять постобработку."""
