@@ -44,6 +44,12 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Gemini API for text post-process
 # получать один-спикерный черновик.
 STRICT_DIARIZATION = os.getenv("STRICT_DIARIZATION", "true").lower() in ("1", "true", "yes")
 
+# Модель диаризации pyannote. Новые версии whisperx по умолчанию тянут
+# gated-модель `pyannote/speaker-diarization-community-1`, для которой нужно
+# отдельно принять условия. По умолчанию закрепляем проверенную `3.1`
+# (её условия обычно уже приняты). Переопределите, если приняли community-1.
+DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
+
 # --- Paths ---
 TEMP_DIR = Path("temp_files")
 TEMP_DIR.mkdir(exist_ok=True)

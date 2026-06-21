@@ -51,6 +51,7 @@ docker compose --profile dev up   # dev: separate Vite dev server
 - `TURN_INLINE_TC_SECONDS` / `TECH_BREAK_GAP_SECONDS` — inline timecode interval / tech-break gap (60 / 30)
 - `WHISPER_BEAM_SIZE` / `WHISPER_INITIAL_PROMPT` — ASR accuracy tuning
 - `STRICT_DIARIZATION` — fail the task with an actionable error when diarization can't run (no HF_TOKEN / pyannote load fails) instead of silently emitting a single-speaker draft (default: true)
+- `DIARIZATION_MODEL` — pyannote diarization model passed to whisperx (default: `pyannote/speaker-diarization-3.1`). Newer whisperx otherwise defaults to the gated `pyannote/speaker-diarization-community-1`, which needs separate terms acceptance; accept terms for whichever model is set under the same account as `HF_TOKEN`
 - `TRANSCRIPT_GLOSSARY` — comma-separated correct spellings (names, terms, titles) injected into the Whisper prompt and Gemini correction prompt, e.g. `Мордюкова, Гурченко, Мосфильм, star quality, НТВ`
 - `SPEECHKIT_LITERATURE_TEXT` — SpeechKit literary mode (default: false, better for interviews)
 - `GEMINI_MODEL` — Gemini model for text polishing (default: gemini-2.0-flash)

@@ -190,29 +190,55 @@ class TestBuildWhisperPrompt:
 
 class TestMakeDiarizePipeline:
     """Конструктор DiarizationPipeline переименовал use_auth_token -> token
-    между версиями whisperx; помощник должен подобрать правильный аргумент."""
+    между версиями whisperx; помощник должен подобрать правильный аргумент и
+    закрепить модель диаризации (DIARIZATION_MODEL)."""
 
-    def test_uses_token_kwarg(self):
+    def test_uses_token_kwarg(self, monkeypatch):
+        monkeypatch.setattr(services, "DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
         captured = {}
 
         class FakePipeline:
             def __init__(self, model_name=None, token=None, device="cpu"):
+                captured["model_name"] = model_name
                 captured["token"] = token
                 captured["device"] = device
 
         services._make_diarize_pipeline(FakePipeline, "hf_abc", "cpu")
-        assert captured == {"token": "hf_abc", "device": "cpu"}
+        assert captured == {
+            "model_name": "pyannote/speaker-diarization-3.1",
+            "token": "hf_abc",
+            "device": "cpu",
+        }
 
-    def test_uses_use_auth_token_kwarg(self):
+    def test_uses_use_auth_token_kwarg(self, monkeypatch):
+        monkeypatch.setattr(services, "DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
         captured = {}
 
         class FakePipeline:
             def __init__(self, model_name=None, use_auth_token=None, device="cpu"):
+                captured["model_name"] = model_name
                 captured["use_auth_token"] = use_auth_token
                 captured["device"] = device
 
         services._make_diarize_pipeline(FakePipeline, "hf_xyz", "cpu")
-        assert captured == {"use_auth_token": "hf_xyz", "device": "cpu"}
+        assert captured == {
+            "model_name": "pyannote/speaker-diarization-3.1",
+            "use_auth_token": "hf_xyz",
+            "device": "cpu",
+        }
+
+    def test_no_model_name_param(self, monkeypatch):
+        """Старый конструктор без model_name — модель не навязываем."""
+        monkeypatch.setattr(services, "DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
+        captured = {}
+
+        class FakePipeline:
+            def __init__(self, use_auth_token=None, device="cpu"):
+                captured["use_auth_token"] = use_auth_token
+                captured["device"] = device
+
+        services._make_diarize_pipeline(FakePipeline, "hf_old", "cpu")
+        assert captured == {"use_auth_token": "hf_old", "device": "cpu"}
 
 
 class TestProcessVideoTask:

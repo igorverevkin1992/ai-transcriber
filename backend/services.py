@@ -12,6 +12,7 @@ import grpc
 import requests
 
 from backend.config import (
+    DIARIZATION_MODEL,
     HALLUCINATION_BLACKLIST,
     HF_TOKEN,
     MAX_CONCURRENT_TASKS,
@@ -519,24 +520,32 @@ def _get_assign_word_speakers():
 
 
 def _make_diarize_pipeline(cls, hf_token, device):
-    """Создать DiarizationPipeline, подобрав имя аргумента для HF-токена.
+    """Создать DiarizationPipeline, подобрав имя аргумента для HF-токена и
+    закрепив модель диаризации.
 
     В разных версиях whisperx конструктор принимает токен под именем
-    `use_auth_token` (старые) либо `token` (новые, >= 3.4). Определяем по
-    сигнатуре, с запасным перебором обоих вариантов.
+    `use_auth_token` (старые) либо `token` (новые, >= 3.4). Кроме того, новые
+    версии по умолчанию тянут `speaker-diarization-community-1`, поэтому явно
+    задаём `DIARIZATION_MODEL` (по умолчанию `3.1`). Определяем имена аргументов
+    по сигнатуре, с запасным перебором обоих вариантов токена.
     """
     try:
         params = inspect.signature(cls.__init__).parameters
     except (ValueError, TypeError):
         params = {}
+
+    kwargs = {"device": device}
+    if "model_name" in params:
+        kwargs["model_name"] = DIARIZATION_MODEL
+
     if "token" in params:
-        return cls(token=hf_token, device=device)
+        return cls(token=hf_token, **kwargs)
     if "use_auth_token" in params:
-        return cls(use_auth_token=hf_token, device=device)
+        return cls(use_auth_token=hf_token, **kwargs)
     try:
-        return cls(token=hf_token, device=device)
+        return cls(token=hf_token, **kwargs)
     except TypeError:
-        return cls(use_auth_token=hf_token, device=device)
+        return cls(use_auth_token=hf_token, **kwargs)
 
 
 def _transcribe_with_whisperx(
