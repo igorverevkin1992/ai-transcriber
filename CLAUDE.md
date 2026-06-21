@@ -50,6 +50,8 @@ docker compose --profile dev up   # dev: separate Vite dev server
 - `TURN_MERGE_ENABLED` — merge same-speaker segments into turn paragraphs (default: true)
 - `TURN_INLINE_TC_SECONDS` / `TECH_BREAK_GAP_SECONDS` — inline timecode interval / tech-break gap (60 / 30)
 - `WHISPER_BEAM_SIZE` / `WHISPER_INITIAL_PROMPT` — ASR accuracy tuning
+- `STRICT_DIARIZATION` — fail the task with an actionable error when diarization can't run (no HF_TOKEN / pyannote load fails) instead of silently emitting a single-speaker draft (default: true)
+- `TRANSCRIPT_GLOSSARY` — comma-separated correct spellings (names, terms, titles) injected into the Whisper prompt and Gemini correction prompt, e.g. `Мордюкова, Гурченко, Мосфильм, star quality, НТВ`
 - `SPEECHKIT_LITERATURE_TEXT` — SpeechKit literary mode (default: false, better for interviews)
 - `GEMINI_MODEL` — Gemini model for text polishing (default: gemini-2.0-flash)
 - `DOCX_AUTHOR` — dc:creator / lastModifiedBy in generated DOCX (default: empty)
@@ -69,3 +71,4 @@ npx tsc --noEmit --skipLibCheck       # TS type check
 - `ThreadPoolExecutor(max_workers=N)` queues tasks; `submit_task()` auto-retries on failure.
 - On server restart, `_recover_inflight_projects()` resubmits QUEUED/in-flight tasks from SQLite.
 - Frontend saves batch projectIds to localStorage; on reload shows "Resume / Discard" banner.
+- **Filename convention** (`parse_filename_metadata`): encode guest names and start timecode in the filename, e.g. `Кравченко_Артемьева_Нилов_04.41.18.00_f21.wmv`. Names become diarization speaker-count hints, speaker-name suggestions, and Whisper-prompt context; the `HH.MM.SS.FF` token sets the start timecode (needed for `.wmv`, which carries no embedded SMPTE track). Per-turn timecodes and `(Технические моменты)` markers are emitted automatically once diarization separates speakers.

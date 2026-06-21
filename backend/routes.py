@@ -420,6 +420,7 @@ async def batch_verification_data(ids: str = Query(..., description="ID прое
             "speakers": speaker_list,
             "preview_segments": preview,
             "total_segments": len(segments),
+            "warnings": result.get("warnings", []),
         })
 
     return {"projects": results}

@@ -30,6 +30,7 @@ interface ProjectVerificationData {
   speakers: SpeakerVerification[];
   preview_segments: Segment[];
   total_segments: number;
+  warnings?: string[];
 }
 
 interface BatchVerificationResponse {

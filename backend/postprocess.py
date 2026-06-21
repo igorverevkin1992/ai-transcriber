@@ -2,7 +2,7 @@ import re
 import threading
 import time
 
-from backend.config import GEMINI_API_KEY, GEMINI_MODEL, logger
+from backend.config import GEMINI_API_KEY, GEMINI_MODEL, TRANSCRIPT_GLOSSARY, logger
 from backend.metrics import gemini_calls
 from backend.turns import UNCLEAR_TEXT
 
@@ -169,14 +169,23 @@ def gemini_polish(text: str) -> str:
     if _gemini_model is None:
         return text
 
+    glossary_rule = ""
+    if TRANSCRIPT_GLOSSARY:
+        glossary_rule = (
+            f"\nГлоссарий правильных написаний (имена, термины, названия) — "
+            f"приводи распознанные варианты к ним: {TRANSCRIPT_GLOSSARY}.\n"
+        )
+
     prompt = (
         "Ты — корректор ДОСЛОВНОЙ стенограммы телеинтервью на русском языке.\n"
+        f"{glossary_rule}"
         "Правила:\n"
         "1. НЕ удаляй и НЕ добавляй слова. Разговорные «ну», «вот», «как бы», "
         "«типа», «короче», «значит», «хм» — часть стенограммы, сохраняй их. "
         "Нечленораздельные звуки уже удалены до тебя.\n"
         "2. Исправляй явные ошибки распознавания по контексту, особенно имена "
-        "собственные: «масс-фильм» → «Мосфильм».\n"
+        "собственные: «масс-фильм» → «Мосфильм». Иностранные термины пиши "
+        "латиницей, если так принято: «старкволити» → «star quality».\n"
         "3. Имена собственные пиши с заглавной буквы.\n"
         "4. Названия (фильмы, песни, театры, каналы) бери в кавычки-ёлочки «».\n"
         "5. Знаки препинания расставляй по смыслу. Тире — с пробелами: "

@@ -86,6 +86,55 @@ class TestProcessRecognitionResult:
         )
         assert store["p4"]["result"]["low_confidence_diarization"] is True
 
+    def test_single_speaker_adds_warning(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("pw1", {"id": "pw1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        services._process_recognition_result(
+            "pw1", [_seg("0", "Один голос.", 0, 1000)], "file.mp4", Path("/nope.mp4")
+        )
+        warnings = store["pw1"]["result"]["warnings"]
+        assert any("1 говорящий" in w for w in warnings)
+
+    def test_missing_start_tc_adds_warning(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("pw2", {"id": "pw2", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        # filename without TC -> start 00:00:00:00 -> warning
+        services._process_recognition_result(
+            "pw2", [_seg("0", "Текст.", 0, 1000), _seg("1", "Ответ.", 1000, 2000)],
+            "file.mp4", Path("/nope.mp4"),
+        )
+        warnings = store["pw2"]["result"]["warnings"]
+        assert any("таймкод" in w.lower() for w in warnings)
+
+    def test_start_tc_from_filename_no_warning(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("pw3", {"id": "pw3", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        services._process_recognition_result(
+            "pw3", [_seg("0", "Текст.", 0, 1000), _seg("1", "Ответ.", 1000, 2000)],
+            "Иванов_Петров_04.41.18.00_f21.mp4", Path("/nope.mp4"),
+        )
+        result = store["pw3"]["result"]
+        assert result["segments"][0]["timecode"].startswith("04:41:18")
+        assert not any("таймкод" in w.lower() for w in result["warnings"])
+
+
+class TestBuildWhisperPrompt:
+    def test_base_prompt_only(self, monkeypatch):
+        monkeypatch.setattr(services, "TRANSCRIPT_GLOSSARY", "")
+        # date + file-code only -> no speaker names extracted
+        prompt = services._build_whisper_prompt("09.06.2026_f21.mp4")
+        assert prompt == services.WHISPER_INITIAL_PROMPT
+
+    def test_names_from_filename(self, monkeypatch):
+        monkeypatch.setattr(services, "TRANSCRIPT_GLOSSARY", "")
+        prompt = services._build_whisper_prompt("Иванов_Петров.mp4")
+        assert "Участники: Иванов, Петров." in prompt
+
+    def test_glossary_injected(self, monkeypatch):
+        monkeypatch.setattr(services, "TRANSCRIPT_GLOSSARY", "Мордюкова, star quality")
+        prompt = services._build_whisper_prompt("09.06.2026_f21.mp4")
+        assert "Мордюкова, star quality" in prompt
+
     def test_merges_same_speaker_turns(self, fresh_store):
         store, _, _ = fresh_store
         store.create("pm1", {"id": "pm1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})

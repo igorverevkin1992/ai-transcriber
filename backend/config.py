@@ -38,6 +38,11 @@ YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 API_KEY = os.getenv("API_KEY")  # if set, X-API-Key header required on /api/* requests
 HF_TOKEN = os.getenv("HF_TOKEN")  # HuggingFace token for pyannote diarization models
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Gemini API for text post-processing
+# Строгая диаризация: если пайплайн не может запуститься (нет HF_TOKEN или
+# pyannote не загрузился), задача завершается с понятной ошибкой вместо
+# молчаливого «весь текст у одного спикера». Отключите (false), чтобы всё же
+# получать один-спикерный черновик.
+STRICT_DIARIZATION = os.getenv("STRICT_DIARIZATION", "true").lower() in ("1", "true", "yes")
 
 # --- Paths ---
 TEMP_DIR = Path("temp_files")
@@ -59,6 +64,11 @@ WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 # Подсказка декодеру: контекст и стиль; имена спикеров из имени файла
 # добавляются автоматически (см. services._build_whisper_prompt)
 WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "Интервью на русском языке.")
+# Глоссарий правильных написаний (имена, термины, названия), через запятую.
+# Подмешивается в initial_prompt Whisper и в промпт Gemini, чтобы снизить
+# ошибки в редких именах собственных и иностранных терминах.
+# Пример: "Мордюкова, Гурченко, Мосфильм, star quality, НТВ"
+TRANSCRIPT_GLOSSARY = os.getenv("TRANSCRIPT_GLOSSARY", "").strip()
 
 # --- ASR anti-hallucination ---
 # Известные Whisper-галлюцинации на музыке/тишине (подстрочный поиск,

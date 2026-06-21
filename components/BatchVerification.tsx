@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { CheckCircle2, Download, Edit3, ChevronDown, ChevronUp, ArrowLeft, ChevronsUpDown } from 'lucide-react';
+import { CheckCircle2, Download, Edit3, ChevronDown, ChevronUp, ArrowLeft, ChevronsUpDown, AlertTriangle } from 'lucide-react';
 import { api } from '../services/api';
 import { downloadBlob } from '../services/download';
 
@@ -16,6 +16,7 @@ interface ProjectVerification {
   speakers: SpeakerData[];
   preview_segments: Array<{ timecode: string; speaker: string; text: string }>;
   total_segments: number;
+  warnings?: string[];
 }
 
 interface Props {
@@ -235,6 +236,17 @@ export const BatchVerification: React.FC<Props> = ({ projectIds, onDone, onError
                 }
               </div>
             </button>
+
+            {proj.warnings && proj.warnings.length > 0 && (
+              <div className="border-t border-amber-200 bg-amber-50 px-5 py-3">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                  <ul className="text-xs text-amber-800 space-y-1">
+                    {proj.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                  </ul>
+                </div>
+              </div>
+            )}
 
             {expandedIds.has(proj.project_id) && (
               <div id={`panel-${proj.project_id}`} role="region" aria-label={`Спикеры: ${proj.filename}`} className="border-t border-gray-100 px-5 py-4">

@@ -19,8 +19,10 @@ from backend.config import (
     OUTPUT_DIR,
     SPEECHKIT_LITERATURE_TEXT,
     SQLITE_DB_PATH,
+    STRICT_DIARIZATION,
     TECH_BREAK_GAP_SECONDS,
     TEMP_DIR,
+    TRANSCRIPT_GLOSSARY,
     TURN_INLINE_TC_SECONDS,
     TURN_MERGE_ENABLED,
     UNCLEAR_LOGPROB_THRESHOLD,
@@ -402,15 +404,18 @@ def get_whisper_model(model_name: str = "medium"):
 
 
 def _build_whisper_prompt(original_filename: str) -> str:
-    """initial_prompt для Whisper: базовая подсказка + имена из имени файла.
+    """initial_prompt для Whisper: базовая подсказка + имена из имени файла + глоссарий.
 
     Подсказка задаёт декодеру контекст (язык, жанр, имена собственные),
     что снижает ошибки в редких именах и улучшает пунктуацию.
     """
+    prompt = WHISPER_INITIAL_PROMPT
     names = parse_filename_metadata(original_filename).get("speakers") or []
     if names:
-        return f"{WHISPER_INITIAL_PROMPT} Участники: {', '.join(names)}."
-    return WHISPER_INITIAL_PROMPT
+        prompt += f" Участники: {', '.join(names)}."
+    if TRANSCRIPT_GLOSSARY:
+        prompt += f" Словарь имён и терминов: {TRANSCRIPT_GLOSSARY}."
+    return prompt
 
 
 _WHISPERX_SPEAKER_RE = re.compile(r"^SPEAKER_0*(\d+)$")
@@ -569,11 +574,26 @@ def _transcribe_with_whisperx(
         if _whisperx_diarize_pipeline is None:
             hf_token = HF_TOKEN
             if not hf_token:
+                if STRICT_DIARIZATION:
+                    raise RuntimeError(
+                        "Диаризация не выполнена: не задан HF_TOKEN. Задайте HF_TOKEN "
+                        "и примите условия моделей pyannote на HuggingFace "
+                        "(pyannote/speaker-diarization-3.1, pyannote/segmentation-3.0), "
+                        "либо отключите STRICT_DIARIZATION=false для черновика без разметки спикеров."
+                    )
                 logger.warning("[%s] HF_TOKEN не задан — диаризация недоступна, все сегменты = speaker 0", project_id[:8])
             else:
-                logger.info("[%s] Загрузка diarization pipeline...", project_id[:8])
-                _diarize_cls = _get_diarization_pipeline_cls()
-                _whisperx_diarize_pipeline = _diarize_cls(use_auth_token=hf_token, device=device)
+                try:
+                    logger.info("[%s] Загрузка diarization pipeline...", project_id[:8])
+                    _diarize_cls = _get_diarization_pipeline_cls()
+                    _whisperx_diarize_pipeline = _diarize_cls(use_auth_token=hf_token, device=device)
+                except Exception as e:
+                    if STRICT_DIARIZATION:
+                        raise RuntimeError(
+                            f"Не удалось загрузить пайплайн диаризации: {e}. Проверьте HF_TOKEN "
+                            "и принятые условия моделей pyannote, либо отключите STRICT_DIARIZATION=false."
+                        ) from e
+                    logger.warning("[%s] Диаризация недоступна (%s) — все сегменты = speaker 0", project_id[:8], e)
 
     if _whisperx_diarize_pipeline is not None:
         diarize_kwargs = {}
@@ -585,9 +605,14 @@ def _transcribe_with_whisperx(
                 diarize_kwargs["max_speakers"] = num_speakers + 1
                 logger.info("[%s] Диаризация: хинт %d-%d спикеров из имени файла",
                             project_id[:8], num_speakers, num_speakers + 1)
-        diarize_segments = _whisperx_diarize_pipeline(audio, **diarize_kwargs)
-        result = _get_assign_word_speakers()(diarize_segments, result)
-        logger.info("[%s] WhisperX: диаризация завершена", project_id[:8])
+        try:
+            diarize_segments = _whisperx_diarize_pipeline(audio, **diarize_kwargs)
+            result = _get_assign_word_speakers()(diarize_segments, result)
+            logger.info("[%s] WhisperX: диаризация завершена", project_id[:8])
+        except Exception as e:
+            if STRICT_DIARIZATION:
+                raise RuntimeError(f"Ошибка диаризации: {e}") from e
+            logger.warning("[%s] Диаризация завершилась ошибкой (%s) — все сегменты = speaker 0", project_id[:8], e)
 
     segments = []
     last_speaker = "0"
@@ -797,16 +822,20 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     speaker_count = len(detected_speakers)
     diarization_speakers.observe(speaker_count)
     low_confidence = speaker_count < 2 or speaker_count > 8
+    warnings: list[str] = []
     if speaker_count == 1:
-        logger.warning(
-            "[%s] Обнаружен только 1 спикер — возможно диаризация не сработала (проверьте HF_TOKEN)",
-            project_id[:8],
-        )
+        msg = ("Обнаружен только 1 говорящий — возможно, диаризация не разделила "
+               "реплики (проверьте HF_TOKEN и условия моделей pyannote).")
+        warnings.append(msg)
+        logger.warning("[%s] %s", project_id[:8], msg)
     elif low_confidence:
-        logger.warning(
-            "[%s] Подозрительное число спикеров (%d) — рекомендуется ручная проверка",
-            project_id[:8], speaker_count,
-        )
+        msg = f"Подозрительное число говорящих ({speaker_count}) — рекомендуется ручная проверка."
+        warnings.append(msg)
+        logger.warning("[%s] %s", project_id[:8], msg)
+
+    if meta["start_tc"] == "00:00:00:00":
+        warnings.append("Стартовый таймкод не найден — отсчёт с 00:00:00:00. "
+                        "Укажите TC в имени файла (например, …_04.41.18.00_…).")
 
     projects_db.set_result(
         project_id,
@@ -815,6 +844,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             "speakers": detected_speakers,
             "meta": {**meta, "original_filename": original_filename},
             "low_confidence_diarization": low_confidence,
+            "warnings": warnings,
         },
         fps=fps,
     )
