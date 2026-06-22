@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import warnings
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -32,6 +33,40 @@ else:
 
 logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 logger = logging.getLogger("abtgs")
+
+# --- Подавление безвредного «шума» сторонних библиотек ---
+# Все эти предупреждения косметические: пайплайн Whisper + диаризация работает
+# штатно. Глушим точечно (по тексту/источнику), чтобы НЕ прятать реальные ошибки.
+
+# pyannote жалуется, что torchcodec не загрузился (на Windows не находит FFmpeg-
+# DLL). WhisperX отдаёт аудио в pyannote уже декодированным в памяти, поэтому
+# torchcodec не нужен — диаризация идёт как обычно.
+warnings.filterwarnings("ignore", message=r"\s*torchcodec is not installed correctly")
+# pyannote отключает TF32 ради воспроизводимости — ожидаемо, на результат не влияет.
+warnings.filterwarnings("ignore", message=r"\s*TensorFloat-32 \(TF32\) has been disabled")
+
+# Однострочные INFO/WARNING сторонних библиотек, проходящие через наш хендлер.
+_SUPPRESSED_LOG_SUBSTRINGS = (
+    "Skipping import of cpp extensions",  # torchao: версия torch несовместима (не используем)
+    "Lightning automatically upgraded your loaded checkpoint",  # авто-миграция чекпойнта pyannote
+    "Redirects are currently not supported",  # torch на Windows/macOS
+)
+
+
+class _ThirdPartyNoiseFilter(logging.Filter):
+    """Глушит известные безвредные строки логов сторонних библиотек."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(s in msg for s in _SUPPRESSED_LOG_SUBSTRINGS)
+
+
+_handler.addFilter(_ThirdPartyNoiseFilter())
+
+# Этот логгер держит собственный хендлер (свой формат «W0622 …»), фильтр выше его
+# не ловит — глушим по уровню. (Lightning тоже свой; его уровень поднимается в
+# services.py уже ПОСЛЕ импорта whisperx, иначе настройку перетрёт сам Lightning.)
+logging.getLogger("torch.distributed.elastic.multiprocessing.redirects").setLevel(logging.ERROR)
 
 # --- API Keys ---
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")

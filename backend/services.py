@@ -1,4 +1,5 @@
 import inspect
+import logging
 import os
 import re
 import shutil
@@ -111,6 +112,12 @@ try:
 except ImportError:
     whisperx = None
     WHISPERX_AVAILABLE = False
+
+# Lightning перенастраивает свой логгер при импорте whisperx, поэтому его
+# INFO-баннеры (авто-апгрейд чекпойнта pyannote) глушим здесь — уже после импорта.
+# Настоящие предупреждения и ошибки Lightning остаются видимыми.
+for _lname in ("lightning.pytorch", "pytorch_lightning"):
+    logging.getLogger(_lname).setLevel(logging.WARNING)
 
 try:
     from faster_whisper import WhisperModel
