@@ -195,6 +195,26 @@ class TestFinalization:
         out = _build([_ev("0", "мы поехали в", 0, 2), _ev("0", "Москву.", 3, 5)])
         assert out[0]["text"] == "Мы поехали в Москву."
 
+    def test_mid_sentence_join_lowercases_function_word(self):
+        # ASR капитализирует начало каждого сегмента; при склейке в середине
+        # фразы ложная заглавная у служебного слова снимается.
+        out = _build([
+            _ev("0", "переносить зрителя", 0, 2),
+            _ev("0", "И заставляли верить.", 3, 5),
+        ])
+        assert out[0]["text"] == "Переносить зрителя и заставляли верить."
+
+    def test_mid_sentence_join_preserves_proper_noun(self):
+        out = _build([
+            _ev("0", "кумиров не было, потому что", 0, 2),
+            _ev("0", "Нонна Мордюкова и Гурченко.", 3, 5),
+        ])
+        assert out[0]["text"] == "Кумиров не было, потому что Нонна Мордюкова и Гурченко."
+
+    def test_mid_sentence_join_preserves_polite_vy(self):
+        out = _build([_ev("0", "я думаю, что", 0, 2), _ev("0", "Вы правы.", 3, 5)])
+        assert out[0]["text"] == "Я думаю, что Вы правы."
+
     def test_whitespace_only_events_produce_no_turns(self):
         out = _build([_ev("0", " ", 0, 2), _ev("0", "  ", 3, 5)])
         assert out == []
