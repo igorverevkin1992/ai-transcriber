@@ -56,7 +56,7 @@ docker compose --profile dev up   # dev: separate Vite dev server
 - `GLOSSARY_REPLACEMENTS` — deterministic `wrong=>right` pairs (comma-separated) applied **always** in `regex_cleanup`, independent of Gemini, so known recognition errors of rare names/terms are fixed even if Gemini is off/fails. Single words match on word boundaries; phrases tolerate variable whitespace; case-insensitive. e.g. `Мурдюкова=>Мордюкова,Горченко=>Гурченко,прияды=>плеяда,просто квашено=>Простоквашино`
 - `INTERVIEWER_AUTODETECT` / `INTERVIEWER_LABEL` — auto-detect the off-camera interviewer (the speaker who alternates with every guest) and label it `АЗК`, excluding it from the speaker legend (default: true / `АЗК`). Tuning: `INTERVIEWER_LABEL_SINGLE_GUEST` (label the interviewer in 1-on-1 interviews too, default false), `INTERVIEWER_MIN_DISTINCT_GUESTS` (2), `INTERVIEWER_MAJORITY_RATIO` (0.5). When detected, filename guest names map to the remaining speakers by order of first appearance (not by duration). Logic lives in `backend/diarization_post.py`.
 - `SPEECHKIT_LITERATURE_TEXT` — SpeechKit literary mode (default: false, better for interviews)
-- `GEMINI_MODEL` — Gemini model for text polishing (default: gemini-2.0-flash)
+- `GEMINI_MODEL` — Gemini model for text polishing (default: gemini-3.5-flash)
 - `DOCX_AUTHOR` — dc:creator / lastModifiedBy in generated DOCX (default: empty)
 - `DOCX_TEMPLATE_PATH` — reference-derived DOCX template the generator builds on (default: `backend/transcript_template.docx`; regenerate via `python scripts/make_template.py`)
 - `HALLUCINATION_BLACKLIST` — Whisper hallucination phrases to drop (replaces builtin list)
