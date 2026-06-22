@@ -135,6 +135,42 @@ class TestBuildWhisperPrompt:
         prompt = services._build_whisper_prompt("09.06.2026_f21.mp4")
         assert "Мордюкова, star quality" in prompt
 
+    def test_autodetect_interviewer_and_name_mapping(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("azk1", {"id": "azk1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        # speaker "0" = interviewer alternating with guests 1, 2, 3 (3 interviews)
+        segs = [
+            _seg("0", "Вопрос раз.", 0, 1000),
+            _seg("1", "Ответ.", 1000, 3000),
+            _seg("0", "Вопрос два.", 3000, 4000),
+            _seg("1", "Ещё ответ.", 4000, 6000),
+            _seg("0", "Вопрос три.", 6000, 7000),
+            _seg("2", "Ответ гостя два.", 7000, 9000),
+            _seg("0", "Вопрос четыре.", 9000, 10000),
+            _seg("2", "Снова ответ.", 10000, 12000),
+            _seg("0", "Вопрос пять.", 12000, 13000),
+            _seg("3", "Ответ гостя три.", 13000, 15000),
+            _seg("0", "Вопрос шесть.", 15000, 16000),
+            _seg("3", "Финал.", 16000, 18000),
+        ]
+        services._process_recognition_result(
+            "azk1", segs, "Кравченко_Артемьева_Нилов_f21.mp4", Path("/nope.mp4")
+        )
+        speakers = store["azk1"]["result"]["speakers"]
+        assert speakers["0"]["suggested_name"] == "АЗК"
+        assert speakers["1"]["suggested_name"] == "Кравченко"
+        assert speakers["2"]["suggested_name"] == "Артемьева"
+        assert speakers["3"]["suggested_name"] == "Нилов"
+
+    def test_extra_warnings_propagate_to_result(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("w1", {"id": "w1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        segs = [_seg("0", "Привет.", 0, 1000), _seg("1", "Здравствуйте.", 1500, 2500)]
+        services._process_recognition_result(
+            "w1", segs, "file.mp4", Path("/nope.mp4"), extra_warnings=["тестовое предупреждение"]
+        )
+        assert "тестовое предупреждение" in store["w1"]["result"]["warnings"]
+
     def test_merges_same_speaker_turns(self, fresh_store):
         store, _, _ = fresh_store
         store.create("pm1", {"id": "pm1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
@@ -270,7 +306,7 @@ class TestProcessVideoTask:
 
         import backend.postprocess as pp
 
-        def fake_postprocess(segments, use_gemini=True):
+        def fake_postprocess(segments, use_gemini=True, warnings=None):
             calls["postprocess"] = True
             return segments
 

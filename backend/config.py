@@ -76,6 +76,23 @@ WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "Интервью �
 # Пример: "Мордюкова, Гурченко, Мосфильм, star quality, НТВ"
 TRANSCRIPT_GLOSSARY = os.getenv("TRANSCRIPT_GLOSSARY", "").strip()
 
+# Детерминированные замены "неверно=>верно" (пары через запятую, разделитель
+# внутри пары — "=>"). Применяются ВСЕГДА в regex_cleanup, независимо от Gemini,
+# поэтому гарантированно чинят известные ошибки распознавания редких имён/терминов.
+# Пример: "Мурдюкова=>Мордюкова,Горченко=>Гурченко,прияды=>плеяда,просто квашено=>Простоквашино"
+GLOSSARY_REPLACEMENTS = os.getenv("GLOSSARY_REPLACEMENTS", "").strip()
+
+# --- Автоопределение интервьюера (АЗК) ---
+# Интервьюер за кадром чередуется со всеми гостями; помечаем его меткой АЗК и
+# исключаем из легенды (см. docx_export.is_legend_excluded_name).
+INTERVIEWER_AUTODETECT = os.getenv("INTERVIEWER_AUTODETECT", "true").lower() in ("1", "true", "yes")
+INTERVIEWER_LABEL = os.getenv("INTERVIEWER_LABEL", "АЗК")
+# В интервью «один на один» (2 спикера) однозначно определить интервьюера нельзя.
+# По умолчанию не помечаем, чтобы не ошибиться.
+INTERVIEWER_LABEL_SINGLE_GUEST = os.getenv("INTERVIEWER_LABEL_SINGLE_GUEST", "false").lower() in ("1", "true", "yes")
+INTERVIEWER_MIN_DISTINCT_GUESTS = int(os.getenv("INTERVIEWER_MIN_DISTINCT_GUESTS", "2"))
+INTERVIEWER_MAJORITY_RATIO = float(os.getenv("INTERVIEWER_MAJORITY_RATIO", "0.5"))
+
 # --- ASR anti-hallucination ---
 # Известные Whisper-галлюцинации на музыке/тишине (подстрочный поиск,
 # регистронезависимо, только для коротких сегментов). Env заменяет список.

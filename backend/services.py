@@ -15,6 +15,11 @@ from backend.config import (
     DIARIZATION_MODEL,
     HALLUCINATION_BLACKLIST,
     HF_TOKEN,
+    INTERVIEWER_AUTODETECT,
+    INTERVIEWER_LABEL,
+    INTERVIEWER_LABEL_SINGLE_GUEST,
+    INTERVIEWER_MAJORITY_RATIO,
+    INTERVIEWER_MIN_DISTINCT_GUESTS,
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
     NO_SPEECH_PROB_THRESHOLD,
@@ -809,7 +814,8 @@ def _transcribe_with_whisper(
     return segments
 
 
-def _process_recognition_result(project_id: str, segments: list[dict], original_filename: str, video_path):
+def _process_recognition_result(project_id: str, segments: list[dict], original_filename: str, video_path,
+                                extra_warnings: list[str] | None = None):
     """Обрабатывает результат распознавания v3 и сохраняет в projects_db."""
     meta = parse_filename_metadata(original_filename)
     projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
@@ -872,20 +878,46 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             for ev in events
         ]
 
+    from backend.diarization_post import (
+        build_speaker_sequence,
+        detect_interviewer,
+        first_appearance_order,
+    )
+
     detected_speakers = {}
-    sorted_voices = sorted(speaker_durations.items(), key=lambda x: x[1], reverse=True)
     file_names = meta["speakers"]
 
-    if file_names and len(file_names) != len(sorted_voices):
-        logger.warning(
-            "[%s] Несовпадение: %d имён в файле, %d голосов обнаружено — маппинг может быть неточным",
-            project_id[:8], len(file_names), len(sorted_voices),
+    # Автоопределение интервьюера (АЗК): он чередуется со всеми гостями.
+    interviewer_id = None
+    if INTERVIEWER_AUTODETECT and len(speaker_durations) >= 2:
+        sequence = build_speaker_sequence(events)
+        interviewer_id = detect_interviewer(
+            sequence, speaker_durations,
+            min_distinct_guests=INTERVIEWER_MIN_DISTINCT_GUESTS,
+            majority_ratio=INTERVIEWER_MAJORITY_RATIO,
+            label_single_guest=INTERVIEWER_LABEL_SINGLE_GUEST,
         )
+        if interviewer_id is not None:
+            logger.info("[%s] Интервьюер определён автоматически: %s → %s",
+                        project_id[:8], interviewer_id, INTERVIEWER_LABEL)
 
-    for i, (voice_id, dur) in enumerate(sorted_voices):
-        suggested = f"Спикер {int(voice_id) + 1}" if voice_id.isdigit() else f"Спикер {voice_id}"
-        if i < len(file_names):
-            suggested = file_names[i]
+    # Имена из файла назначаем ГОСТЯМ по порядку появления (интервьюер исключён).
+    guest_order = [s for s in first_appearance_order(events) if s != interviewer_id]
+    expected_guests = len(speaker_durations) - (1 if interviewer_id is not None else 0)
+    if file_names and len(file_names) != expected_guests:
+        logger.warning(
+            "[%s] Несовпадение: %d имён в файле, %d гостей обнаружено — маппинг может быть неточным",
+            project_id[:8], len(file_names), expected_guests,
+        )
+    guest_names = {voice_id: file_names[i] for i, voice_id in enumerate(guest_order) if i < len(file_names)}
+
+    for voice_id, dur in speaker_durations.items():
+        if voice_id == interviewer_id:
+            suggested = INTERVIEWER_LABEL
+        elif voice_id in guest_names:
+            suggested = guest_names[voice_id]
+        else:
+            suggested = f"Спикер {int(voice_id) + 1}" if voice_id.isdigit() else f"Спикер {voice_id}"
 
         detected_speakers[voice_id] = {
             "duration_sec": round(dur, 1),
@@ -896,6 +928,8 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     diarization_speakers.observe(speaker_count)
     low_confidence = speaker_count < 2 or speaker_count > 8
     warnings: list[str] = []
+    if extra_warnings:
+        warnings.extend(extra_warnings)
     if speaker_count == 1:
         msg = ("Обнаружен только 1 говорящий — возможно, диаризация не разделила "
                "реплики (проверьте HF_TOKEN и условия моделей pyannote).")
@@ -971,10 +1005,12 @@ def process_video_task(project_id: str, disk_url: str):
         # 4. ПОСТОБРАБОТКА ТЕКСТА
         from backend.postprocess import postprocess_segments
         logger.info("[%s] Постобработка текста...", project_id[:8])
-        segments = postprocess_segments(segments)
+        pp_warnings: list[str] = []
+        segments = postprocess_segments(segments, warnings=pp_warnings)
 
         # 5. ОБРАБОТКА РЕЗУЛЬТАТА
-        _process_recognition_result(project_id, segments, original_filename, local_video_path)
+        _process_recognition_result(project_id, segments, original_filename, local_video_path,
+                                    extra_warnings=pp_warnings)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
         transcribe_duration.labels(engine="speechkit").observe(time.time() - task_start)
 
@@ -1047,9 +1083,11 @@ def process_uploaded_file_task(
 
         from backend.postprocess import postprocess_segments
         logger.info("[%s] Постобработка текста...", project_id[:8])
-        segments = postprocess_segments(segments)
+        pp_warnings: list[str] = []
+        segments = postprocess_segments(segments, warnings=pp_warnings)
 
-        _process_recognition_result(project_id, segments, original_filename, local_video_path)
+        _process_recognition_result(project_id, segments, original_filename, local_video_path,
+                                    extra_warnings=pp_warnings)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
         transcribe_duration.labels(engine=engine).observe(time.time() - task_start)
         logger.info("[%s] Файл обработан: %s", project_id[:8], original_filename)

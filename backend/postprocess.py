@@ -2,9 +2,54 @@ import re
 import threading
 import time
 
-from backend.config import GEMINI_API_KEY, GEMINI_MODEL, TRANSCRIPT_GLOSSARY, logger
+from backend.config import (
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    GLOSSARY_REPLACEMENTS,
+    TRANSCRIPT_GLOSSARY,
+    logger,
+)
 from backend.metrics import gemini_calls
 from backend.turns import UNCLEAR_TEXT
+
+
+class GeminiPolishError(Exception):
+    """Окончательный сбой Gemini-полировки (после всех ретраев)."""
+
+
+def _parse_glossary_replacements(raw: str) -> list[tuple[re.Pattern, str]]:
+    """Разбирает "неверно=>верно,..." в список (скомпилированный regex, замена).
+
+    Для одиночных слов используются границы слова; внутри фраз пробелы матчат
+    любой пробельный разрыв. Совпадение регистронезависимо.
+    """
+    pairs: list[tuple[re.Pattern, str]] = []
+    for chunk in raw.split(","):
+        if "=>" not in chunk:
+            continue
+        wrong, _, right = chunk.partition("=>")
+        wrong = wrong.strip()
+        right = right.strip()
+        if not wrong or not right:
+            continue
+        escaped = re.escape(wrong).replace(r"\ ", r"\s+")
+        pattern = re.compile(rf"\b{escaped}\b", re.IGNORECASE)
+        pairs.append((pattern, right))
+    return pairs
+
+
+GLOSSARY_REPLACEMENT_PAIRS = _parse_glossary_replacements(GLOSSARY_REPLACEMENTS)
+
+
+def apply_glossary_replacements(text: str) -> str:
+    """Детерминированные замены из GLOSSARY_REPLACEMENT_PAIRS.
+
+    Замена (правильное написание имени собственного) подставляется как задано —
+    регистр считается авторитетным, потому что это имена/термины.
+    """
+    for pattern, replacement in GLOSSARY_REPLACEMENT_PAIRS:
+        text = pattern.sub(replacement, text)
+    return text
 
 # «что -то» → «что-то»: пробел ПЕРЕД дефисом, но не после.
 # Пробелы с обеих сторон — это тире, его обрабатывает DASH_RE ниже.
@@ -94,6 +139,7 @@ def regex_cleanup(text: str) -> str:
     с середины предложения, а заглавную букву реплике ставит
     backend.turns при склейке.
     """
+    text = apply_glossary_replacements(text)
     text = HYPHEN_SPACE_RE.sub(r"\1-\2", text)
     text = _expand_abbreviations(text)
     text = FILLER_WORDS_RE.sub("", text)
@@ -230,15 +276,21 @@ def gemini_polish(text: str) -> str:
                 continue
             gemini_calls.labels(outcome="error").inc()
             logger.warning("Gemini API окончательная ошибка: %s", e)
-            break
+            raise GeminiPolishError(str(e)) from e
 
     return text
 
 
-def postprocess_segments(segments: list[dict], use_gemini: bool = True) -> list[dict]:
+def postprocess_segments(
+    segments: list[dict],
+    use_gemini: bool = True,
+    warnings: list[str] | None = None,
+) -> list[dict]:
     """Постобработка сегментов: regex-чистка + опционально Gemini-полировка.
 
     Батчит сегменты для Gemini (~5000 символов за раз) для экономии API-вызовов.
+    Если передан ``warnings``, при сбоях Gemini туда добавляется предупреждение
+    (текст остаётся без AI-коррекции, но glossary/regex уже применены).
     """
     if not segments:
         return segments
@@ -281,8 +333,13 @@ def postprocess_segments(segments: list[dict], use_gemini: bool = True) -> list[
         batch_texts.append(current_batch)
         batch_indices.append(current_indices)
 
+    failed_batches = 0
     for batch_text, indices in zip(batch_texts, batch_indices):
-        polished = gemini_polish(batch_text)
+        try:
+            polished = gemini_polish(batch_text)
+        except GeminiPolishError:
+            failed_batches += 1
+            continue  # текст остаётся без AI-коррекции
         parts = polished.split("---SEGMENT_BREAK---")
         parts = [p.strip() for p in parts]
 
@@ -293,6 +350,18 @@ def postprocess_segments(segments: list[dict], use_gemini: bool = True) -> list[
         else:
             # batch didn't split cleanly — polish individually
             for idx in indices:
-                segments[idx]["text"] = gemini_polish(segments[idx]["text"])
+                try:
+                    polished_text = gemini_polish(segments[idx]["text"])
+                except GeminiPolishError:
+                    failed_batches += 1
+                    break
+                if polished_text:
+                    segments[idx]["text"] = polished_text
+
+    if warnings is not None and failed_batches > 0:
+        warnings.append(
+            f"Gemini-полировка не выполнена для {failed_batches} фрагментов — "
+            "возможны ошибки в именах собственных и пунктуации."
+        )
 
     return segments

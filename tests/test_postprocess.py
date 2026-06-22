@@ -278,3 +278,55 @@ class TestAbbreviationCapitalization:
 
     def test_abbreviation_expansion_keeps_acronym_after(self):
         assert regex_cleanup("и т.д. МХАТ продолжил") == "и так далее МХАТ продолжил"
+
+
+class TestGlossaryReplacements:
+    def test_word_replacement(self, monkeypatch):
+        import backend.postprocess as pp
+        pairs = pp._parse_glossary_replacements(
+            "Мурдюкова=>Мордюкова,Горченко=>Гурченко,прияды=>плеяда"
+        )
+        monkeypatch.setattr(pp, "GLOSSARY_REPLACEMENT_PAIRS", pairs)
+        assert pp.apply_glossary_replacements("люблю Мурдюкова и Горченко") == "люблю Мордюкова и Гурченко"
+        assert pp.apply_glossary_replacements("огромные прияды") == "огромные плеяда"
+
+    def test_phrase_replacement_tolerates_whitespace(self, monkeypatch):
+        import backend.postprocess as pp
+        pairs = pp._parse_glossary_replacements("просто квашено=>Простоквашино")
+        monkeypatch.setattr(pp, "GLOSSARY_REPLACEMENT_PAIRS", pairs)
+        assert pp.apply_glossary_replacements("это просто  квашено сегодня") == "это Простоквашино сегодня"
+
+    def test_case_insensitive_match(self, monkeypatch):
+        import backend.postprocess as pp
+        pairs = pp._parse_glossary_replacements("старполити=>star quality")
+        monkeypatch.setattr(pp, "GLOSSARY_REPLACEMENT_PAIRS", pairs)
+        assert pp.apply_glossary_replacements("назвать Старполити") == "назвать star quality"
+
+    def test_malformed_entries_skipped(self):
+        import backend.postprocess as pp
+        pairs = pp._parse_glossary_replacements("badentry,a=>b,=>x,y=>")
+        assert len(pairs) == 1
+
+    def test_runs_in_regex_cleanup_without_gemini(self, monkeypatch):
+        import backend.postprocess as pp
+        pairs = pp._parse_glossary_replacements("Мурдюкова=>Мордюкова")
+        monkeypatch.setattr(pp, "GLOSSARY_REPLACEMENT_PAIRS", pairs)
+        monkeypatch.setattr(pp, "GEMINI_API_KEY", "")
+        out = postprocess_segments([{"text": "вот Мурдюкова", "words": []}], use_gemini=False)
+        assert out[0]["text"] == "вот Мордюкова"
+
+
+class TestGeminiFailureWarning:
+    def test_failure_emits_warning_and_keeps_text(self, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "GEMINI_API_KEY", "fake-key")
+        monkeypatch.setattr(pp, "GLOSSARY_REPLACEMENT_PAIRS", [])
+
+        def boom(text):
+            raise pp.GeminiPolishError("rate limit")
+
+        monkeypatch.setattr(pp, "gemini_polish", boom)
+        warnings = []
+        out = postprocess_segments([{"text": "привет", "words": []}], warnings=warnings)
+        assert out[0]["text"] == "привет"
+        assert any("Gemini" in w for w in warnings)
