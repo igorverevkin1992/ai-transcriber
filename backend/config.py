@@ -161,9 +161,9 @@ TECH_MOMENT_DETECTION = os.getenv("TECH_MOMENT_DETECTION", "true").lower() in ("
 # попытаться распознать выжженный в кадр SMPTE-таймкод (easyocr). default: true.
 OCR_TIMECODE = os.getenv("OCR_TIMECODE", "true").lower() in ("1", "true", "yes")
 # Область кадра с таймкодом, доли 0-1: "left,top,right,bottom". По умолчанию —
-# правый нижний угол (ТК вещательных лент обычно там): ускоряет OCR и отсекает
-# посторонний текст. Пустая строка → искать по всему кадру.
-OCR_TIMECODE_REGION = os.getenv("OCR_TIMECODE_REGION", "0.55,0.82,1.0,1.0")
+# нижняя полоса от центра до правого края (широкий бокс ТК обычно там): ускоряет
+# OCR и отсекает посторонний текст. Пустая строка → искать по всему кадру.
+OCR_TIMECODE_REGION = os.getenv("OCR_TIMECODE_REGION", "0.3,0.7,1.0,1.0")
 
 # --- DOCX metadata ---
 DOCX_AUTHOR = os.getenv("DOCX_AUTHOR", "")

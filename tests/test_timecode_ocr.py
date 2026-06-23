@@ -46,7 +46,7 @@ class TestParseStartTimecodeFromOcr:
 
 class TestParseRegion:
     def test_valid(self):
-        assert _parse_region("0.55,0.82,1.0,1.0") == (0.55, 0.82, 1.0, 1.0)
+        assert _parse_region("0.3,0.7,1.0,1.0") == (0.3, 0.7, 1.0, 1.0)
 
     def test_empty_or_none(self):
         assert _parse_region("") is None
