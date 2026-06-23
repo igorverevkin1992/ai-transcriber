@@ -76,13 +76,27 @@ class TestInferSpeakerNamesByVocative:
         res = infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1"])
         assert res == {"1": "Олег Александрович"}
 
-    def test_below_threshold_not_named(self):
-        # Одно обращение (<2) → консервативно не именуем.
+    def test_single_direct_address_names(self):
+        # Одного ПРЯМОГО обращения (с запятой) достаточно.
         segs = [
             self._seg("0", "Олег Александрович, расскажите."),
             self._seg("1", "Да."),
         ]
-        assert infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1"]) == {}
+        res = infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1"])
+        assert res == {"1": "Олег Александрович"}
+
+    def test_third_person_mention_not_counted(self):
+        # «…а Галина Васильевна как опытный тренер нас рассудит» — упоминание в
+        # 3-м лице (без запятой-обращения): к гостю (2), который отвечает, имя
+        # ошибочно НЕ приписывается. А прямое обращение к ней — приписывается.
+        segs = [
+            self._seg("0", "Сыграем, а Галина Васильевна как тренер нас рассудит."),
+            self._seg("1", "Давайте."),  # активный гость продолжает
+            self._seg("0", "Галина Васильевна, оцените игру."),
+            self._seg("2", "Мне понравилось."),
+        ]
+        res = infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1", "2"])
+        assert res == {"2": "Галина Васильевна"}
 
     def test_mention_not_misattributed(self):
         # Гость (1) упоминает «Галина Васильевна»; следующий — интервьюер (0),

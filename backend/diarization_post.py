@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 
 # Имя + отчество в именительном падеже: «Олег Александрович», «Галина Васильевна».
 # Отчество — слово с патронимическим суффиксом. Падежные формы упоминаний
@@ -14,15 +15,28 @@ import re
 # естественно отсекает упоминания третьих лиц от обращений.
 _PATRONYMIC = r"(?:ович|евич|инична|ична|евна|овна|ьич|ич)"
 _VOCATIVE_RE = re.compile(
-    rf"\b([А-ЯЁ][а-яё]+)\s+([А-ЯЁ][а-яё]*{_PATRONYMIC})\b"
+    rf"\b([А-ЯЁ][а-яё]+)\s+([А-ЯЁ][а-яё]*{_PATRONYMIC})"
 )
+_SENTENCE_END = ".?!…"
 
 
 def _find_vocatives(text: str) -> list[str]:
-    """Все обращения вида «Имя Отчество» в тексте (без дублей, порядок сохранён)."""
+    """Прямые обращения «Имя Отчество», выделенные запятой (без дублей, по порядку).
+
+    Обращение опознаём по запятой сразу ПОСЛЕ отчества («Олег Александрович, …»)
+    или по запятой перед именем и концу предложения после («…, как играл, Олег
+    Александрович?»). Это отсекает упоминания третьих лиц в 3-м лице («…а Галина
+    Васильевна как опытный тренер нас рассудит»), из-за которых имя уходило не
+    тому спикеру.
+    """
     seen: list[str] = []
     seen_set: set[str] = set()
     for m in _VOCATIVE_RE.finditer(text):
+        after = text[m.end():].lstrip()[:1]
+        before = text[:m.start()].rstrip()[-1:]
+        is_address = after == "," or (before == "," and after in _SENTENCE_END)
+        if not is_address:
+            continue
         name = f"{m.group(1)} {m.group(2)}"
         if name not in seen_set:
             seen_set.add(name)
@@ -38,10 +52,11 @@ def infer_speaker_names_by_vocative(
 ) -> dict[str, str]:
     """Определить имя-отчество гостей по обращениям в диалоге (детерминированно).
 
-    Если в реплике звучит обращение «Имя Отчество», имя засчитывается
-    СЛЕДУЮЩЕМУ говорящему-гостю (тому, кто отвечает на обращение). Имя
-    присваивается спикеру при ≥2 совпадениях — это отсекает разовые упоминания.
-    Консервативно: при неуверенности спикер остаётся без имени.
+    Если в реплике звучит ПРЯМОЕ обращение «Имя Отчество, …», имя засчитывается
+    СЛЕДУЮЩЕМУ говорящему-гостю (тому, кто отвечает на обращение). Достаточно
+    одного такого обращения; но если одно и то же имя оказывается главным сразу
+    у нескольких спикеров (неоднозначность), его не присваиваем. Консервативно:
+    при неуверенности спикер остаётся без имени.
     """
     guest_set = {str(g) for g in guest_ids}
     if not guest_set or not segments:
@@ -67,12 +82,15 @@ def infer_speaker_names_by_vocative(
     for (sp, name), cnt in votes.items():
         by_speaker.setdefault(sp, []).append((name, cnt))
 
-    result: dict[str, str] = {}
-    for sp, lst in by_speaker.items():
-        name, cnt = max(lst, key=lambda x: x[1])
-        if cnt >= 2:
-            result[sp] = name
-    return result
+    # Лучшее имя для каждого спикера; имя присваиваем, только если оно главное
+    # ровно у одного спикера (иначе — неоднозначность, пропускаем).
+    tops = {sp: max(lst, key=lambda x: x[1]) for sp, lst in by_speaker.items()}
+    name_top_count = Counter(name for name, _ in tops.values())
+    return {
+        sp: name
+        for sp, (name, cnt) in tops.items()
+        if cnt >= 1 and name_top_count[name] == 1
+    }
 
 
 def build_speaker_sequence(events: list[dict]) -> list[str]:
