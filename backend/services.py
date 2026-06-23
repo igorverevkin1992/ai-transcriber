@@ -27,6 +27,7 @@ from backend.config import (
     OCR_TIMECODE,
     OCR_TIMECODE_REGION,
     OUTPUT_DIR,
+    SPEAKER_NAME_AUTODETECT,
     SPEECHKIT_LITERATURE_TEXT,
     SQLITE_DB_PATH,
     STRICT_DIARIZATION,
@@ -835,6 +836,10 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         fps = 25
         logger.warning("[%s] Видеофайл не найден для определения FPS, используется 25", project_id[:8])
 
+    # Предупреждения собираем с самого начала: OCR ТК (ниже) дописывает сюда
+    # диагностику (easyocr не установлен / ТК не распознан), видимую в UI.
+    warnings: list[str] = list(extra_warnings or [])
+
     # Стартовый таймкод: явный TC в имени файла приоритетнее; иначе —
     # встроенный SMPTE-таймкод контейнера (эталоны начинаются именно с него).
     if meta["start_tc"] == "00:00:00:00" and video_path.exists():
@@ -844,7 +849,9 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             logger.info("[%s] Стартовый таймкод из контейнера: %s", project_id[:8], embedded_tc)
         elif OCR_TIMECODE:
             from backend.timecode_ocr import detect_burned_in_timecode
-            ocr_tc = detect_burned_in_timecode(str(video_path), fps, region=OCR_TIMECODE_REGION)
+            ocr_tc = detect_burned_in_timecode(
+                str(video_path), fps, region=OCR_TIMECODE_REGION, warnings=warnings
+            )
             if ocr_tc:
                 meta["start_tc"] = ocr_tc
                 logger.info("[%s] Стартовый таймкод из кадра (OCR): %s", project_id[:8], ocr_tc)
@@ -909,6 +916,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         build_speaker_sequence,
         detect_interviewer,
         first_appearance_order,
+        infer_speaker_names_by_vocative,
     )
 
     detected_speakers = {}
@@ -938,6 +946,26 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         )
     guest_names = {voice_id: file_names[i] for i, voice_id in enumerate(guest_order) if i < len(file_names)}
 
+    # Гостям без имени из имени файла определяем имя-отчество по диалогу (как
+    # интервьюер обращается к ним). Имена из имени файла приоритетнее — заполняем
+    # только пустые. Gemini → фолбэк-эвристика. Интервьюер не именуется.
+    unnamed_guests = [g for g in guest_order if g not in guest_names]
+    if SPEAKER_NAME_AUTODETECT and unnamed_guests:
+        from backend.postprocess import gemini_infer_speaker_names
+        inferred = gemini_infer_speaker_names(
+            raw_segments, interviewer_id=interviewer_id, guest_ids=unnamed_guests
+        )
+        if not inferred:
+            inferred = infer_speaker_names_by_vocative(
+                raw_segments, interviewer_id=interviewer_id, guest_ids=unnamed_guests
+            )
+        for vid in unnamed_guests:
+            if vid in inferred:
+                guest_names[vid] = inferred[vid]
+        if inferred:
+            logger.info("[%s] Имена гостей из диалога: %s", project_id[:8],
+                        {v: inferred[v] for v in unnamed_guests if v in inferred})
+
     for voice_id, dur in speaker_durations.items():
         if voice_id == interviewer_id:
             suggested = INTERVIEWER_LABEL
@@ -954,9 +982,6 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     speaker_count = len(detected_speakers)
     diarization_speakers.observe(speaker_count)
     low_confidence = speaker_count < 2 or speaker_count > 8
-    warnings: list[str] = []
-    if extra_warnings:
-        warnings.extend(extra_warnings)
     if speaker_count == 1:
         msg = ("Обнаружен только 1 говорящий — возможно, диаризация не разделила "
                "реплики (проверьте HF_TOKEN и условия моделей pyannote).")
@@ -1334,9 +1359,17 @@ def shutdown_executor():
         _executor_alive = False
 
 
+_PATRONYMIC_NAME_RE = re.compile(
+    r"^[А-ЯЁ][а-яё]*(?:ович|евич|инична|ична|евна|овна|ьич|ич)$"
+)
+
+
 def _invert_name(name: str) -> str:
     words = name.strip().split()
     if len(words) == 2 and all(w[0].isupper() and w.isalpha() for w in words):
+        # «Имя Отчество» (Олег Александрович) не переставляем — это не «Фамилия Имя».
+        if _PATRONYMIC_NAME_RE.match(words[1]):
+            return name
         return f"{words[1]} {words[0]}"
     return name
 
@@ -1372,25 +1405,27 @@ def auto_export_project(project_id: str, output_path: str) -> str | None:
 
 
 def _compute_smart_abbreviations(name_map: dict) -> dict:
-    """Атомарно вычисляет аббревиатуры: первая буква фамилии, с индексацией коллизий.
+    """Атомарно вычисляет аббревиатуры с индексацией коллизий.
 
-    Двухфазный алгоритм:
-    1. Группируем speaker_id → base_letter
-    2. Для групп размера >1 — присваиваем индексы (М1, М2, ...)
+    База аббревиатуры:
+    - имя-отчество («Олег Александрович») → инициалы обоих слов: «ОА»;
+    - иначе (фамилия / «Фамилия Имя» из имени файла) → первая буква первого
+      слова: «Майданов Денис» → «М», «Спикер 1» → «С».
+    Затем для совпадающих баз присваиваются индексы (С1, С2, ОА1, ОА2…).
     """
     base_to_sids: dict[str, list[str]] = {}
     fallback_map: dict[str, str] = {}
 
     for speaker_id, name in name_map.items():
-        if not name or not name.strip():
+        words = (name or "").strip().split()
+        if not words or not words[0] or not words[0][0].isalpha():
             fallback_map[speaker_id] = f"С{speaker_id}"
             continue
-        words = name.strip().split()
-        first_word = words[0]
-        if not first_word or not first_word[0].isalpha():
-            fallback_map[speaker_id] = f"С{speaker_id}"
-            continue
-        base = first_word[0].upper()
+        # «Имя Отчество» → инициалы (ОА/ГВ как в эталоне); прочее — первая буква.
+        if len(words) >= 2 and _PATRONYMIC_NAME_RE.match(words[1]):
+            base = (words[0][0] + words[1][0]).upper()
+        else:
+            base = words[0][0].upper()
         base_to_sids.setdefault(base, []).append(speaker_id)
 
     result = dict(fallback_map)

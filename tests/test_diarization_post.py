@@ -4,6 +4,7 @@ from backend.diarization_post import (
     build_speaker_sequence,
     detect_interviewer,
     first_appearance_order,
+    infer_speaker_names_by_vocative,
 )
 
 
@@ -57,3 +58,63 @@ class TestDetectInterviewer:
 
     def test_single_speaker_returns_none(self):
         assert detect_interviewer(["A", "A"], {"A": 10.0}) is None
+
+
+class TestInferSpeakerNamesByVocative:
+    @staticmethod
+    def _seg(speaker, text):
+        return {"timecode": "00:00:00:00", "speaker": speaker, "text": text}
+
+    def test_addressed_guest_named(self):
+        # Интервьюер (0) дважды обращается к гостю (1) → гость получает имя.
+        segs = [
+            self._seg("0", "Олег Александрович, расскажите."),
+            self._seg("1", "Да, конечно."),
+            self._seg("0", "А что думаете, Олег Александрович?"),
+            self._seg("1", "Думаю так."),
+        ]
+        res = infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1"])
+        assert res == {"1": "Олег Александрович"}
+
+    def test_below_threshold_not_named(self):
+        # Одно обращение (<2) → консервативно не именуем.
+        segs = [
+            self._seg("0", "Олег Александрович, расскажите."),
+            self._seg("1", "Да."),
+        ]
+        assert infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1"]) == {}
+
+    def test_mention_not_misattributed(self):
+        # Гость (1) упоминает «Галина Васильевна»; следующий — интервьюер (0),
+        # не гость → не засчитывается.
+        segs = [
+            self._seg("1", "Меня учила Галина Васильевна."),
+            self._seg("0", "Понятно."),
+            self._seg("1", "Снова Галина Васильевна, говорю."),
+            self._seg("0", "Хорошо."),
+        ]
+        assert infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1"]) == {}
+
+    def test_oblique_case_not_matched(self):
+        # «Галины Васильевны» — родительный падеж, не обращение → не именуем.
+        segs = [
+            self._seg("0", "Спросим у Галины Васильевны."),
+            self._seg("1", "Да."),
+            self._seg("0", "Снова у Галины Васильевны."),
+            self._seg("1", "Ага."),
+        ]
+        assert infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1"]) == {}
+
+    def test_two_guests(self):
+        segs = [
+            self._seg("0", "Олег Александрович, вопрос."),
+            self._seg("1", "Отвечаю."),
+            self._seg("0", "Олег Александрович, ещё."),
+            self._seg("1", "Ещё отвечаю."),
+            self._seg("0", "Галина Васильевна, ваш черёд."),
+            self._seg("2", "Да."),
+            self._seg("0", "Галина Васильевна, спасибо."),
+            self._seg("2", "Пожалуйста."),
+        ]
+        res = infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1", "2"])
+        assert res == {"1": "Олег Александрович", "2": "Галина Васильевна"}

@@ -1,3 +1,4 @@
+import json
 import re
 import threading
 import time
@@ -378,6 +379,91 @@ def detect_technical_segments(
             "реплики съёмочной группы могли остаться в тексте."
         )
     return segments
+
+
+# --- Авто-определение имён гостей через Gemini ---
+
+# Принимаем только имя-отчество (2 слова, второе — патроним): высокая точность
+# под текущий кейс. Прочее (одно слово, фамилия, мусор) отбрасываем.
+_NAME_PATRONYMIC_RE = re.compile(
+    r"^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]*(?:ович|евич|инична|ична|евна|овна|ьич|ич)$"
+)
+# Ограничение размера транскрипта в промпте (символы): большинство интервью
+# умещаются; обрезка идёт с конца.
+_NAME_INFER_MAX_CHARS = 40000
+
+
+def gemini_infer_speaker_names(
+    segments: list[dict],
+    *,
+    interviewer_id: str | None,
+    guest_ids: list[str],
+) -> dict[str, str] | None:
+    """Определить имя-отчество гостей через Gemini по тому, как к ним обращаются.
+
+    Возвращает ``{speaker_id: "Имя Отчество"}`` только для уверенно опознанных
+    гостей из ``guest_ids`` (интервьюер исключён). ``None`` — если Gemini
+    недоступен или произошёл сбой (тогда вызывающий код берёт эвристику-фолбэк).
+    """
+    guest_set = {str(g) for g in guest_ids}
+    if not guest_set:
+        return None
+
+    lines: list[str] = []
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        if not text or text in (UNCLEAR_TEXT, TECH_BREAK_TEXT):
+            continue
+        lines.append(f"[{seg['speaker']}] {text}")
+    if not lines:
+        return None
+    transcript = "\n".join(lines)[:_NAME_INFER_MAX_CHARS]
+
+    interviewer_line = ""
+    if interviewer_id is not None:
+        interviewer_line = (
+            f"Говорящий [{interviewer_id}] — интервьюер за кадром (задаёт вопросы), "
+            "его НЕ именуй.\n"
+        )
+    prompt = (
+        "Это стенограмма телеинтервью на русском языке. Каждая реплика помечена "
+        "ID говорящего в квадратных скобках, например [0], [1].\n"
+        f"{interviewer_line}"
+        "Определи имя и отчество говорящих ПО ТОМУ, КАК К НИМ ОБРАЩАЮТСЯ по "
+        "имени-отчеству в репликах (именно прямое обращение, а не упоминание "
+        f"третьих лиц). Нужны имена для ID: {', '.join(sorted(guest_set))}.\n"
+        "Верни СТРОГО JSON-объект вида {\"<id>\": \"Имя Отчество\"}. Если для "
+        "говорящего нельзя уверенно определить имя-отчество — поставь null. "
+        "Никакого текста кроме JSON.\n\n"
+        f"Стенограмма:\n{transcript}"
+    )
+
+    try:
+        result = _gemini_call(prompt)
+    except GeminiPolishError:
+        return None
+    if not result:
+        return None
+
+    match = re.search(r"\{.*\}", result, re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    out: dict[str, str] = {}
+    for sp, name in data.items():
+        sp = str(sp)
+        if sp not in guest_set or not isinstance(name, str):
+            continue
+        name = name.strip()
+        if _NAME_PATRONYMIC_RE.match(name):
+            out[sp] = name
+    return out or None
 
 
 def postprocess_segments(

@@ -1,4 +1,61 @@
-from backend.postprocess import postprocess_segments, regex_cleanup
+import backend.postprocess as pp
+from backend.postprocess import (
+    GeminiPolishError,
+    gemini_infer_speaker_names,
+    postprocess_segments,
+    regex_cleanup,
+)
+
+
+class TestGeminiInferSpeakerNames:
+    @staticmethod
+    def _seg(sp, text):
+        return {"timecode": "00:00:00:00", "speaker": sp, "text": text}
+
+    def test_parses_and_validates(self, monkeypatch):
+        monkeypatch.setattr(
+            pp, "_gemini_call",
+            lambda prompt: '{"1": "Олег Александрович", "2": "Галина Васильевна", "0": null}',
+        )
+        segs = [self._seg("0", "Вопрос."), self._seg("1", "Ответ."), self._seg("2", "Ответ2.")]
+        res = gemini_infer_speaker_names(segs, interviewer_id="0", guest_ids=["1", "2"])
+        assert res == {"1": "Олег Александрович", "2": "Галина Васильевна"}
+
+    def test_rejects_non_patronymic(self, monkeypatch):
+        # «Олег» — одно слово; «Иванов Иван» — второе слово не отчество → отброшены.
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: '{"1": "Олег", "2": "Иванов Иван"}')
+        segs = [self._seg("1", "a"), self._seg("2", "b")]
+        assert gemini_infer_speaker_names(segs, interviewer_id=None, guest_ids=["1", "2"]) is None
+
+    def test_only_guest_ids(self, monkeypatch):
+        monkeypatch.setattr(
+            pp, "_gemini_call",
+            lambda prompt: '{"0": "Олег Александрович", "1": "Галина Васильевна"}',
+        )
+        segs = [self._seg("0", "a"), self._seg("1", "b")]
+        res = gemini_infer_speaker_names(segs, interviewer_id="0", guest_ids=["1"])
+        assert res == {"1": "Галина Васильевна"}  # "0" не в guest_ids
+
+    def test_none_on_gemini_failure(self, monkeypatch):
+        def boom(prompt):
+            raise GeminiPolishError("fail")
+        monkeypatch.setattr(pp, "_gemini_call", boom)
+        assert gemini_infer_speaker_names([self._seg("1", "a")], interviewer_id=None, guest_ids=["1"]) is None
+
+    def test_none_when_gemini_unavailable(self, monkeypatch):
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: None)
+        assert gemini_infer_speaker_names([self._seg("1", "a")], interviewer_id=None, guest_ids=["1"]) is None
+
+    def test_extracts_json_with_preamble(self, monkeypatch):
+        monkeypatch.setattr(
+            pp, "_gemini_call",
+            lambda prompt: 'Вот результат: {"1": "Олег Александрович"} — готово',
+        )
+        res = gemini_infer_speaker_names([self._seg("1", "a")], interviewer_id=None, guest_ids=["1"])
+        assert res == {"1": "Олег Александрович"}
+
+    def test_no_guests_returns_none(self):
+        assert gemini_infer_speaker_names([self._seg("0", "a")], interviewer_id="0", guest_ids=[]) is None
 
 
 class TestRegexCleanup:

@@ -128,6 +128,13 @@ INTERVIEWER_LABEL_SINGLE_GUEST = os.getenv("INTERVIEWER_LABEL_SINGLE_GUEST", "fa
 INTERVIEWER_MIN_DISTINCT_GUESTS = int(os.getenv("INTERVIEWER_MIN_DISTINCT_GUESTS", "2"))
 INTERVIEWER_MAJORITY_RATIO = float(os.getenv("INTERVIEWER_MAJORITY_RATIO", "0.5"))
 
+# --- Авто-определение имён гостей из диалога ---
+# Если в имени файла нет имён, попытаться определить имя-отчество гостя по тому,
+# как к нему обращаются в репликах («Олег Александрович, …»). При наличии
+# GEMINI_API_KEY использует Gemini, иначе — детерминированную эвристику по
+# вокативам. Интервьюер остаётся АЗК (его имя в аудио не звучит). default: true.
+SPEAKER_NAME_AUTODETECT = os.getenv("SPEAKER_NAME_AUTODETECT", "true").lower() in ("1", "true", "yes")
+
 # --- ASR anti-hallucination ---
 # Известные Whisper-галлюцинации на музыке/тишине (подстрочный поиск,
 # регистронезависимо, только для коротких сегментов). Env заменяет список.

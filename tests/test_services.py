@@ -1,4 +1,4 @@
-from backend.services import _compute_smart_abbreviations
+from backend.services import _compute_smart_abbreviations, _invert_name
 
 
 class TestComputeSmartAbbreviations:
@@ -43,6 +43,33 @@ class TestComputeSmartAbbreviations:
         result = _compute_smart_abbreviations({"0": "ёлкина Анна"})
         # ё uppercase should work
         assert result["0"] in ("Ё", "ё".upper())
+
+    def test_patronymic_uses_initials(self):
+        # Имя-отчество → инициалы обоих слов (как в эталоне: ОА, ГВ).
+        result = _compute_smart_abbreviations({
+            "0": "Олег Александрович", "1": "Галина Васильевна",
+        })
+        assert result == {"0": "ОА", "1": "ГВ"}
+
+    def test_patronymic_initials_collision(self):
+        result = _compute_smart_abbreviations({
+            "0": "Олег Александрович", "1": "Ольга Алексеевна",
+        })
+        assert result == {"0": "ОА1", "1": "ОА2"}
+
+
+class TestInvertName:
+    def test_surname_first_inverted(self):
+        # «Фамилия Имя» из имени файла → «Имя Фамилия».
+        assert _invert_name("Довлатова Алла") == "Алла Довлатова"
+
+    def test_patronymic_not_inverted(self):
+        # «Имя Отчество» не переставляем.
+        assert _invert_name("Олег Александрович") == "Олег Александрович"
+        assert _invert_name("Галина Васильевна") == "Галина Васильевна"
+
+    def test_single_word_unchanged(self):
+        assert _invert_name("Антипенко") == "Антипенко"
 
 
 class TestHallucinationFilter:

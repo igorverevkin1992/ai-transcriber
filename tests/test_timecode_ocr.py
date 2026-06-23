@@ -43,6 +43,23 @@ class TestParseStartTimecodeFromOcr:
     def test_empty_samples(self):
         assert parse_start_timecode_from_ocr([], 25) is None
 
+    def test_separate_digit_tokens_joined(self):
+        # Крупные цифры OCR дробит на отдельные токены — склейка должна собрать ТК.
+        samples = [(25, ["16", "39", "57", "11"]), (50, ["16", "39", "58", "11"])]
+        assert parse_start_timecode_from_ocr(samples, 25) == "16:39:56:00"
+
+    def test_spaced_separators(self):
+        samples = [(25, ["16 : 39 : 57 : 11"]), (50, ["16 : 39 : 58 : 11"])]
+        assert parse_start_timecode_from_ocr(samples, 25) == "16:39:56:00"
+
+    def test_visible_only_from_later_frames(self):
+        # ТК скрыт чёрным лидером в первые секунды, виден с 4-й — всё равно ловим.
+        samples = [
+            (25, []), (50, []), (75, []),
+            (100, ["04:41:21:00"]), (125, ["04:41:22:00"]),
+        ]
+        assert parse_start_timecode_from_ocr(samples, 25) == "04:41:17:00"
+
 
 class TestParseRegion:
     def test_valid(self):

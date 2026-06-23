@@ -6,6 +6,73 @@
 from __future__ import annotations
 
 import math
+import re
+
+# Имя + отчество в именительном падеже: «Олег Александрович», «Галина Васильевна».
+# Отчество — слово с патронимическим суффиксом. Падежные формы упоминаний
+# («у Галины Васильевны») имеют другие окончания и сюда НЕ попадают — это
+# естественно отсекает упоминания третьих лиц от обращений.
+_PATRONYMIC = r"(?:ович|евич|инична|ична|евна|овна|ьич|ич)"
+_VOCATIVE_RE = re.compile(
+    rf"\b([А-ЯЁ][а-яё]+)\s+([А-ЯЁ][а-яё]*{_PATRONYMIC})\b"
+)
+
+
+def _find_vocatives(text: str) -> list[str]:
+    """Все обращения вида «Имя Отчество» в тексте (без дублей, порядок сохранён)."""
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for m in _VOCATIVE_RE.finditer(text):
+        name = f"{m.group(1)} {m.group(2)}"
+        if name not in seen_set:
+            seen_set.add(name)
+            seen.append(name)
+    return seen
+
+
+def infer_speaker_names_by_vocative(
+    segments: list[dict],
+    *,
+    interviewer_id: str | None,
+    guest_ids: list[str],
+) -> dict[str, str]:
+    """Определить имя-отчество гостей по обращениям в диалоге (детерминированно).
+
+    Если в реплике звучит обращение «Имя Отчество», имя засчитывается
+    СЛЕДУЮЩЕМУ говорящему-гостю (тому, кто отвечает на обращение). Имя
+    присваивается спикеру при ≥2 совпадениях — это отсекает разовые упоминания.
+    Консервативно: при неуверенности спикер остаётся без имени.
+    """
+    guest_set = {str(g) for g in guest_ids}
+    if not guest_set or not segments:
+        return {}
+
+    votes: dict[tuple[str, str], int] = {}
+    for i, seg in enumerate(segments):
+        names = _find_vocatives(seg.get("text", ""))
+        if not names:
+            continue
+        cur = str(seg["speaker"])
+        # Следующий ОТЛИЧНЫЙ говорящий — предполагаемый адресат обращения.
+        for j in range(i + 1, len(segments)):
+            nxt = str(segments[j]["speaker"])
+            if nxt == cur:
+                continue
+            if nxt in guest_set:
+                for name in names:
+                    votes[(nxt, name)] = votes.get((nxt, name), 0) + 1
+            break
+
+    by_speaker: dict[str, list[tuple[str, int]]] = {}
+    for (sp, name), cnt in votes.items():
+        by_speaker.setdefault(sp, []).append((name, cnt))
+
+    result: dict[str, str] = {}
+    for sp, lst in by_speaker.items():
+        name, cnt = max(lst, key=lambda x: x[1])
+        if cnt >= 2:
+            result[sp] = name
+    return result
 
 
 def build_speaker_sequence(events: list[dict]) -> list[str]:

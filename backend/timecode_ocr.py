@@ -4,6 +4,15 @@
 метаданных контейнера. Извлекает несколько кадров в начале записи, распознаёт
 область с таймкодом и по согласованности между кадрами вычисляет таймкод
 ПЕРВОГО кадра файла (от которого затем отсчитываются реплики).
+
+Надёжность:
+- крупные цифры с широкими пробелами вокруг «:» OCR часто возвращает
+  ОТДЕЛЬНЫМИ токенами (["16","39","57","11"]) — поэтому кандидаты ищем и в
+  каждом токене, и в их склейке, а разделитель в регэкспе необязателен (0+);
+- голосуем по СТАРТУ с точностью до секунды (вывод всё равно с кадрами :00),
+  принимаем значение, согласованное минимум в 2 кадрах;
+- если по заданной области ничего не нашли — повторяем OCR по всему кадру;
+- подробно логируем сырой текст OCR по кадрам, чтобы при сбое донастроить.
 """
 from __future__ import annotations
 
@@ -14,11 +23,18 @@ import uuid
 from pathlib import Path
 
 from backend.config import OCR_TIMECODE_REGION, TEMP_DIR, logger
-from backend.utils import _validate_tc_parts, frames_to_tc, tc_to_frames
+from backend.utils import _validate_tc_parts, frames_to_tc
 
 # ТК в распознанном тексте: разделители OCR часто путает (':', ';', '.', пробел)
-# или теряет вовсе — допускаем необязательный разделитель между парами цифр.
-_TC_IN_TEXT_RE = re.compile(r"(\d{2})[:;.\s]?(\d{2})[:;.\s]?(\d{2})[:;.\s]?(\d{2})")
+# или теряет вовсе — разделитель между парами цифр необязателен (0+ символов),
+# чтобы ловить и «16 : 39 : 57 : 11», и «16395711», и склейку отдельных токенов.
+_TC_IN_TEXT_RE = re.compile(r"(\d{2})[:;.\s]*(\d{2})[:;.\s]*(\d{2})[:;.\s]*(\d{2})")
+
+# Секунды от начала файла, на которых пробуем прочитать ТК. Шире окно — на случай
+# чёрного лидера/слейта в самом начале (ТК появляется не сразу).
+_DEFAULT_SAMPLE_SECONDS = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.0, 15.0)
+
+_OCR_ALLOWLIST = "0123456789:;. "
 
 _reader = None
 _reader_lock = threading.Lock()
@@ -34,10 +50,6 @@ def _get_reader():
             try:
                 import easyocr
             except ImportError:
-                logger.warning(
-                    "easyocr не установлен — чтение выжженного в кадр ТК недоступно "
-                    "(pip install easyocr)."
-                )
                 return None
             try:
                 import torch
@@ -61,69 +73,114 @@ def _parse_region(raw: str | None) -> tuple[float, float, float, float] | None:
     return None
 
 
+def _candidates_from_text(text: str, fps: int) -> set[int]:
+    """Все валидные «подразумеваемые секунды ТК» из одной строки.
+
+    Возвращает множество h*3600+m*60+s для каждого распознанного в строке ТК
+    (поле кадров f отбрасывается — голосуем по секундам). Кандидаты с f>=fps
+    считаем мисридом и пропускаем.
+    """
+    out: set[int] = set()
+    for m in _TC_IN_TEXT_RE.finditer(text):
+        h, mn, s, f = (int(g) for g in m.groups())
+        if f >= fps or not _validate_tc_parts(h, mn, s, f):
+            continue
+        out.add(h * 3600 + mn * 60 + s)
+    return out
+
+
 def parse_start_timecode_from_ocr(
     samples: list[tuple[int, list[str]]], fps: int
 ) -> str | None:
     """Чистая логика: по OCR-результатам кадров вычислить ТК первого кадра файла.
 
     ``samples`` — список ``(индекс_кадра, [распознанные_строки])``. Для каждого
-    кадра считаем «подразумеваемые старты» = ТК минус номер кадра; берём старт,
-    согласованный минимум в 2 кадрах (±1 кадр). Это отсекает мусор OCR и
-    подтверждает, что таймкод действительно идёт непрерывно.
+    кадра считаем «подразумеваемый старт» (в секундах) = секунды ТК − секунды
+    кадра; берём старт, согласованный минимум в 2 кадрах. Кандидаты ищем и в
+    отдельных токенах, и в их склейке (крупные цифры OCR дробит на токены).
     """
     if fps <= 0:
         return None
 
     starts_per_frame: list[set[int]] = []
     for frame_index, texts in samples:
-        frame_starts: set[int] = set()
-        for text in texts:
-            for m in _TC_IN_TEXT_RE.finditer(text):
-                h, mn, s, f = (int(g) for g in m.groups())
-                if f >= fps or not _validate_tc_parts(h, mn, s, f):
-                    continue
-                tc = f"{h:02d}:{mn:02d}:{s:02d}:{f:02d}"
-                start = tc_to_frames(tc, fps) - frame_index
-                if start >= 0:
-                    frame_starts.add(start)
+        frame_offset_s = round(frame_index / fps)
+        tc_seconds: set[int] = set()
+        # И каждая строка, и склейка всех строк кадра (через пробел и без).
+        joined = " ".join(texts)
+        for candidate_text in (*texts, joined, joined.replace(" ", "")):
+            tc_seconds |= _candidates_from_text(candidate_text, fps)
+        frame_starts = {sec - frame_offset_s for sec in tc_seconds if sec - frame_offset_s >= 0}
         starts_per_frame.append(frame_starts)
 
     candidates = sorted({s for fs in starts_per_frame for s in fs})
     best, best_count = None, 0
     for cand in candidates:
-        count = sum(
-            1 for fs in starts_per_frame if any(abs(s - cand) <= 1 for s in fs)
-        )
+        count = sum(1 for fs in starts_per_frame if cand in fs)
         if count > best_count:
             best, best_count = cand, count
 
     if best is None or best_count < 2:
         return None
-    return frames_to_tc(best, fps)
+    return frames_to_tc(best * fps, fps)
 
 
-def _extract_frame(video_path: str, frame_index: int, region) -> str | None:
-    """Извлекает один кадр (по точному номеру) в PNG; при region — кадрирует."""
-    out = str(TEMP_DIR / f"tcocr_{uuid.uuid4().hex}.png")
-    vf = f"select=eq(n\\,{frame_index})"
+def _extract_frames(
+    video_path: str, frame_indices: list[int], region
+) -> list[tuple[int, str]]:
+    """Извлекает кадры по точным номерам ОДНИМ проходом ffmpeg.
+
+    Возвращает список ``(индекс_кадра, путь_png)`` в порядке возрастания номеров.
+    При region кадрирует и увеличивает кроп ×3 (крупный текст распознаётся точнее).
+    """
+    if not frame_indices:
+        return []
+    idxs = sorted(set(frame_indices))
+    select_expr = "+".join(f"eq(n\\,{n})" for n in idxs)
+    vf = f"select='{select_expr}'"
     if region:
         left, top, right, bottom = region
         vf += (
             f",crop=iw*{right - left:.4f}:ih*{bottom - top:.4f}:"
-            f"iw*{left:.4f}:ih*{top:.4f}"
+            f"iw*{left:.4f}:ih*{top:.4f},scale=iw*3:ih*3"
         )
+    prefix = f"tcocr_{uuid.uuid4().hex}"
+    out_pattern = str(TEMP_DIR / f"{prefix}_%03d.png")
     try:
         result = subprocess.run(
             ["ffmpeg", "-v", "quiet", "-y", "-i", video_path,
-             "-vf", vf, "-frames:v", "1", "-an", out],
+             "-vf", vf, "-vsync", "0", "-frames:v", str(len(idxs)), "-an", out_pattern],
             capture_output=True,
-            timeout=60,
+            timeout=120,
         )
-        if result.returncode == 0 and Path(out).exists():
-            return out
+        if result.returncode != 0:
+            logger.warning("ffmpeg не смог извлечь кадры для OCR ТК (код %d)", result.returncode)
+            return []
     except Exception as e:
-        logger.warning("Не удалось извлечь кадр %d для OCR ТК: %s", frame_index, e)
-    return None
+        logger.warning("Не удалось извлечь кадры для OCR ТК: %s", e)
+        return []
+
+    # ffmpeg нумерует вышедшие кадры подряд (001, 002, …) в порядке select.
+    pairs: list[tuple[int, str]] = []
+    for i, n in enumerate(idxs, start=1):
+        path = str(TEMP_DIR / f"{prefix}_{i:03d}.png")
+        if Path(path).exists():
+            pairs.append((n, path))
+    return pairs
+
+
+def _ocr_frames(reader, pairs: list[tuple[int, str]]) -> list[tuple[int, list[str]]]:
+    """OCR каждого извлечённого кадра; логирует сырой текст (для диагностики)."""
+    samples: list[tuple[int, list[str]]] = []
+    for frame_index, path in pairs:
+        try:
+            texts = reader.readtext(path, detail=0, allowlist=_OCR_ALLOWLIST)
+        except Exception as e:
+            logger.warning("OCR кадра %d не удался: %s", frame_index, e)
+            continue
+        logger.info("[OCR ТК] кадр %d: %r", frame_index, texts)
+        samples.append((frame_index, texts))
+    return samples
 
 
 def detect_burned_in_timecode(
@@ -131,30 +188,43 @@ def detect_burned_in_timecode(
     fps: int,
     *,
     region: str | None = None,
-    sample_seconds: tuple[float, ...] = (1.0, 2.0, 3.0),
+    sample_seconds: tuple[float, ...] = _DEFAULT_SAMPLE_SECONDS,
+    warnings: list[str] | None = None,
 ) -> str | None:
-    """Считывает выжженный в кадр ТК и возвращает ТК первого кадра файла (или None)."""
+    """Считывает выжженный в кадр ТК и возвращает ТК первого кадра файла (или None).
+
+    При недоступности easyocr или нераспознанном ТК добавляет понятное
+    предупреждение в ``warnings`` (показывается в UI), т.к. OCR — единственный
+    автоматический источник абсолютного ТК для .wmv.
+    """
     reader = _get_reader()
     if reader is None:
+        msg = ("easyocr не установлен — выжженный в кадр таймкод не распознан "
+               "(установите: pip install -r requirements.txt).")
+        logger.error(msg)
+        if warnings is not None:
+            warnings.append(msg)
         return None
 
+    if fps <= 0:
+        fps = 25
+    frame_indices = [max(1, int(round(sec * fps))) for sec in sample_seconds]
     reg = _parse_region(region if region is not None else OCR_TIMECODE_REGION)
 
-    samples: list[tuple[int, list[str]]] = []
     tmp_files: list[str] = []
     try:
-        for sec in sample_seconds:
-            n = int(round(sec * fps))
-            frame = _extract_frame(video_path, n, reg)
-            if not frame:
-                continue
-            tmp_files.append(frame)
-            try:
-                texts = reader.readtext(frame, detail=0, allowlist="0123456789:;. ")
-            except Exception as e:
-                logger.warning("OCR кадра не удался: %s", e)
-                continue
-            samples.append((n, texts))
+        pairs = _extract_frames(video_path, frame_indices, reg)
+        tmp_files.extend(p for _, p in pairs)
+        samples = _ocr_frames(reader, pairs)
+        tc = parse_start_timecode_from_ocr(samples, fps)
+
+        # Fallback: ничего не нашли по области — пробуем весь кадр.
+        if tc is None and reg is not None:
+            logger.info("[OCR ТК] по области пусто — повтор OCR по всему кадру")
+            pairs_full = _extract_frames(video_path, frame_indices, None)
+            tmp_files.extend(p for _, p in pairs_full)
+            samples_full = _ocr_frames(reader, pairs_full)
+            tc = parse_start_timecode_from_ocr(samples_full, fps)
     finally:
         for f in tmp_files:
             try:
@@ -162,9 +232,13 @@ def detect_burned_in_timecode(
             except OSError:
                 pass
 
-    tc = parse_start_timecode_from_ocr(samples, fps)
     if tc:
         logger.info("Выжженный в кадр ТК распознан (OCR): %s", tc)
     else:
-        logger.info("Выжженный в кадр ТК распознать не удалось.")
+        msg = ("Выжженный в кадр таймкод не распознан (OCR) — отсчёт с 00:00:00:00. "
+               "Проверьте, что ТК виден в первых 15 секундах; область задаётся "
+               "OCR_TIMECODE_REGION.")
+        logger.warning(msg)
+        if warnings is not None:
+            warnings.append(msg)
     return tc
