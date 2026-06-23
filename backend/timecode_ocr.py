@@ -50,13 +50,16 @@ def _get_reader():
             try:
                 import easyocr
             except ImportError:
+                logger.error("[OCR ТК] easyocr не импортируется (не установлен?)")
                 return None
             try:
                 import torch
                 gpu = torch.cuda.is_available()
             except Exception:
                 gpu = False
+            logger.info("[OCR ТК] инициализация easyocr (gpu=%s)…", gpu)
             _reader = easyocr.Reader(["en"], gpu=gpu)
+            logger.info("[OCR ТК] easyocr готов")
     return _reader
 
 
@@ -115,10 +118,17 @@ def parse_start_timecode_from_ocr(
 
     candidates = sorted({s for fs in starts_per_frame for s in fs})
     best, best_count = None, 0
+    counts: list[tuple[str, int]] = []
     for cand in candidates:
         count = sum(1 for fs in starts_per_frame if cand in fs)
+        counts.append((frames_to_tc(cand * fps, fps), count))
         if count > best_count:
             best, best_count = cand, count
+
+    # Сводка для диагностики: какие старты вообще получились и сколько кадров за
+    # каждый «проголосовало» (нужно ≥2). Если список пуст — OCR не дал ни одного
+    # валидного ТК (см. сырой текст выше по логам).
+    logger.info("[OCR ТК] кандидаты старта (ТК→голосов): %s", counts or "нет")
 
     if best is None or best_count < 2:
         return None
@@ -210,11 +220,17 @@ def detect_burned_in_timecode(
         fps = 25
     frame_indices = [max(1, int(round(sec * fps))) for sec in sample_seconds]
     reg = _parse_region(region if region is not None else OCR_TIMECODE_REGION)
+    logger.info(
+        "[OCR ТК] старт: fps=%d, регион=%s, секунды=%s, кадры=%s",
+        fps, reg, list(sample_seconds), frame_indices,
+    )
 
     tmp_files: list[str] = []
     try:
         pairs = _extract_frames(video_path, frame_indices, reg)
         tmp_files.extend(p for _, p in pairs)
+        logger.info("[OCR ТК] ffmpeg извлёк %d из %d кадров (по области)",
+                    len(pairs), len(frame_indices))
         samples = _ocr_frames(reader, pairs)
         tc = parse_start_timecode_from_ocr(samples, fps)
 
