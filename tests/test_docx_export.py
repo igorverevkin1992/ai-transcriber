@@ -97,6 +97,35 @@ class TestGenerateDocx:
         assert texts.count("Гость Первый – П.") == 2
         assert texts.count("Гость Второй – В.") == 2
 
+    def test_section_divider_not_triggered_by_remark(self, tmp_path):
+        project = {
+            "original_filename": "intv.mp4",
+            "result": {
+                "speakers": {
+                    "1": {"duration_sec": 60.0, "suggested_name": "Гость1"},
+                    "2": {"duration_sec": 60.0, "suggested_name": "Гость2"},
+                },
+                "segments": [
+                    {"timecode": "00:00:00:00", "speaker": "1", "text": "(Технические моменты)."},
+                    {"timecode": "00:00:05:00", "speaker": "1", "text": "Первый ответ."},
+                    {"timecode": "00:00:10:00", "speaker": "2", "text": "Второй ответ."},
+                ],
+            },
+        }
+        out = tmp_path / "out.docx"
+        generate_docx(
+            project,
+            final_map={"1": "Гость Первый", "2": "Гость Второй"},
+            abbr_map={"1": "П", "2": "В"},
+            output_path=str(out),
+        )
+        texts = [p.text for p in Document(str(out)).paragraphs]
+        remark_i = next(i for i, t in enumerate(texts) if "(Технические моменты)" in t)
+        section_i = [i for i, t in enumerate(texts) if t == "Гость Первый – П."][1]
+        speech_i = next(i for i, t in enumerate(texts) if "Первый ответ." in t)
+        # Заголовок секции — перед речевой репликой, а не перед ремаркой.
+        assert remark_i < section_i < speech_i
+
     def test_legend_only_for_speakers_in_segments(self, tmp_path, sample_project):
         sample_project["result"]["speakers"]["99"] = {
             "duration_sec": 5.0, "suggested_name": "Призрак",

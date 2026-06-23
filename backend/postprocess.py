@@ -6,11 +6,16 @@ from backend.config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     GLOSSARY_REPLACEMENTS,
+    TECH_MOMENT_DETECTION,
     TRANSCRIPT_GLOSSARY,
     logger,
 )
 from backend.metrics import gemini_calls
-from backend.turns import UNCLEAR_TEXT
+from backend.turns import TECH_BREAK_TEXT, UNCLEAR_TEXT
+
+# Полная скобочная ремарка целиком (как в backend.turns) — такие фрагменты не
+# являются речью и не классифицируются как технические моменты.
+_FULL_PARENTHETICAL_RE = re.compile(r"^\((?:[^()]|\([^()]*\))*\)[.!?…]*$")
 
 
 class GeminiPolishError(Exception):
@@ -205,16 +210,49 @@ def _clean_gemini_response(result: str) -> str:
     return result.strip()
 
 
-def gemini_polish(text: str) -> str:
-    """Полировка текста через Gemini API с retry на rate-limit/5xx."""
+def _gemini_call(prompt: str) -> str | None:
+    """Вызов Gemini с ретраями на rate-limit/5xx. Общее ядро для полировки и
+    классификации технических моментов.
+
+    Возвращает очищенный текст ответа (может быть пустым), ``None`` — если модель
+    недоступна (нет пакета/ключа). Окончательный сбой после ретраев →
+    ``GeminiPolishError``.
+    """
     global _gemini_model
     if _gemini_model is None:
         with _gemini_lock:
             if _gemini_model is None:
                 _gemini_model = _get_gemini_model()
     if _gemini_model is None:
-        return text
+        return None
 
+    for attempt in range(GEMINI_MAX_RETRIES):
+        try:
+            # temperature=0: корректор/классификатор должен быть детерминированным
+            response = _gemini_model.generate_content(
+                prompt,
+                generation_config={"temperature": 0.0},
+            )
+            result = _clean_gemini_response(response.text)
+            gemini_calls.labels(outcome="success").inc()
+            return result
+        except Exception as e:
+            err_str = str(e).lower()
+            is_retryable = any(s in err_str for s in ("rate limit", "429", "503", "500", "timeout", "deadline"))
+            if attempt < GEMINI_MAX_RETRIES - 1 and is_retryable:
+                delay = GEMINI_BACKOFF[attempt]
+                logger.warning("Gemini API ошибка (попытка %d/%d): %s. Retry через %dс",
+                               attempt + 1, GEMINI_MAX_RETRIES, e, delay)
+                time.sleep(delay)
+                continue
+            gemini_calls.labels(outcome="error").inc()
+            logger.warning("Gemini API окончательная ошибка: %s", e)
+            raise GeminiPolishError(str(e)) from e
+    return None
+
+
+def gemini_polish(text: str) -> str:
+    """Полировка текста через Gemini API с retry на rate-limit/5xx."""
     glossary_rule = ""
     if TRANSCRIPT_GLOSSARY:
         glossary_rule = (
@@ -253,32 +291,93 @@ def gemini_polish(text: str) -> str:
         f"Текст:\n{text}"
     )
 
-    for attempt in range(GEMINI_MAX_RETRIES):
-        try:
-            # temperature=0: корректор должен быть детерминированным
-            response = _gemini_model.generate_content(
-                prompt,
-                generation_config={"temperature": 0.0},
-            )
-            result = _clean_gemini_response(response.text)
-            gemini_calls.labels(outcome="success").inc()
-            if result:
-                return result
-            return text
-        except Exception as e:
-            err_str = str(e).lower()
-            is_retryable = any(s in err_str for s in ("rate limit", "429", "503", "500", "timeout", "deadline"))
-            if attempt < GEMINI_MAX_RETRIES - 1 and is_retryable:
-                delay = GEMINI_BACKOFF[attempt]
-                logger.warning("Gemini API ошибка (попытка %d/%d): %s. Retry через %dс",
-                               attempt + 1, GEMINI_MAX_RETRIES, e, delay)
-                time.sleep(delay)
-                continue
-            gemini_calls.labels(outcome="error").inc()
-            logger.warning("Gemini API окончательная ошибка: %s", e)
-            raise GeminiPolishError(str(e)) from e
+    result = _gemini_call(prompt)
+    if result is None:
+        return text
+    return result or text
 
-    return text
+
+_TECH_MOMENT_PROMPT = (
+    "Ты — редактор стенограммы телеинтервью на русском языке. Ниже —\n"
+    "пронумерованные фрагменты речи из записи.\n"
+    "Интервью состоит из вопросов ведущего (голос за кадром) и ответов гостя\n"
+    "по темам беседы.\n"
+    "Найди фрагменты, которые ЯВНО НЕ относятся к интервью: команды съёмочной\n"
+    "группы, перезапуск/настройка камеры, проверка микрофона, технические\n"
+    "указания, обращения к оператору или режиссёру, отсчёт, хлопушка.\n"
+    "ВАЖНО: при ЛЮБОМ сомнении НЕ помечай фрагмент — лучше оставить лишнюю\n"
+    "фразу, чем потерять реплику интервью. Большинство фрагментов — НЕ\n"
+    "технические.\n"
+    "Верни ТОЛЬКО номера явно технических фрагментов через запятую (например:\n"
+    "2, 5). Если таких нет — верни одно слово: НЕТ.\n\n"
+    "Фрагменты:\n"
+)
+
+_TECH_NUMBERS_RE = re.compile(r"\d+")
+_TECH_BATCH_CHARS = 5000
+
+
+def detect_technical_segments(
+    segments: list[dict],
+    warnings: list[str] | None = None,
+) -> list[dict]:
+    """Консервативно помечает реплики съёмочной группы маркером тех. момента.
+
+    Через Gemini находит ЯВНО не-интервью фрагменты (перезапуск камеры,
+    проверка микрофона, команды группе) и заменяет их текст на ``TECH_BREAK_TEXT``
+    — далее ``build_turns`` выведет их как курсивную ремарку. При сомнении
+    фрагмент остаётся без изменений. При сбое Gemini — предупреждение в
+    ``warnings``, текст не меняется.
+    """
+    if not segments:
+        return segments
+
+    candidates = [
+        i for i, seg in enumerate(segments)
+        if seg["text"].strip()
+        and seg["text"] != UNCLEAR_TEXT
+        and not _FULL_PARENTHETICAL_RE.match(seg["text"])
+    ]
+    if not candidates:
+        return segments
+
+    # Батчинг по символам с нумерацией фрагментов внутри батча.
+    batches: list[list[int]] = []
+    cur: list[int] = []
+    cur_len = 0
+    for i in candidates:
+        t = segments[i]["text"]
+        if cur and cur_len + len(t) > _TECH_BATCH_CHARS:
+            batches.append(cur)
+            cur, cur_len = [], 0
+        cur.append(i)
+        cur_len += len(t) + 8  # запас на нумерацию/переносы
+    if cur:
+        batches.append(cur)
+
+    failed = False
+    for batch in batches:
+        numbered = "\n".join(
+            f"{n}. {segments[idx]['text']}" for n, idx in enumerate(batch, 1)
+        )
+        try:
+            result = _gemini_call(_TECH_MOMENT_PROMPT + numbered)
+        except GeminiPolishError:
+            failed = True
+            continue
+        if not result:
+            continue
+        flagged = {int(m) for m in _TECH_NUMBERS_RE.findall(result)}
+        for n, idx in enumerate(batch, 1):
+            if n in flagged:
+                segments[idx]["text"] = TECH_BREAK_TEXT
+
+    if warnings is not None and failed:
+        warnings.append(
+            "Определение технических моментов не выполнено (сбой Gemini) — "
+            "реплики съёмочной группы могли остаться в тексте."
+        )
+    return segments
 
 
 def postprocess_segments(
@@ -305,6 +404,10 @@ def postprocess_segments(
     if not use_gemini or not GEMINI_API_KEY:
         return segments
 
+    # Консервативно сворачиваем крон-чаттер в маркер тех. момента ДО полировки.
+    if TECH_MOMENT_DETECTION:
+        detect_technical_segments(segments, warnings=warnings)
+
     batch_texts = []
     batch_indices = []
     current_batch = ""
@@ -314,8 +417,8 @@ def postprocess_segments(
 
     for i, seg in enumerate(segments):
         text = seg["text"]
-        # "(неразборчиво)" — служебная замена, Gemini её не полирует
-        if not text or text == UNCLEAR_TEXT:
+        # Служебные маркеры (неразборчиво / тех. момент) Gemini не полирует
+        if not text or text in (UNCLEAR_TEXT, TECH_BREAK_TEXT):
             continue
         if current_batch and len(current_batch) + len(SEPARATOR) + len(text) > MAX_BATCH_CHARS:
             batch_texts.append(current_batch)

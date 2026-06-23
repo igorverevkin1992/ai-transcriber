@@ -48,7 +48,7 @@ from backend.metrics import (
 )
 from backend.models import ProjectStatusEnum
 from backend.store import ProjectStore
-from backend.turns import UNCLEAR_TEXT, build_turns
+from backend.turns import TECH_BREAK_TEXT, UNCLEAR_TEXT, build_turns
 from backend.utils import (
     detect_fps,
     detect_start_timecode,
@@ -850,7 +850,11 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     start_frames = tc_to_frames(meta["start_tc"], fps)
 
     # Длительности спикеров считаются по сырым ASR-сегментам (до склейки).
+    # Технические моменты (реплики съёмочной группы) остаются в events, чтобы
+    # build_turns вывел ремарку, но НЕ засчитываются спикеру и не участвуют в
+    # определении АЗК/порядка появления — иначе «спикер-группа» исказил бы легенду.
     events = []
+    speech_events = []
     for seg in segments:
         channel = str(seg["channel_tag"])
         text = seg["text"]
@@ -860,13 +864,16 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
 
         start_s = words[0]["start_ms"] / 1000.0
         end_s = words[-1]["end_ms"] / 1000.0
-        speaker_durations[channel] = speaker_durations.get(channel, 0) + (end_s - start_s)
-        events.append({
+        ev = {
             "speaker": channel,
             "text": text.strip(),
             "start_s": start_s,
             "end_s": end_s,
-        })
+        }
+        events.append(ev)
+        if text.strip() != TECH_BREAK_TEXT:
+            speaker_durations[channel] = speaker_durations.get(channel, 0) + (end_s - start_s)
+            speech_events.append(ev)
 
     if TURN_MERGE_ENABLED:
         raw_segments = build_turns(
@@ -897,7 +904,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     # Автоопределение интервьюера (АЗК): он чередуется со всеми гостями.
     interviewer_id = None
     if INTERVIEWER_AUTODETECT and len(speaker_durations) >= 2:
-        sequence = build_speaker_sequence(events)
+        sequence = build_speaker_sequence(speech_events)
         interviewer_id = detect_interviewer(
             sequence, speaker_durations,
             min_distinct_guests=INTERVIEWER_MIN_DISTINCT_GUESTS,
@@ -909,7 +916,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
                         project_id[:8], interviewer_id, INTERVIEWER_LABEL)
 
     # Имена из файла назначаем ГОСТЯМ по порядку появления (интервьюер исключён).
-    guest_order = [s for s in first_appearance_order(events) if s != interviewer_id]
+    guest_order = [s for s in first_appearance_order(speech_events) if s != interviewer_id]
     expected_guests = len(speaker_durations) - (1 if interviewer_id is not None else 0)
     if file_names and len(file_names) != expected_guests:
         logger.warning(

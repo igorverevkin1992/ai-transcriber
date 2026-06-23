@@ -321,6 +321,7 @@ class TestGeminiFailureWarning:
         import backend.postprocess as pp
         monkeypatch.setattr(pp, "GEMINI_API_KEY", "fake-key")
         monkeypatch.setattr(pp, "GLOSSARY_REPLACEMENT_PAIRS", [])
+        monkeypatch.setattr(pp, "TECH_MOMENT_DETECTION", False)
 
         def boom(text):
             raise pp.GeminiPolishError("rate limit")
@@ -330,3 +331,90 @@ class TestGeminiFailureWarning:
         out = postprocess_segments([{"text": "привет", "words": []}], warnings=warnings)
         assert out[0]["text"] == "привет"
         assert any("Gemini" in w for w in warnings)
+
+
+class TestTechnicalMoments:
+    def test_marks_flagged_segments(self, monkeypatch):
+        import backend.postprocess as pp
+        from backend.turns import TECH_BREAK_TEXT
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: "2")
+        segs = [
+            {"text": "Вопрос про кино?"},
+            {"text": "Камера, ещё дубль, отойди от микрофона."},
+            {"text": "Ответ героя."},
+        ]
+        out = pp.detect_technical_segments(segs, warnings=[])
+        assert out[1]["text"] == TECH_BREAK_TEXT
+        assert out[0]["text"] == "Вопрос про кино?"
+        assert out[2]["text"] == "Ответ героя."
+
+    def test_conservative_none_no_change(self, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: "НЕТ")
+        segs = [{"text": "А."}, {"text": "Б."}]
+        out = pp.detect_technical_segments(segs)
+        assert [s["text"] for s in out] == ["А.", "Б."]
+
+    def test_gemini_failure_warns_and_keeps(self, monkeypatch):
+        import backend.postprocess as pp
+
+        def boom(prompt):
+            raise pp.GeminiPolishError("503")
+
+        monkeypatch.setattr(pp, "_gemini_call", boom)
+        segs = [{"text": "Реальная реплика."}]
+        warnings = []
+        out = pp.detect_technical_segments(segs, warnings=warnings)
+        assert out[0]["text"] == "Реальная реплика."
+        assert any("технических моментов" in w for w in warnings)
+
+    def test_skips_existing_remarks_in_numbering(self, monkeypatch):
+        import backend.postprocess as pp
+        from backend.turns import TECH_BREAK_TEXT, UNCLEAR_TEXT
+        seen = {}
+
+        def fake(prompt):
+            seen["prompt"] = prompt
+            return "НЕТ"
+
+        monkeypatch.setattr(pp, "_gemini_call", fake)
+        segs = [{"text": UNCLEAR_TEXT}, {"text": TECH_BREAK_TEXT}, {"text": "Речь."}]
+        pp.detect_technical_segments(segs)
+        # В нумерацию попадает только речевой фрагмент, не ремарки.
+        assert "1. Речь." in seen["prompt"]
+        assert UNCLEAR_TEXT not in seen["prompt"]
+
+    def test_disabled_flag_skips_detection(self, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "GEMINI_API_KEY", "fake-key")
+        monkeypatch.setattr(pp, "TECH_MOMENT_DETECTION", False)
+        monkeypatch.setattr(pp, "GLOSSARY_REPLACEMENT_PAIRS", [])
+        called = {"n": 0}
+
+        def fake(prompt):
+            called["n"] += 1
+            return "1"
+
+        monkeypatch.setattr(pp, "_gemini_call", fake)
+        monkeypatch.setattr(pp, "gemini_polish", lambda t: t)
+        out = postprocess_segments([{"text": "Камера дубль.", "words": []}], warnings=[])
+        assert out[0]["text"] == "Камера дубль."
+        assert called["n"] == 0
+
+    def test_postprocess_marks_and_skips_polish(self, monkeypatch):
+        import backend.postprocess as pp
+        from backend.turns import TECH_BREAK_TEXT
+        monkeypatch.setattr(pp, "GEMINI_API_KEY", "fake-key")
+        monkeypatch.setattr(pp, "TECH_MOMENT_DETECTION", True)
+        monkeypatch.setattr(pp, "GLOSSARY_REPLACEMENT_PAIRS", [])
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: "1")
+        polished = []
+
+        def fake_polish(text):
+            polished.append(text)
+            return text + " [P]"
+
+        monkeypatch.setattr(pp, "gemini_polish", fake_polish)
+        out = postprocess_segments([{"text": "Камера, дубль.", "words": []}], warnings=[])
+        assert out[0]["text"] == TECH_BREAK_TEXT
+        assert polished == []  # маркер тех. момента не полируется

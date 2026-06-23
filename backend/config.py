@@ -151,6 +151,10 @@ SPEECHKIT_LITERATURE_TEXT = os.getenv("SPEECHKIT_LITERATURE_TEXT", "false").lowe
 
 # --- Gemini tuning ---
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+# Консервативное определение «технических моментов» (реплики съёмочной группы,
+# перезапуски камеры, проверка микрофона и т.п.) через Gemini: ЯВНО не-интервью
+# фрагменты заменяются маркером «(Технические моменты).». Требует GEMINI_API_KEY.
+TECH_MOMENT_DETECTION = os.getenv("TECH_MOMENT_DETECTION", "true").lower() in ("1", "true", "yes")
 
 # --- DOCX metadata ---
 DOCX_AUTHOR = os.getenv("DOCX_AUTHOR", "")

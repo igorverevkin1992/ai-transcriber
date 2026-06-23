@@ -503,7 +503,8 @@ def generate_docx(
         text = seg["text"]
 
         if (emit_sections and speaker_id in guest_ids
-                and speaker_id not in seen_section_guests):
+                and speaker_id not in seen_section_guests
+                and not PARENTHETICAL_RE.fullmatch(text)):
             seen_section_guests.add(speaker_id)
             sec_info = speakers_info.get(speaker_id, {})
             sec_name = final_map.get(
