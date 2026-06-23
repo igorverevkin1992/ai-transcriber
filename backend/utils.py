@@ -148,18 +148,28 @@ def validate_file_extension(filename: str) -> str | None:
 _EMBEDDED_TC_RE = re.compile(r"^(\d{2})[:;](\d{2})[:;](\d{2})[:;](\d{2})$")
 
 
-def detect_start_timecode(file_path: str) -> str | None:
-    """Читает встроенный SMPTE-таймкод (tmcd-дорожка MOV/MXF) через ffprobe.
+def _normalize_embedded_tc(value: str) -> str | None:
+    """Если значение — валидный SMPTE-таймкод, нормализует к "HH:MM:SS:FF"."""
+    m = _EMBEDDED_TC_RE.match(value.strip())
+    if m and _validate_tc_parts(*map(int, m.groups())):
+        # ";" — drop-frame нотация (NTSC), нормализуем к ":"
+        return "{}:{}:{}:{}".format(*m.groups())
+    return None
 
-    Вещательные файлы несут таймкод съёмки в контейнере — эталонные
-    стенограммы начинаются именно с него. Возвращает "HH:MM:SS:FF"
+
+def detect_start_timecode(file_path: str) -> str | None:
+    """Читает встроенный SMPTE-таймкод из видео через ffprobe.
+
+    Сначала ищет стандартный тег ``timecode`` (tmcd-дорожка MOV/MXF), затем —
+    запасным проходом — сканирует ВСЕ теги формата и потоков на случай
+    нестандартного поля (встречается в .wmv/ASF). Возвращает "HH:MM:SS:FF"
     или None, если таймкод отсутствует.
     """
     try:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "quiet",
-                "-show_entries", "format_tags=timecode:stream_tags=timecode",
+                "-show_entries", "format_tags:stream_tags",
                 "-of", "json",
                 str(file_path),
             ],
@@ -170,18 +180,27 @@ def detect_start_timecode(file_path: str) -> str | None:
         if result.returncode != 0:
             return None
         data = json.loads(result.stdout)
-        candidates = [data.get("format", {}).get("tags", {}).get("timecode")]
+        tag_dicts = [data.get("format", {}).get("tags", {}) or {}]
         for stream in data.get("streams", []):
-            candidates.append(stream.get("tags", {}).get("timecode"))
-        for tc in candidates:
-            if not tc:
-                continue
-            m = _EMBEDDED_TC_RE.match(tc.strip())
-            if m and _validate_tc_parts(*map(int, m.groups())):
-                # ";" — drop-frame нотация (NTSC), нормализуем к ":"
-                normalized = "{}:{}:{}:{}".format(*m.groups())
-                logger.info("Встроенный таймкод: %s", normalized)
-                return normalized
+            tag_dicts.append(stream.get("tags", {}) or {})
+
+        # Приоритет — явный тег timecode.
+        for tags in tag_dicts:
+            tc = tags.get("timecode")
+            if tc:
+                normalized = _normalize_embedded_tc(tc)
+                if normalized:
+                    logger.info("Встроенный таймкод: %s", normalized)
+                    return normalized
+        # Запасной — любое строковое значение тега, выглядящее как ТК.
+        for tags in tag_dicts:
+            for key, val in tags.items():
+                if key == "timecode" or not isinstance(val, str):
+                    continue
+                normalized = _normalize_embedded_tc(val)
+                if normalized:
+                    logger.info("Встроенный таймкод (тег %s): %s", key, normalized)
+                    return normalized
     except Exception as e:
         logger.warning("Не удалось прочитать встроенный таймкод: %s", e)
     return None

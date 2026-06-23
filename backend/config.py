@@ -156,6 +156,15 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 # фрагменты заменяются маркером «(Технические моменты).». Требует GEMINI_API_KEY.
 TECH_MOMENT_DETECTION = os.getenv("TECH_MOMENT_DETECTION", "true").lower() in ("1", "true", "yes")
 
+# --- OCR выжженного в кадр таймкода ---
+# Когда стартовый ТК не задан ни в имени файла, ни в метаданных контейнера —
+# попытаться распознать выжженный в кадр SMPTE-таймкод (easyocr). default: true.
+OCR_TIMECODE = os.getenv("OCR_TIMECODE", "true").lower() in ("1", "true", "yes")
+# Область кадра с таймкодом, доли 0-1: "left,top,right,bottom". По умолчанию —
+# правый нижний угол (ТК вещательных лент обычно там): ускоряет OCR и отсекает
+# посторонний текст. Пустая строка → искать по всему кадру.
+OCR_TIMECODE_REGION = os.getenv("OCR_TIMECODE_REGION", "0.55,0.82,1.0,1.0")
+
 # --- DOCX metadata ---
 DOCX_AUTHOR = os.getenv("DOCX_AUTHOR", "")
 # Шаблон-пакет из эталонной стенограммы (styles/theme/settings/header).

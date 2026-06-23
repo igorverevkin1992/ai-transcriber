@@ -17,3 +17,6 @@ psutil==7.2.2
 prometheus-client==0.25.0
 python-magic==0.4.27
 python-json-logger==4.1.0
+# OCR выжженного в кадр таймкода (OCR_TIMECODE). Переиспользует уже
+# установленный torch; модель скачивается при первом запуске.
+easyocr==1.7.2

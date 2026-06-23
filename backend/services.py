@@ -24,6 +24,8 @@ from backend.config import (
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
     NO_SPEECH_PROB_THRESHOLD,
+    OCR_TIMECODE,
+    OCR_TIMECODE_REGION,
     OUTPUT_DIR,
     SPEECHKIT_LITERATURE_TEXT,
     SQLITE_DB_PATH,
@@ -840,6 +842,17 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         if embedded_tc:
             meta["start_tc"] = embedded_tc
             logger.info("[%s] Стартовый таймкод из контейнера: %s", project_id[:8], embedded_tc)
+        elif OCR_TIMECODE:
+            from backend.timecode_ocr import detect_burned_in_timecode
+            ocr_tc = detect_burned_in_timecode(str(video_path), fps, region=OCR_TIMECODE_REGION)
+            if ocr_tc:
+                meta["start_tc"] = ocr_tc
+                logger.info("[%s] Стартовый таймкод из кадра (OCR): %s", project_id[:8], ocr_tc)
+            else:
+                logger.warning(
+                    "[%s] Стартовый таймкод не найден (имя файла / контейнер / OCR) — отсчёт с 00:00:00:00",
+                    project_id[:8],
+                )
         else:
             logger.warning(
                 "[%s] Стартовый таймкод не найден ни в имени файла, ни в контейнере — отсчёт с 00:00:00:00",

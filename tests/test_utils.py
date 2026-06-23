@@ -271,6 +271,17 @@ class TestDetectStartTimecode:
         with patch("backend.utils.subprocess.run", return_value=_ffprobe_result(payload)):
             assert detect_start_timecode("video.mp4") is None
 
+    def test_nonstandard_tag_found(self):
+        # ТК в нестандартном поле (не "timecode") — ловим запасным сканом.
+        payload = {"format": {"tags": {"comment": "shot", "start_tc": "04:41:18:00"}}}
+        with patch("backend.utils.subprocess.run", return_value=_ffprobe_result(payload)):
+            assert detect_start_timecode("video.wmv") == "04:41:18:00"
+
+    def test_nontimecode_text_not_misread(self):
+        payload = {"format": {"tags": {"title": "My Video 2024", "encoder": "Lavf"}}}
+        with patch("backend.utils.subprocess.run", return_value=_ffprobe_result(payload)):
+            assert detect_start_timecode("video.wmv") is None
+
     def test_invalid_timecode_rejected(self):
         payload = {"format": {"tags": {"timecode": "99:99:99:99"}}}
         with patch("backend.utils.subprocess.run", return_value=_ffprobe_result(payload)):
