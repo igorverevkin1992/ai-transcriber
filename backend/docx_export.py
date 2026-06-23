@@ -433,13 +433,16 @@ def generate_docx(
 
     original_filename = project.get("original_filename", "transcript")
     download_name = strip_extension(original_filename) + ".docx"
+    # Видимый заголовок документа — без расширения файла. download_name с
+    # «.docx» используется только как имя для скачивания.
+    title_text = strip_extension(original_filename)
 
     # Заголовочный блок (имя файла, разделитель, легенда) в эталонах несёт
     # <w:caps/> — отображается ПРОПИСНЫМИ (f7/f8/ф14-15; разделитель после
     # легенды и реплики — уже без caps).
     header_para = doc.add_paragraph()
     _configure_paragraph(header_para, caps=True)
-    _add_run(header_para, download_name, caps=True)
+    _add_run(header_para, title_text, caps=True)
     _add_goback_bookmark(header_para)
 
     empty1 = doc.add_paragraph()
@@ -480,11 +483,40 @@ def generate_docx(
     # детерминизм; отдельный от rsid-ГПСЧ, чтобы не сцеплять потоки).
     split_rng = random.Random(download_name + ":runsplit")
 
+    # Авто-разделители секций интервью: перед первой репликой каждого НОВОГО
+    # гостя (не служебного спикера) вставляем пустую строку + заголовок-имя +
+    # пустую строку — как блоки интервью в эталоне. Точную границу тех-паузы
+    # (где человек делает разрез ленты) программа не знает, поэтому заголовок
+    # идёт прямо перед первой репликой гостя; вступительный вопрос АЗК остаётся
+    # в предыдущем блоке. Делаем только при >1 госте — иначе это дубль легенды.
+    guest_ids = {
+        sid for sid in speakers_in_segments
+        if sid not in exclude and sid in speakers_info
+    }
+    emit_sections = len(guest_ids) > 1
+    seen_section_guests: set[str] = set()
+
     for seg in segments:
         speaker_id = seg["speaker"]
         abbr = abbr_map.get(speaker_id, "")
         display_name = abbr or final_map.get(speaker_id, f"Спикер {speaker_id}")
         text = seg["text"]
+
+        if (emit_sections and speaker_id in guest_ids
+                and speaker_id not in seen_section_guests):
+            seen_section_guests.add(speaker_id)
+            sec_info = speakers_info.get(speaker_id, {})
+            sec_name = final_map.get(
+                speaker_id, sec_info.get("suggested_name", f"Спикер {speaker_id}")
+            )
+            sec_text = f"{sec_name} – {abbr}." if abbr else f"{sec_name}."
+            sec_blank_before = doc.add_paragraph()
+            _configure_paragraph(sec_blank_before, caps=True)
+            sec_header = doc.add_paragraph()
+            _configure_paragraph(sec_header, caps=True)
+            _add_run(sec_header, sec_text, caps=True)
+            sec_blank_after = doc.add_paragraph()
+            _configure_paragraph(sec_blank_after, caps=True)
 
         p = doc.add_paragraph()
         _configure_paragraph(p)

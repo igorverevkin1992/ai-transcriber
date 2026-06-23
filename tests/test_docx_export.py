@@ -15,9 +15,9 @@ from backend.docx_export import (
 
 
 class TestGenerateDocx:
-    def test_header_is_download_name_with_docx_extension(self, tmp_path, sample_project):
+    def test_header_is_filename_without_extension(self, tmp_path, sample_project):
         out = tmp_path / "out.docx"
-        generate_docx(
+        download_name = generate_docx(
             sample_project,
             final_map={"0": "Денис Майданов", "1": "Григорий Антипенко"},
             abbr_map={"0": "М", "1": "А"},
@@ -25,10 +25,77 @@ class TestGenerateDocx:
         )
         doc = Document(str(out))
         first_para = doc.paragraphs[0]
-        assert first_para.text == "test_interview.docx"
+        # Видимый заголовок — без расширения; имя для скачивания сохраняет «.docx».
+        assert first_para.text == "test_interview"
+        assert download_name == "test_interview.docx"
         for run in first_para.runs:
             assert not run.bold
         assert first_para.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    def test_section_dividers_for_multiple_guests(self, tmp_path, sample_project):
+        out = tmp_path / "out.docx"
+        generate_docx(
+            sample_project,
+            final_map={"0": "Денис Майданов", "1": "Григорий Антипенко"},
+            abbr_map={"0": "М", "1": "А"},
+            output_path=str(out),
+        )
+        texts = [p.text for p in Document(str(out)).paragraphs]
+        # Имя гостя встречается дважды: в общей легенде и как заголовок секции.
+        assert texts.count("Денис Майданов – М.") == 2
+        assert texts.count("Григорий Антипенко – А.") == 2
+
+    def test_no_section_divider_for_single_guest(self, tmp_path):
+        project = {
+            "original_filename": "solo.mp4",
+            "result": {
+                "speakers": {"0": {"duration_sec": 60.0, "suggested_name": "Гость"}},
+                "segments": [
+                    {"timecode": "00:00:00:00", "speaker": "0", "text": "Привет."},
+                    {"timecode": "00:00:05:00", "speaker": "0", "text": "Как дела?"},
+                ],
+            },
+        }
+        out = tmp_path / "out.docx"
+        generate_docx(
+            project, final_map={"0": "Иван Иванов"}, abbr_map={"0": "И"},
+            output_path=str(out),
+        )
+        texts = [p.text for p in Document(str(out)).paragraphs]
+        # Один гость → заголовок-секция не дублируется, имя только в легенде.
+        assert texts.count("Иван Иванов – И.") == 1
+
+    def test_section_divider_skips_excluded_interviewer(self, tmp_path):
+        project = {
+            "original_filename": "intv.mp4",
+            "result": {
+                "speakers": {
+                    "0": {"duration_sec": 30.0, "suggested_name": "АЗК"},
+                    "1": {"duration_sec": 60.0, "suggested_name": "Гость1"},
+                    "2": {"duration_sec": 60.0, "suggested_name": "Гость2"},
+                },
+                "segments": [
+                    {"timecode": "00:00:00:00", "speaker": "0", "text": "Вопрос один?"},
+                    {"timecode": "00:00:05:00", "speaker": "1", "text": "Ответ один."},
+                    {"timecode": "00:00:10:00", "speaker": "0", "text": "Вопрос два?"},
+                    {"timecode": "00:00:15:00", "speaker": "2", "text": "Ответ два."},
+                ],
+            },
+        }
+        out = tmp_path / "out.docx"
+        generate_docx(
+            project,
+            final_map={"0": "АЗК", "1": "Гость Первый", "2": "Гость Второй"},
+            abbr_map={"1": "П", "2": "В"},
+            output_path=str(out),
+            legend_exclude={"0"},
+        )
+        texts = [p.text for p in Document(str(out)).paragraphs]
+        # АЗК исключён и из легенды, и из заголовков секций.
+        assert all("АЗК" not in t for t in texts if "–" in t)
+        # Гости получают заголовки секций (имя дважды: легенда + секция).
+        assert texts.count("Гость Первый – П.") == 2
+        assert texts.count("Гость Второй – В.") == 2
 
     def test_legend_only_for_speakers_in_segments(self, tmp_path, sample_project):
         sample_project["result"]["speakers"]["99"] = {
