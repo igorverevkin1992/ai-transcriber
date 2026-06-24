@@ -171,23 +171,27 @@ def regex_cleanup(text: str) -> str:
     return text.strip()
 
 
-def _get_gemini_model():
-    """Возвращает Gemini-модель для полировки текста."""
+def _get_gemini_client():
+    """Возвращает клиент Gemini (новый SDK ``google-genai``).
+
+    Легаси-пакет ``google-generativeai`` объявлен deprecated; здесь используется
+    унифицированный ``google-genai`` с ``genai.Client``. Модель передаётся не при
+    создании клиента, а в каждом вызове ``generate_content`` (см. ``_gemini_call``).
+    """
     try:
-        import google.generativeai as genai
+        from google import genai
     except ImportError:
-        logger.warning("google-generativeai не установлен. Gemini-полировка недоступна.")
+        logger.warning("google-genai не установлен. Gemini-полировка недоступна.")
         return None
 
     if not GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY не задан. Gemini-полировка недоступна.")
         return None
 
-    genai.configure(api_key=GEMINI_API_KEY)
-    return genai.GenerativeModel(GEMINI_MODEL)
+    return genai.Client(api_key=GEMINI_API_KEY)
 
 
-_gemini_model = None
+_gemini_client = None
 _gemini_lock = threading.Lock()
 
 
@@ -219,20 +223,21 @@ def _gemini_call(prompt: str) -> str | None:
     недоступна (нет пакета/ключа). Окончательный сбой после ретраев →
     ``GeminiPolishError``.
     """
-    global _gemini_model
-    if _gemini_model is None:
+    global _gemini_client
+    if _gemini_client is None:
         with _gemini_lock:
-            if _gemini_model is None:
-                _gemini_model = _get_gemini_model()
-    if _gemini_model is None:
+            if _gemini_client is None:
+                _gemini_client = _get_gemini_client()
+    if _gemini_client is None:
         return None
 
     for attempt in range(GEMINI_MAX_RETRIES):
         try:
             # temperature=0: корректор/классификатор должен быть детерминированным
-            response = _gemini_model.generate_content(
-                prompt,
-                generation_config={"temperature": 0.0},
+            response = _gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config={"temperature": 0.0},
             )
             result = _clean_gemini_response(response.text)
             gemini_calls.labels(outcome="success").inc()

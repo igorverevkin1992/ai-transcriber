@@ -313,20 +313,20 @@ class TestGeminiPrompt:
         fake_response = mock.MagicMock()
         fake_response.text = "хм понятно"
 
-        fake_model = mock.MagicMock()
-        fake_model.generate_content.return_value = fake_response
+        fake_client = mock.MagicMock()
+        fake_client.models.generate_content.return_value = fake_response
 
         import backend.postprocess as pp
-        original_model = pp._gemini_model
-        pp._gemini_model = fake_model
+        original_client = pp._gemini_client
+        pp._gemini_client = fake_client
         try:
             gemini_polish("хм понятно")
-            prompt_text = fake_model.generate_content.call_args[0][0]
+            prompt_text = fake_client.models.generate_content.call_args.kwargs["contents"]
             assert "«хм»" in prompt_text
             assert "сохраняй" in prompt_text.split("«хм»")[1][:50]
             assert "Убирай" not in prompt_text or "«хм»" not in prompt_text.split("Убирай")[1][:50]
         finally:
-            pp._gemini_model = original_model
+            pp._gemini_client = original_client
 
 
 class TestAbbreviationCapitalization:
