@@ -20,6 +20,9 @@ FILENAME_STOP_WORDS = {
 
 
 _FILE_CODE_RE = re.compile(r"^[fф]\d+(-\d+)?$", re.IGNORECASE)
+# Токен числа говорящих: `s3` / `с3` (лат. и кир. «с») — подсказка для диаризации,
+# когда имён в имени файла нет. По аналогии с `fN` (FPS).
+_SPEAKER_COUNT_RE = re.compile(r"^[sс](\d+)$", re.IGNORECASE)
 _DATE_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$|^\d{4}\.\d{2}\.\d{2}$")
 _PURE_DIGITS_RE = re.compile(r"^\d+$")
 
@@ -35,7 +38,7 @@ def _validate_tc_parts(h: int, m: int, s: int, f: int) -> bool:
 
 def parse_filename_metadata(filename: str) -> dict:
     """Извлекает имена спикеров и стартовый таймкод из названия файла."""
-    result = {"speakers": [], "start_tc": "00:00:00:00"}
+    result = {"speakers": [], "start_tc": "00:00:00:00", "num_speakers": 0}
     # Гард от регекспов по аномально длинному пользовательскому вводу:
     # легитимные имена файлов не превышают 255 байт (лимит файловых систем).
     filename = filename[:_MAX_FILENAME_LEN]
@@ -52,6 +55,10 @@ def parse_filename_metadata(filename: str) -> dict:
 
     for part in parts:
         word = part.strip()
+        sc_match = _SPEAKER_COUNT_RE.match(word)
+        if sc_match:
+            result["num_speakers"] = int(sc_match.group(1))
+            continue
         if (
             word
             and word.lower() not in FILENAME_STOP_WORDS

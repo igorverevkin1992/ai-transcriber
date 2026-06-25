@@ -163,6 +163,20 @@ class TestParseFilenameMetadata:
         result = parse_filename_metadata("Иванов_" + "a" * 100_000 + ".mp4")
         assert "Иванов" in result["speakers"]
 
+    def test_speaker_count_token_latin(self):
+        result = parse_filename_metadata("17.06.2026_s3_f15.wmv")
+        assert result["num_speakers"] == 3
+        assert result["speakers"] == []
+
+    def test_speaker_count_token_cyrillic(self):
+        result = parse_filename_metadata("Иванов_с2.mp4")
+        assert result["num_speakers"] == 2
+        assert result["speakers"] == ["Иванов"]
+
+    def test_speaker_count_absent_defaults_zero(self):
+        result = parse_filename_metadata("Иванов_f15.mp4")
+        assert result["num_speakers"] == 0
+
 
 class TestStripExtension:
     def test_basic(self):

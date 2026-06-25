@@ -85,6 +85,13 @@ STRICT_DIARIZATION = os.getenv("STRICT_DIARIZATION", "true").lower() in ("1", "t
 # (её условия обычно уже приняты). Переопределите, если приняли community-1.
 DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
 
+# Точное число говорящих для подсказки pyannote, когда оно известно заранее, а
+# имён в имени файла нет (без хинта pyannote на CPU склонна сливать короткие
+# реплики ведущего в кластер гостя). Приоритет: токен `sN` в имени файла → этот
+# env → число имён из имени файла. 0 = не задано. При >=2 передаётся в диаризацию
+# как min_speakers == max_speakers.
+DIARIZATION_NUM_SPEAKERS = int(os.getenv("DIARIZATION_NUM_SPEAKERS", "0") or "0")
+
 # --- Paths ---
 TEMP_DIR = Path("temp_files")
 TEMP_DIR.mkdir(exist_ok=True)
@@ -98,6 +105,9 @@ MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
 TURN_MERGE_ENABLED = os.getenv("TURN_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
 TURN_INLINE_TC_SECONDS = float(os.getenv("TURN_INLINE_TC_SECONDS", "60"))
 TECH_BREAK_GAP_SECONDS = float(os.getenv("TECH_BREAK_GAP_SECONDS", "30"))
+# Ставить ли точку после маркера техпаузы: «(Технические моменты).» (true, как в
+# эталонах f7/f8) или «(Технические моменты)» без точки (как в некоторых других).
+TECH_BREAK_DOT = os.getenv("TECH_BREAK_DOT", "true").lower() in ("1", "true", "yes")
 
 # --- Whisper tuning ---
 # beam_size: выше = точнее, но медленнее (рекомендуется 5-10)
@@ -162,6 +172,11 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 # перезапуски камеры, проверка микрофона и т.п.) через Gemini: ЯВНО не-интервью
 # фрагменты заменяются маркером «(Технические моменты).». Требует GEMINI_API_KEY.
 TECH_MOMENT_DETECTION = os.getenv("TECH_MOMENT_DETECTION", "true").lower() in ("1", "true", "yes")
+# Агрессивный режим определения техмоментов: помимо команд группе/настройки
+# техники также помечает закадровую организационную болтовню (обращения к
+# посторонним по имени, «пойду умоюсь», «давай с тебя» и т.п.). Дефолт false —
+# консервативный режим (риск задеть реальные реплики). Требует GEMINI_API_KEY.
+TECH_MOMENT_AGGRESSIVE = os.getenv("TECH_MOMENT_AGGRESSIVE", "false").lower() in ("1", "true", "yes")
 
 # --- OCR выжженного в кадр таймкода ---
 # Когда стартовый ТК не задан ни в имени файла, ни в метаданных контейнера —
@@ -171,6 +186,18 @@ OCR_TIMECODE = os.getenv("OCR_TIMECODE", "true").lower() in ("1", "true", "yes")
 # нижняя полоса от центра до правого края (широкий бокс ТК обычно там): ускоряет
 # OCR и отсекает посторонний текст. Пустая строка → искать по всему кадру.
 OCR_TIMECODE_REGION = os.getenv("OCR_TIMECODE_REGION", "0.3,0.7,1.0,1.0")
+
+# --- DOCX formatting ---
+# Тире между именем и аббревиатурой в легенде: «Имя – ОА» (en-dash, как f7/f8)
+# или «Имя — ОА» (em-dash, как в некоторых эталонах). Задайте LEGEND_DASH=—.
+LEGEND_DASH = os.getenv("LEGEND_DASH", "–")
+# Точка в конце строки легенды/разделителя: «Имя – ОА.» (true, как f7/f8) или
+# «Имя — ОА» без точки (false).
+LEGEND_TRAILING_DOT = os.getenv("LEGEND_TRAILING_DOT", "true").lower() in ("1", "true", "yes")
+# Вставлять ли внутренние разделители-легенды перед первой репликой каждого
+# гостя (при >1 госте). true = текущее поведение; false — единый блок легенды
+# сверху, без повторов (как в бадминтонном эталоне).
+SECTION_DIVIDERS_ENABLED = os.getenv("SECTION_DIVIDERS_ENABLED", "true").lower() in ("1", "true", "yes")
 
 # --- DOCX metadata ---
 DOCX_AUTHOR = os.getenv("DOCX_AUTHOR", "")

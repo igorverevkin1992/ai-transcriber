@@ -7,11 +7,27 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt
 
+import backend.docx_export as docx_export
 from backend.docx_export import (
     _REFERENCE_PART_ORDER,
+    _legend_line,
     generate_docx,
     is_legend_excluded_name,
 )
+
+
+class TestLegendLine:
+    def test_default_en_dash_with_dot(self):
+        # Дефолт: en-dash и точка (как калибровано на f7/f8)
+        assert _legend_line("Олег Александрович", "ОА") == "Олег Александрович – ОА."
+
+    def test_em_dash_no_dot(self, monkeypatch):
+        monkeypatch.setattr(docx_export, "LEGEND_DASH", "—")
+        monkeypatch.setattr(docx_export, "LEGEND_TRAILING_DOT", False)
+        assert _legend_line("Олег Александрович", "ОА") == "Олег Александрович — ОА"
+
+    def test_no_abbr(self):
+        assert _legend_line("Имя", "") == "Имя."
 
 
 class TestGenerateDocx:

@@ -7,6 +7,7 @@ from backend.config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     GLOSSARY_REPLACEMENTS,
+    TECH_MOMENT_AGGRESSIVE,
     TECH_MOMENT_DETECTION,
     TRANSCRIPT_GLOSSARY,
     logger,
@@ -331,6 +332,29 @@ _TECH_MOMENT_PROMPT = (
     "Фрагменты:\n"
 )
 
+# Агрессивный режим (TECH_MOMENT_AGGRESSIVE): помимо явной техники помечает и
+# закадровую организационную болтовню, которую человек обычно вырезает. Всё ещё
+# с контрпримерами, чтобы не резать содержательные ответы по теме интервью.
+_TECH_MOMENT_PROMPT_AGGRESSIVE = (
+    "Ты — редактор стенограммы телеинтервью на русском языке. Ниже —\n"
+    "пронумерованные фрагменты речи из записи.\n"
+    "Интервью состоит из вопросов ведущего (голос за кадром) и ответов гостя\n"
+    "ПО ТЕМЕ беседы.\n"
+    "Найди фрагменты, которые НЕ относятся к содержанию интервью:\n"
+    "- команды съёмочной группе, перезапуск/настройка камеры, проверка\n"
+    "  микрофона, технические указания, обращения к оператору/режиссёру,\n"
+    "  отсчёт, хлопушка;\n"
+    "- закадровая организация процесса: обращения к посторонним по имени\n"
+    "  (оператор, ассистенты), «давай с тебя», «кто-то ещё попробуйте»,\n"
+    "  «пойду умоюсь», «подождите», обсуждение, кто и когда играет/снимает.\n"
+    "ОСТАВЛЯЙ как интервью: содержательные ответы и вопросы по теме, даже с\n"
+    "разговорными «ну», «вот», «как бы»; реплики про сам предмет беседы.\n"
+    "При сомнении между «по теме» и «организация» — НЕ помечай.\n"
+    "Верни ТОЛЬКО номера технических/организационных фрагментов через запятую\n"
+    "(например: 2, 5). Если таких нет — верни одно слово: НЕТ.\n\n"
+    "Фрагменты:\n"
+)
+
 _TECH_NUMBERS_RE = re.compile(r"\d+")
 _TECH_BATCH_CHARS = 5000
 
@@ -373,13 +397,14 @@ def detect_technical_segments(
     if cur:
         batches.append(cur)
 
+    prompt = _TECH_MOMENT_PROMPT_AGGRESSIVE if TECH_MOMENT_AGGRESSIVE else _TECH_MOMENT_PROMPT
     failed = False
     for batch in batches:
         numbered = "\n".join(
             f"{n}. {segments[idx]['text']}" for n, idx in enumerate(batch, 1)
         )
         try:
-            result = _gemini_call(_TECH_MOMENT_PROMPT + numbered)
+            result = _gemini_call(prompt + numbered)
         except GeminiPolishError:
             failed = True
             continue

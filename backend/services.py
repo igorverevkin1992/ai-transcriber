@@ -14,6 +14,7 @@ import requests
 
 from backend.config import (
     DIARIZATION_MODEL,
+    DIARIZATION_NUM_SPEAKERS,
     HALLUCINATION_BLACKLIST,
     HF_TOKEN,
     INTERVIEWER_AUTODETECT,
@@ -685,14 +686,28 @@ def _transcribe_with_whisperx(
 
     if _whisperx_diarize_pipeline is not None:
         diarize_kwargs = {}
+        # Источник числа говорящих по убыванию точности: токен `sN` в имени файла
+        # → env DIARIZATION_NUM_SPEAKERS → число имён в имени файла. Точное число
+        # (токен/env) задаём как min == max — без «свободы» ±1 у кластеризации;
+        # из числа имён оставляем прежний диапазон n..n+1 (имён может быть меньше,
+        # чем реальных голосов: ведущий и т.п.).
+        exact_n = 0
+        names_n = 0
         if original_filename:
             meta = parse_filename_metadata(original_filename)
-            num_speakers = len(meta.get("speakers", []))
-            if num_speakers >= 2:
-                diarize_kwargs["min_speakers"] = num_speakers
-                diarize_kwargs["max_speakers"] = num_speakers + 1
-                logger.info("[%s] Диаризация: хинт %d-%d спикеров из имени файла",
-                            project_id[:8], num_speakers, num_speakers + 1)
+            names_n = len(meta.get("speakers", []))
+            exact_n = meta.get("num_speakers", 0) or 0
+        if exact_n < 2 and DIARIZATION_NUM_SPEAKERS >= 2:
+            exact_n = DIARIZATION_NUM_SPEAKERS
+        if exact_n >= 2:
+            diarize_kwargs["min_speakers"] = exact_n
+            diarize_kwargs["max_speakers"] = exact_n
+            logger.info("[%s] Диаризация: хинт ровно %d спикеров", project_id[:8], exact_n)
+        elif names_n >= 2:
+            diarize_kwargs["min_speakers"] = names_n
+            diarize_kwargs["max_speakers"] = names_n + 1
+            logger.info("[%s] Диаризация: хинт %d-%d спикеров из имени файла",
+                        project_id[:8], names_n, names_n + 1)
         try:
             diarize_segments = _whisperx_diarize_pipeline(audio, **diarize_kwargs)
             result = _get_assign_word_speakers()(diarize_segments, result)

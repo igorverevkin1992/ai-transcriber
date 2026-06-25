@@ -9,7 +9,13 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt
 
-from backend.config import DOCX_AUTHOR, DOCX_TEMPLATE_PATH
+from backend.config import (
+    DOCX_AUTHOR,
+    DOCX_TEMPLATE_PATH,
+    LEGEND_DASH,
+    LEGEND_TRAILING_DOT,
+    SECTION_DIVIDERS_ENABLED,
+)
 from backend.turns import UNCLEAR_TEXT
 from backend.utils import strip_extension
 
@@ -28,6 +34,18 @@ _LEGEND_EXCLUDE_NAME_RE = re.compile(r"^([А-ЯЁ]ЗК|[МЖ]{1,2}\d*|ЖЕНЩИ
 def is_legend_excluded_name(name: str) -> bool:
     """True, если имя спикера — служебная метка, не входящая в легенду."""
     return bool(_LEGEND_EXCLUDE_NAME_RE.match(name.strip().upper()))
+
+
+def _legend_line(name: str, abbr: str) -> str:
+    """Строка легенды/разделителя: «Имя <тире> АБВ<точка>».
+
+    Тире (`–`/`—`) и наличие точки управляются конфигом (LEGEND_DASH /
+    LEGEND_TRAILING_DOT) — разные эталоны используют разные конвенции.
+    """
+    dot = "." if LEGEND_TRAILING_DOT else ""
+    if abbr:
+        return f"{name} {LEGEND_DASH} {abbr}{dot}"
+    return f"{name}{dot}"
 
 
 def _set_paragraph_mark_rpr(paragraph, caps: bool = False):
@@ -471,7 +489,7 @@ def generate_docx(
             continue
         name = final_map.get(speaker_id, info.get("suggested_name", f"Спикер {speaker_id}"))
         abbr = abbr_map.get(speaker_id, "")
-        legend_text = f"{name} – {abbr}." if abbr else f"{name}."
+        legend_text = _legend_line(name, abbr)
         legend_para = doc.add_paragraph()
         _configure_paragraph(legend_para, caps=True)
         _add_run(legend_para, legend_text, caps=True)
@@ -493,7 +511,7 @@ def generate_docx(
         sid for sid in speakers_in_segments
         if sid not in exclude and sid in speakers_info
     }
-    emit_sections = len(guest_ids) > 1
+    emit_sections = SECTION_DIVIDERS_ENABLED and len(guest_ids) > 1
     seen_section_guests: set[str] = set()
 
     for seg in segments:
@@ -510,7 +528,7 @@ def generate_docx(
             sec_name = final_map.get(
                 speaker_id, sec_info.get("suggested_name", f"Спикер {speaker_id}")
             )
-            sec_text = f"{sec_name} – {abbr}." if abbr else f"{sec_name}."
+            sec_text = _legend_line(sec_name, abbr)
             sec_blank_before = doc.add_paragraph()
             _configure_paragraph(sec_blank_before, caps=True)
             sec_header = doc.add_paragraph()

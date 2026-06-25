@@ -337,6 +337,37 @@ class TestAbbreviationCapitalization:
         assert regex_cleanup("и т.д. МХАТ продолжил") == "и так далее МХАТ продолжил"
 
 
+class TestTechMomentPromptSelection:
+    def _run_and_capture_prompt(self, monkeypatch, aggressive):
+        captured = {}
+
+        def fake_call(prompt):
+            captured["prompt"] = prompt
+            return "НЕТ"
+
+        monkeypatch.setattr(pp, "_gemini_call", fake_call)
+        monkeypatch.setattr(pp, "TECH_MOMENT_AGGRESSIVE", aggressive)
+        pp.detect_technical_segments([{"text": "Олег Александрович, расскажите про бадминтон."}])
+        return captured["prompt"]
+
+    def test_conservative_default_prompt(self, monkeypatch):
+        prompt = self._run_and_capture_prompt(monkeypatch, False)
+        assert "при ЛЮБОМ сомнении НЕ помечай" in prompt
+        assert "пойду умоюсь" not in prompt
+
+    def test_aggressive_prompt_when_enabled(self, monkeypatch):
+        prompt = self._run_and_capture_prompt(monkeypatch, True)
+        assert "организация процесса" in prompt
+        assert "пойду умоюсь" in prompt
+
+
+class TestTechBreakDot:
+    def test_marker_respects_dot_config(self):
+        # Дефолт — с точкой (как f7/f8)
+        from backend.turns import TECH_BREAK_TEXT
+        assert TECH_BREAK_TEXT == "(Технические моменты)."
+
+
 class TestGlossaryReplacements:
     def test_word_replacement(self, monkeypatch):
         import backend.postprocess as pp

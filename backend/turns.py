@@ -17,9 +17,10 @@
 
 import re
 
+from backend.config import TECH_BREAK_DOT
 from backend.utils import offset_tc
 
-TECH_BREAK_TEXT = "(Технические моменты)."
+TECH_BREAK_TEXT = "(Технические моменты)" + ("." if TECH_BREAK_DOT else "")
 # Замена неуверенных ASR-сегментов; эталоны пишут её ВНУТРИ реплики
 # («...текст (неразборчиво) текст»), поэтому склеивается как обычная речь.
 UNCLEAR_TEXT = "(неразборчиво)"
