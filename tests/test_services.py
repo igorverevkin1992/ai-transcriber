@@ -1,4 +1,111 @@
-from backend.services import _compute_smart_abbreviations, _invert_name
+from backend.services import (
+    _compute_smart_abbreviations,
+    _invert_name,
+    _resegment_by_word_speakers,
+)
+
+
+def _w(word, start, end, speaker=None):
+    """Построить word-dict в формате whisperx (start/end в секундах)."""
+    d = {"word": word, "start": start, "end": end}
+    if speaker is not None:
+        d["speaker"] = speaker
+    return d
+
+
+class TestResegmentByWordSpeakers:
+    def test_single_speaker_preserves_original_text(self):
+        # Все слова одного спикера → один сегмент, ИСХОДНЫЙ текст дословно.
+        seg = {
+            "text": "Полный текст реплики.", "start": 1.0, "end": 3.0,
+            "speaker": "SPEAKER_01",
+            "words": [_w("Полный", 1.0, 1.4, "SPEAKER_01"),
+                      _w("текст", 1.4, 1.8, "SPEAKER_01"),
+                      _w("реплики.", 1.8, 2.5, "SPEAKER_01")],
+        }
+        parts = _resegment_by_word_speakers(seg, "0")
+        assert len(parts) == 1
+        assert parts[0]["text"] == "Полный текст реплики."
+        assert parts[0]["channel_tag"] == "1"
+        assert parts[0]["start_ms"] == 1000
+        assert parts[0]["end_ms"] == 3000
+
+    def test_split_on_speaker_change(self):
+        # Вставка другого спикера внутри сегмента → два куска.
+        seg = {
+            "text": "Около тридцати видов. Вы часто играете?",
+            "start": 10.0, "end": 13.0, "speaker": "SPEAKER_01",
+            "words": [_w("Около", 10.0, 10.3, "SPEAKER_01"),
+                      _w("тридцати", 10.3, 10.7, "SPEAKER_01"),
+                      _w("видов.", 10.7, 11.5, "SPEAKER_01"),
+                      _w("Вы", 12.0, 12.2, "SPEAKER_00"),
+                      _w("часто", 12.2, 12.5, "SPEAKER_00"),
+                      _w("играете?", 12.5, 13.0, "SPEAKER_00")],
+        }
+        parts = _resegment_by_word_speakers(seg, "0")
+        assert [p["channel_tag"] for p in parts] == ["1", "0"]
+        assert parts[0]["text"] == "Около тридцати видов."
+        assert parts[1]["text"] == "Вы часто играете?"
+        assert parts[0]["start_ms"] == 10000
+        assert parts[0]["end_ms"] == 11500
+        assert parts[1]["start_ms"] == 12000
+        assert parts[1]["end_ms"] == 13000
+
+    def test_word_without_label_inherits_previous(self):
+        # Слово без своей метки наследует спикера предыдущего слова.
+        seg = {
+            "text": "А Б В Г", "start": 0.0, "end": 4.0, "speaker": "SPEAKER_00",
+            "words": [_w("А", 0.0, 1.0, "SPEAKER_00"),
+                      _w("Б", 1.0, 2.0),  # нет метки → наследует SPEAKER_00
+                      _w("В", 2.0, 3.0, "SPEAKER_01"),
+                      _w("Г", 3.0, 4.0)],  # наследует SPEAKER_01
+        }
+        parts = _resegment_by_word_speakers(seg, "0")
+        assert [p["channel_tag"] for p in parts] == ["0", "1"]
+        assert parts[0]["text"] == "А Б"
+        assert parts[1]["text"] == "В Г"
+
+    def test_no_word_labels_uses_segment_speaker(self):
+        # Ни одно слово не размечено, но у сегмента есть speaker → не режем.
+        seg = {
+            "text": "Текст.", "start": 0.0, "end": 2.0, "speaker": "SPEAKER_02",
+            "words": [_w("Текст.", 0.0, 1.5)],
+        }
+        parts = _resegment_by_word_speakers(seg, "0")
+        assert len(parts) == 1
+        assert parts[0]["channel_tag"] == "2"
+        assert parts[0]["text"] == "Текст."
+
+    def test_no_speaker_anywhere_uses_fallback(self):
+        # Нет меток ни у сегмента, ни у слов → спикер предыдущего сегмента.
+        seg = {
+            "text": "Текст.", "start": 0.0, "end": 2.0,
+            "words": [_w("Текст.", 0.0, 1.5)],
+        }
+        parts = _resegment_by_word_speakers(seg, "3")
+        assert len(parts) == 1
+        assert parts[0]["channel_tag"] == "3"
+
+    def test_no_words_falls_back_to_segment(self):
+        # Сегмент без слов → один кусок с синтетическим словом и текстом.
+        seg = {"text": "Без слов.", "start": 5.0, "end": 6.0, "speaker": "SPEAKER_00", "words": []}
+        parts = _resegment_by_word_speakers(seg, "0")
+        assert len(parts) == 1
+        assert parts[0]["text"] == "Без слов."
+        assert parts[0]["words"] == [{"text": "Без слов.", "start_ms": 5000, "end_ms": 6000}]
+
+    def test_split_part_words_are_homogeneous(self):
+        # Каждый кусок несёт только свои слова с таймкодами.
+        seg = {
+            "text": "Раз два три", "start": 0.0, "end": 3.0, "speaker": "SPEAKER_00",
+            "words": [_w("Раз", 0.0, 1.0, "SPEAKER_00"),
+                      _w("два", 1.0, 2.0, "SPEAKER_01"),
+                      _w("три", 2.0, 3.0, "SPEAKER_01")],
+        }
+        parts = _resegment_by_word_speakers(seg, "0")
+        assert len(parts) == 2
+        assert [wd["text"] for wd in parts[0]["words"]] == ["Раз"]
+        assert [wd["text"] for wd in parts[1]["words"]] == ["два", "три"]
 
 
 class TestComputeSmartAbbreviations:

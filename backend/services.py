@@ -40,6 +40,7 @@ from backend.config import (
     UNCLEAR_LOGPROB_THRESHOLD,
     WHISPER_BEAM_SIZE,
     WHISPER_INITIAL_PROMPT,
+    WORD_LEVEL_DIARIZATION,
     YANDEX_API_KEY,
     logger,
 )
@@ -597,6 +598,96 @@ def _load_whisperx_model(project_id: str, model_name: str, dev: str, initial_pro
     return _whisperx_model
 
 
+def _resegment_by_word_speakers(seg: dict, fallback_speaker: str) -> list[dict]:
+    """Разбить один ASR-сегмент на части по word-level меткам спикеров.
+
+    whisperx.assign_word_speakers проставляет спикера КАЖДОМУ слову, но один
+    ASR-сегмент часто захватывает короткую вставку другого спикера (вопрос
+    ведущего внутри монолога гостя). Если все слова одного спикера — возвращаем
+    сегмент как есть, сохраняя ИСХОДНЫЙ текст дословно (без потерь от пересборки
+    по словам). Если внутри есть смена спикера — режем на серии подряд идущих
+    слов одного спикера, восстанавливая текст каждого куска из его слов.
+
+    Слово без собственной метки наследует спикера предыдущего слова; в начале
+    сегмента — `seg["speaker"]` (majority из assign_word_speakers) либо
+    `fallback_speaker` (спикер предыдущего сегмента).
+    """
+    seg_text = seg.get("text", "").strip()
+    seg_start_ms = int(seg.get("start", 0) * 1000)
+    seg_end_ms = int(seg.get("end", 0) * 1000)
+    seg_raw = seg.get("speaker")
+    seg_speaker = _normalize_speaker_id(seg_raw) if seg_raw else fallback_speaker
+
+    labeled = []
+    cur_lbl = seg_speaker
+    for w in seg.get("words", []):
+        wtext = w.get("word", "").strip()
+        if not wtext:
+            continue
+        wraw = w.get("speaker")
+        if wraw:
+            cur_lbl = _normalize_speaker_id(wraw)
+        has_ts = "start" in w and "end" in w
+        labeled.append({
+            "text": wtext,
+            "speaker": cur_lbl,
+            "start_ms": int(w["start"] * 1000) if has_ts else None,
+            "end_ms": int(w["end"] * 1000) if has_ts else None,
+        })
+
+    def _ts_words(items):
+        return [
+            {"text": it["text"], "start_ms": it["start_ms"], "end_ms": it["end_ms"]}
+            for it in items if it["start_ms"] is not None
+        ]
+
+    distinct = {it["speaker"] for it in labeled}
+    # Нет слов или один спикер на весь сегмент → не режем: сохраняем исходный
+    # текст сегмента целиком (важно, чтобы не регрессить эталоны f7/f8).
+    if len(distinct) <= 1:
+        speaker = next(iter(distinct)) if distinct else seg_speaker
+        words = _ts_words(labeled)
+        return [{
+            "text": seg_text,
+            "channel_tag": speaker,
+            "start_ms": seg_start_ms,
+            "end_ms": seg_end_ms,
+            "words": words or [{"text": seg_text, "start_ms": seg_start_ms, "end_ms": seg_end_ms}],
+        }]
+
+    parts: list[dict] = []
+    run: list[dict] = []
+
+    def _flush():
+        if not run:
+            return
+        speaker = run[0]["speaker"]
+        text = " ".join(it["text"] for it in run).strip()
+        if not text:
+            return
+        words = _ts_words(run)
+        if words:
+            start_ms, end_ms = words[0]["start_ms"], words[-1]["end_ms"]
+        else:
+            start_ms, end_ms = seg_start_ms, seg_end_ms
+            words = [{"text": text, "start_ms": start_ms, "end_ms": end_ms}]
+        parts.append({
+            "text": text,
+            "channel_tag": speaker,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "words": words,
+        })
+
+    for it in labeled:
+        if run and it["speaker"] != run[-1]["speaker"]:
+            _flush()
+            run = []
+        run.append(it)
+    _flush()
+    return parts
+
+
 def _transcribe_with_whisperx(
     project_id: str,
     file_path,
@@ -722,6 +813,15 @@ def _transcribe_with_whisperx(
     for seg in result["segments"]:
         text = seg.get("text", "").strip()
         if not text:
+            continue
+
+        if WORD_LEVEL_DIARIZATION:
+            # Режем сегмент по word-level меткам, чтобы короткая вставка другого
+            # спикера (вопрос ведущего) не «приклеивалась» к монологу гостя.
+            parts = _resegment_by_word_speakers(seg, last_speaker)
+            if parts:
+                segments.extend(parts)
+                last_speaker = parts[-1]["channel_tag"]
             continue
 
         raw_speaker = seg.get("speaker")

@@ -92,6 +92,14 @@ DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization
 # как min_speakers == max_speakers.
 DIARIZATION_NUM_SPEAKERS = int(os.getenv("DIARIZATION_NUM_SPEAKERS", "0") or "0")
 
+# Резегментация по словам: whisperx.assign_word_speakers размечает спикера
+# КАЖДОМУ слову, но один ASR-сегмент часто захватывает короткую вставку другого
+# спикера (вопрос ведущего внутри монолога гостя). Когда true — режем такой
+# сегмент на однородные по спикеру куски по word-level меткам, вместо одного
+# спикера на весь сегмент. Сегменты без смены спикера внутри не трогаются
+# (исходный текст сохраняется дословно). default: true.
+WORD_LEVEL_DIARIZATION = os.getenv("WORD_LEVEL_DIARIZATION", "true").lower() in ("1", "true", "yes")
+
 # --- Paths ---
 TEMP_DIR = Path("temp_files")
 TEMP_DIR.mkdir(exist_ok=True)
