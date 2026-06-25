@@ -188,7 +188,19 @@ def _get_gemini_client():
         logger.warning("GEMINI_API_KEY не задан. Gemini-полировка недоступна.")
         return None
 
-    return genai.Client(api_key=GEMINI_API_KEY)
+    try:
+        return genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        # Сбой создания клиента (например, неподдерживаемый httpx прокси вида
+        # socks4://, кривой ключ) НЕ должен ронять всю задачу — полировка
+        # опциональна. Отключаем её и продолжаем без Gemini.
+        logger.warning(
+            "Не удалось создать клиент Gemini (%s). Полировка отключена. "
+            "Частая причина — прокси: httpx не поддерживает socks4, используйте "
+            "socks5:// (плюс пакет httpx[socks]) или http-прокси.",
+            e,
+        )
+        return None
 
 
 _gemini_client = None
