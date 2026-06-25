@@ -483,6 +483,75 @@ class TestMaybeRetry:
         assert store["p10"]["retry_count"] == 3
 
 
+class _SyncExecutor:
+    """Исполняет submit(fn) синхронно — для детерминированных тестов submit_task."""
+    def submit(self, fn):
+        fn()
+        class _F:
+            def result(self, timeout=None):
+                return None
+        return _F()
+
+
+class TestSubmitTaskIdempotency:
+    def test_skips_completed_project(self, fresh_store, monkeypatch):
+        # Дубликат-отправка завершённого проекта не должна запускать обработку
+        # повторно (иначе падает «Файл не найден» и затирает COMPLETED).
+        store, _, _ = fresh_store
+        monkeypatch.setattr(services, "_ensure_executor", lambda: _SyncExecutor())
+        store.create("c1", {"id": "c1", "status": ProjectStatusEnum.COMPLETED, "created_at": 1.0})
+        calls = []
+        services.submit_task(lambda *a, **k: calls.append(1), "c1", project_id="c1")
+        assert calls == []
+        assert store["c1"]["status"] == ProjectStatusEnum.COMPLETED
+
+    def test_runs_queued_project(self, fresh_store, monkeypatch):
+        store, _, _ = fresh_store
+        monkeypatch.setattr(services, "_ensure_executor", lambda: _SyncExecutor())
+        store.create("c2", {"id": "c2", "status": ProjectStatusEnum.QUEUED, "created_at": 1.0})
+        calls = []
+        services.submit_task(lambda *a, **k: calls.append(1), "c2", project_id="c2")
+        assert calls == [1]
+        # после завершения проект убран из набора «выполняющихся»
+        assert "c2" not in services._running_projects
+
+    def test_skips_when_already_running(self, fresh_store, monkeypatch):
+        store, _, _ = fresh_store
+        monkeypatch.setattr(services, "_ensure_executor", lambda: _SyncExecutor())
+        store.create("c3", {"id": "c3", "status": ProjectStatusEnum.QUEUED, "created_at": 1.0})
+        services._running_projects.add("c3")
+        try:
+            calls = []
+            services.submit_task(lambda *a, **k: calls.append(1), "c3", project_id="c3")
+            assert calls == []
+        finally:
+            services._running_projects.discard("c3")
+
+    def test_resume_refuses_completed(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("c4", {
+            "id": "c4", "status": ProjectStatusEnum.COMPLETED, "created_at": 1.0,
+            "task_func": "process_video_task", "task_args": ("c4", "http://disk"),
+        })
+        ok, msg = services.resume_project("c4")
+        assert ok is False
+        assert "завершён" in msg
+
+    def test_resume_refuses_running(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("c5", {
+            "id": "c5", "status": ProjectStatusEnum.ERROR, "created_at": 1.0,
+            "task_func": "process_video_task", "task_args": ("c5", "http://disk"),
+        })
+        services._running_projects.add("c5")
+        try:
+            ok, msg = services.resume_project("c5")
+            assert ok is False
+            assert "выполняется" in msg
+        finally:
+            services._running_projects.discard("c5")
+
+
 class TestEnsureExecutor:
     def test_recreates_after_shutdown(self, monkeypatch):
         # simulate a shut-down executor

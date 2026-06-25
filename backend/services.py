@@ -1372,13 +1372,33 @@ def _log_ram(label: str):
         logger.warning("RAM КРИТИЧНО: осталось %d МБ (порог: %d МБ)", avail_mb, MIN_RAM_MB)
 
 
+_running_projects: set[str] = set()
+_running_lock = threading.Lock()
+
+
 def submit_task(func, *args, project_id: str | None = None, **kwargs):
     """Submit a heavy processing task to the dedicated executor.
 
     The executor has max_workers=MAX_CONCURRENT_TASKS, so only N tasks run
     at a time. Extra tasks wait in an internal queue without blocking any threads.
+
+    Идемпотентность: дубликат-отправка одного project_id (гонка resume/повторный
+    POST на фронте) не должна запускать вторую обработку. Первый успешный прогон
+    удаляет исходник (его нельзя перекачать), поэтому вторая копия иначе падает с
+    «Файл не найден» и затирает COMPLETED статусом ERROR. Поэтому на старте
+    обёртки пропускаем уже завершённый или уже выполняющийся проект.
     """
     def _wrapper():
+        if project_id:
+            proj = projects_db.get(project_id)
+            if proj is not None and proj.get("status") == ProjectStatusEnum.COMPLETED:
+                logger.info("[%s] Проект уже завершён — повторный запуск пропущен", project_id[:8])
+                return
+            with _running_lock:
+                if project_id in _running_projects:
+                    logger.info("[%s] Проект уже выполняется — дубликат пропущен", project_id[:8])
+                    return
+                _running_projects.add(project_id)
         _log_ram(f"начало {func.__name__}")
         try:
             func(*args, **kwargs)
@@ -1387,6 +1407,8 @@ def submit_task(func, *args, project_id: str | None = None, **kwargs):
         finally:
             _log_ram(f"конец {func.__name__}")
             if project_id:
+                with _running_lock:
+                    _running_projects.discard(project_id)
                 _maybe_retry(project_id)
 
     _ensure_executor().submit(_wrapper)
@@ -1432,6 +1454,12 @@ def resume_project(project_id: str) -> tuple[bool, str]:
     proj = projects_db.get(project_id)
     if not proj:
         return False, "Проект не найден"
+
+    if proj.get("status") == ProjectStatusEnum.COMPLETED:
+        return False, "Проект уже завершён"
+    with _running_lock:
+        if project_id in _running_projects:
+            return False, "Задача уже выполняется"
 
     task_func_name = proj.get("task_func")
     task_args = proj.get("task_args")
