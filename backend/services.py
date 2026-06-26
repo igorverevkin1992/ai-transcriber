@@ -43,6 +43,7 @@ from backend.config import (
     WHISPER_BEAM_SIZE,
     WHISPER_INITIAL_PROMPT,
     WORD_LEVEL_DIARIZATION,
+    WORD_SPLIT_SENTENCE_BOUNDARY,
     YANDEX_API_KEY,
     logger,
 )
@@ -600,7 +601,12 @@ def _load_whisperx_model(project_id: str, model_name: str, dev: str, initial_pro
     return _whisperx_model
 
 
-def _resegment_by_word_speakers(seg: dict, fallback_speaker: str) -> list[dict]:
+_RESEG_SENTENCE_END = (".", "!", "?", "…")
+
+
+def _resegment_by_word_speakers(
+    seg: dict, fallback_speaker: str, *, sentence_boundary_only: bool = True,
+) -> list[dict]:
     """Разбить один ASR-сегмент на части по word-level меткам спикеров.
 
     whisperx.assign_word_speakers проставляет спикера КАЖДОМУ слову, но один
@@ -613,6 +619,13 @@ def _resegment_by_word_speakers(seg: dict, fallback_speaker: str) -> list[dict]:
     Слово без собственной метки наследует спикера предыдущего слова; в начале
     сегмента — `seg["speaker"]` (majority из assign_word_speakers) либо
     `fallback_speaker` (спикер предыдущего сегмента).
+
+    ``sentence_boundary_only`` (default True): смену спикера признаём границей
+    реплики ТОЛЬКО если предыдущее слово закончило предложение (.!?…). Флип
+    посреди фразы — шум разметки (хвост реплики героя «…кто [там попался]»,
+    ошибочно помеченный ведущим): такое слово остаётся в текущей реплике, чтобы
+    конец фразы героя не утекал в начало реплики АЗК. Настоящие вставки ведущего
+    стоят после конца предложения и режутся как прежде.
     """
     seg_text = seg.get("text", "").strip()
     seg_start_ms = int(seg.get("start", 0) * 1000)
@@ -683,8 +696,13 @@ def _resegment_by_word_speakers(seg: dict, fallback_speaker: str) -> list[dict]:
 
     for it in labeled:
         if run and it["speaker"] != run[-1]["speaker"]:
-            _flush()
-            run = []
+            prev_ends_sentence = run[-1]["text"].rstrip().endswith(_RESEG_SENTENCE_END)
+            if not sentence_boundary_only or prev_ends_sentence:
+                _flush()
+                run = []
+            else:
+                # Флип посреди предложения — шум: слово держим за текущим спикером.
+                it = {**it, "speaker": run[-1]["speaker"]}
         run.append(it)
     _flush()
     return parts
@@ -820,7 +838,9 @@ def _transcribe_with_whisperx(
         if WORD_LEVEL_DIARIZATION:
             # Режем сегмент по word-level меткам, чтобы короткая вставка другого
             # спикера (вопрос ведущего) не «приклеивалась» к монологу гостя.
-            parts = _resegment_by_word_speakers(seg, last_speaker)
+            parts = _resegment_by_word_speakers(
+                seg, last_speaker, sentence_boundary_only=WORD_SPLIT_SENTENCE_BOUNDARY,
+            )
             if parts:
                 segments.extend(parts)
                 last_speaker = parts[-1]["channel_tag"]

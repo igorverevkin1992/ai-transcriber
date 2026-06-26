@@ -55,6 +55,8 @@ class TestResegmentByWordSpeakers:
 
     def test_word_without_label_inherits_previous(self):
         # Слово без своей метки наследует спикера предыдущего слова.
+        # sentence_boundary_only=False — проверяем чистую механику наследования
+        # без правила границы предложения.
         seg = {
             "text": "А Б В Г", "start": 0.0, "end": 4.0, "speaker": "SPEAKER_00",
             "words": [_w("А", 0.0, 1.0, "SPEAKER_00"),
@@ -62,10 +64,47 @@ class TestResegmentByWordSpeakers:
                       _w("В", 2.0, 3.0, "SPEAKER_01"),
                       _w("Г", 3.0, 4.0)],  # наследует SPEAKER_01
         }
-        parts = _resegment_by_word_speakers(seg, "0")
+        parts = _resegment_by_word_speakers(seg, "0", sentence_boundary_only=False)
         assert [p["channel_tag"] for p in parts] == ["0", "1"]
         assert parts[0]["text"] == "А Б"
         assert parts[1]["text"] == "В Г"
+
+    def test_no_split_on_midsentence_flip(self):
+        # Хвост фразы героя, ошибочно помеченный другим спикером ПОСРЕДИ
+        # предложения (нет точки перед сменой), не отрезается: «там попался»
+        # остаётся за героем, а не утекает в начало реплики ведущего.
+        seg = {
+            "text": "Я выиграл тех, кто там попался.",
+            "start": 10.0, "end": 13.0, "speaker": "SPEAKER_01",
+            "words": [_w("Я", 10.0, 10.2, "SPEAKER_01"),
+                      _w("выиграл", 10.2, 10.6, "SPEAKER_01"),
+                      _w("тех,", 10.6, 10.9, "SPEAKER_01"),
+                      _w("кто", 10.9, 11.2, "SPEAKER_01"),
+                      _w("там", 11.2, 11.5, "SPEAKER_00"),      # ошибочный флип
+                      _w("попался.", 11.5, 12.0, "SPEAKER_00")],
+        }
+        parts = _resegment_by_word_speakers(seg, "0")
+        assert len(parts) == 1
+        assert parts[0]["channel_tag"] == "1"
+        assert parts[0]["text"] == "Я выиграл тех, кто там попался."
+
+    def test_splits_at_sentence_boundary(self):
+        # Настоящая вставка ведущего стоит ПОСЛЕ конца предложения → режется.
+        seg = {
+            "text": "Профессионально культивируем. Вы со студентами часто играете?",
+            "start": 20.0, "end": 24.0, "speaker": "SPEAKER_01",
+            "words": [_w("Профессионально", 20.0, 20.6, "SPEAKER_01"),
+                      _w("культивируем.", 20.6, 21.2, "SPEAKER_01"),
+                      _w("Вы", 21.5, 21.7, "SPEAKER_00"),
+                      _w("со", 21.7, 21.9, "SPEAKER_00"),
+                      _w("студентами", 21.9, 22.4, "SPEAKER_00"),
+                      _w("часто", 22.4, 22.7, "SPEAKER_00"),
+                      _w("играете?", 22.7, 23.2, "SPEAKER_00")],
+        }
+        parts = _resegment_by_word_speakers(seg, "0")
+        assert [p["channel_tag"] for p in parts] == ["1", "0"]
+        assert parts[0]["text"] == "Профессионально культивируем."
+        assert parts[1]["text"] == "Вы со студентами часто играете?"
 
     def test_no_word_labels_uses_segment_speaker(self):
         # Ни одно слово не размечено, но у сегмента есть speaker → не режем.
@@ -104,7 +143,7 @@ class TestResegmentByWordSpeakers:
                       _w("два", 1.0, 2.0, "SPEAKER_01"),
                       _w("три", 2.0, 3.0, "SPEAKER_01")],
         }
-        parts = _resegment_by_word_speakers(seg, "0")
+        parts = _resegment_by_word_speakers(seg, "0", sentence_boundary_only=False)
         assert len(parts) == 2
         assert [wd["text"] for wd in parts[0]["words"]] == ["Раз"]
         assert [wd["text"] for wd in parts[1]["words"]] == ["два", "три"]
