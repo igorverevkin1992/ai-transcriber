@@ -1,8 +1,10 @@
 from backend.services import (
     _compute_smart_abbreviations,
+    _fold_unnamed_speakers_into_tech,
     _invert_name,
     _resegment_by_word_speakers,
 )
+from backend.turns import TECH_BREAK_TEXT
 
 
 def _w(word, start, end, speaker=None):
@@ -106,6 +108,73 @@ class TestResegmentByWordSpeakers:
         assert len(parts) == 2
         assert [wd["text"] for wd in parts[0]["words"]] == ["Раз"]
         assert [wd["text"] for wd in parts[1]["words"]] == ["два", "три"]
+
+
+class TestFoldUnnamedSpeakersIntoTech:
+    def _speakers(self):
+        return {
+            "0": {"duration_sec": 100.0, "suggested_name": "АЗК"},
+            "1": {"duration_sec": 200.0, "suggested_name": "Олег Александрович"},
+            "3": {"duration_sec": 10.0, "suggested_name": "Спикер 4"},  # crew
+        }
+
+    def test_folds_generic_minor_speaker(self):
+        segs = [
+            {"timecode": "00:00:01:00", "speaker": "1", "text": "Реплика гостя."},
+            {"timecode": "00:00:05:00", "speaker": "3", "text": "В моторе, да?"},
+            {"timecode": "00:00:07:00", "speaker": "0", "text": "Вопрос."},
+        ]
+        new, folded = _fold_unnamed_speakers_into_tech(
+            segs, self._speakers(), {"0", "1"}, 310.0, 0.15,
+        )
+        assert folded == {"3"}
+        assert new[1]["text"] == TECH_BREAK_TEXT
+        assert new[1]["speaker"] == "3"  # speaker сохранён, заменён только текст
+        assert new[0]["text"] == "Реплика гостя."
+        assert new[2]["text"] == "Вопрос."
+
+    def test_does_not_fold_named_or_interviewer(self):
+        speakers = {
+            "0": {"duration_sec": 100.0, "suggested_name": "АЗК"},
+            "1": {"duration_sec": 5.0, "suggested_name": "Олег Александрович"},  # малая доля, но НАЗВАН
+        }
+        segs = [{"timecode": "00:00:01:00", "speaker": "1", "text": "Коротко."}]
+        new, folded = _fold_unnamed_speakers_into_tech(segs, speakers, {"0", "1"}, 105.0, 0.15)
+        assert folded == set()
+        assert new == segs
+
+    def test_share_guard_protects_talkative_unnamed(self):
+        # Генерик-спикер, но доля речи выше порога → не считаем крауд-группой.
+        speakers = {
+            "0": {"duration_sec": 100.0, "suggested_name": "АЗК"},
+            "3": {"duration_sec": 100.0, "suggested_name": "Спикер 4"},
+        }
+        segs = [{"timecode": "00:00:01:00", "speaker": "3", "text": "Длинная реплика."}]
+        new, folded = _fold_unnamed_speakers_into_tech(segs, speakers, {"0"}, 200.0, 0.15)
+        assert folded == set()
+        assert new == segs
+
+    def test_collapses_adjacent_tech_markers(self):
+        # Краудовый техмаркер рядом с паузным → схлопываются в один.
+        segs = [
+            {"timecode": "00:00:01:00", "speaker": "1", "text": TECH_BREAK_TEXT},  # пауза
+            {"timecode": "00:00:03:00", "speaker": "3", "text": "В моторе."},      # crew → tech
+            {"timecode": "00:00:05:00", "speaker": "1", "text": "Дальше."},
+        ]
+        new, folded = _fold_unnamed_speakers_into_tech(segs, self._speakers(), {"0", "1"}, 310.0, 0.15)
+        assert folded == {"3"}
+        assert [s["text"] for s in new] == [TECH_BREAK_TEXT, "Дальше."]
+        assert new[0]["timecode"] == "00:00:01:00"  # таймкод первого маркера
+
+    def test_no_generic_speakers_is_noop(self):
+        speakers = {
+            "0": {"duration_sec": 100.0, "suggested_name": "АЗК"},
+            "1": {"duration_sec": 200.0, "suggested_name": "Олег Александрович"},
+        }
+        segs = [{"timecode": "00:00:01:00", "speaker": "1", "text": "Текст."}]
+        new, folded = _fold_unnamed_speakers_into_tech(segs, speakers, {"0", "1"}, 300.0, 0.15)
+        assert folded == set()
+        assert new == segs
 
 
 class TestComputeSmartAbbreviations:

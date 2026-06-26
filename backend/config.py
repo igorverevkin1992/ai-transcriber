@@ -100,6 +100,19 @@ DIARIZATION_NUM_SPEAKERS = int(os.getenv("DIARIZATION_NUM_SPEAKERS", "0") or "0"
 # (исходный текст сохраняется дословно). default: true.
 WORD_LEVEL_DIARIZATION = os.getenv("WORD_LEVEL_DIARIZATION", "true").lower() in ("1", "true", "yes")
 
+# Свернуть реплики неназванного «лишнего» спикера в «(Технические моменты)».
+# Диаризация нередко выделяет члена съёмочной группы в отдельный кластер
+# («Спикер N»), который не является ни интервьюером, ни названным гостем (имя
+# не задано в файле и не выводится из обращений в диалоге). Такие реплики —
+# техническая болтовня группы (команды оператору, «в моторе», «допишем»), и в
+# эталонах они помечены маркером техмомента, а не показаны спикером. Когда true,
+# реплики каждого генерик-спикера «Спикер N» с долей речи <= UNNAMED_SPEAKER_TECH_MAX_RATIO
+# заменяются на «(Технические моменты)», а сам спикер убирается из легенды.
+# Доля-гард защищает реального, но неузнанного по имени гостя (он обычно говорит
+# заметно дольше). default: false (консервативно — риск задеть редкого гостя).
+UNNAMED_SPEAKER_AS_TECH = os.getenv("UNNAMED_SPEAKER_AS_TECH", "false").lower() in ("1", "true", "yes")
+UNNAMED_SPEAKER_TECH_MAX_RATIO = float(os.getenv("UNNAMED_SPEAKER_TECH_MAX_RATIO", "0.15") or "0.15")
+
 # --- Paths ---
 TEMP_DIR = Path("temp_files")
 TEMP_DIR.mkdir(exist_ok=True)

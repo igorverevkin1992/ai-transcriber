@@ -38,6 +38,8 @@ from backend.config import (
     TURN_INLINE_TC_SECONDS,
     TURN_MERGE_ENABLED,
     UNCLEAR_LOGPROB_THRESHOLD,
+    UNNAMED_SPEAKER_AS_TECH,
+    UNNAMED_SPEAKER_TECH_MAX_RATIO,
     WHISPER_BEAM_SIZE,
     WHISPER_INITIAL_PROMPT,
     WORD_LEVEL_DIARIZATION,
@@ -939,6 +941,43 @@ def _transcribe_with_whisper(
     return segments
 
 
+def _fold_unnamed_speakers_into_tech(
+    raw_segments: list[dict],
+    detected_speakers: dict,
+    named_ids: set,
+    total_speech_sec: float,
+    max_ratio: float,
+) -> tuple[list[dict], set]:
+    """Свернуть реплики неназванных «лишних» спикеров (съёмочная группа) в маркер
+    «(Технические моменты)» и убрать их из легенды.
+
+    Кандидат — спикер, которого нет в ``named_ids`` (т.е. не интервьюер и не
+    названный гость) и чья доля речи <= ``max_ratio`` (гость говорит заметно
+    дольше короткой технической болтовни группы). Подряд идущие техмаркеры (в т.ч.
+    краудовый рядом с паузным) схлопываются в один, таймкод берётся от первого.
+
+    Возвращает (новые raw_segments, множество свёрнутых speaker_id).
+    """
+    crew_ids = set()
+    for vid, info in detected_speakers.items():
+        if vid in named_ids:
+            continue
+        share = (info.get("duration_sec", 0.0) / total_speech_sec) if total_speech_sec > 0 else 0.0
+        if share <= max_ratio:
+            crew_ids.add(vid)
+    if not crew_ids:
+        return raw_segments, crew_ids
+
+    new_segments: list[dict] = []
+    for seg in raw_segments:
+        is_crew = str(seg.get("speaker")) in crew_ids
+        text = TECH_BREAK_TEXT if is_crew else seg.get("text")
+        if text == TECH_BREAK_TEXT and new_segments and new_segments[-1]["text"] == TECH_BREAK_TEXT:
+            continue  # не дублируем подряд идущие техмаркеры
+        new_segments.append({**seg, "text": TECH_BREAK_TEXT} if is_crew else seg)
+    return new_segments, crew_ids
+
+
 def _process_recognition_result(project_id: str, segments: list[dict], original_filename: str, video_path,
                                 extra_warnings: list[str] | None = None):
     """Обрабатывает результат распознавания v3 и сохраняет в projects_db."""
@@ -1093,6 +1132,22 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             "duration_sec": round(dur, 1),
             "suggested_name": suggested,
         }
+
+    # Неназванный «лишний» спикер (член съёмочной группы) → техмоменты.
+    if UNNAMED_SPEAKER_AS_TECH and len(detected_speakers) > 1:
+        named_ids = set(guest_names.keys())
+        if interviewer_id is not None:
+            named_ids.add(interviewer_id)
+        total_speech = sum(speaker_durations.values())
+        raw_segments, folded = _fold_unnamed_speakers_into_tech(
+            raw_segments, detected_speakers, named_ids, total_speech,
+            UNNAMED_SPEAKER_TECH_MAX_RATIO,
+        )
+        for vid in folded:
+            detected_speakers.pop(vid, None)
+        if folded:
+            logger.info("[%s] Неназванные спикеры свёрнуты в техмоменты: %s",
+                        project_id[:8], sorted(folded))
 
     speaker_count = len(detected_speakers)
     diarization_speakers.observe(speaker_count)
