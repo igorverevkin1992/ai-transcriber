@@ -38,6 +38,62 @@ class TestCreateProject:
         assert resp.status_code == 422
 
 
+class TestUploadWithPassport:
+    def _docx_bytes(self):
+        import io
+
+        from docx import Document
+        doc = Document()
+        doc.add_paragraph("Герои: Иванов Иван")
+        doc.add_paragraph("Количество героев: 1")
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
+    def test_passport_threaded_into_task(self, client, monkeypatch):
+        from pathlib import Path
+
+        from backend import routes, services
+
+        captured = {}
+        monkeypatch.setattr(routes, "validate_mime_type", lambda b: None)
+        monkeypatch.setattr(routes, "submit_task", lambda *a, **k: captured.update(k))
+
+        resp = client.post(
+            "/api/v1/batch/upload",
+            data={"engine": "whisper", "whisper_model": "medium"},
+            files={
+                "file": ("video.mp4", b"\x00" * 64, "video/mp4"),
+                "passport": ("passport.docx", self._docx_bytes(),
+                             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            },
+        )
+        assert resp.status_code == 200
+        pid = resp.json()["id"]
+        assert captured.get("passport_path", "").endswith("_passport.docx")
+        passport_file = Path(captured["passport_path"])
+        assert passport_file.exists()
+        assert services.projects_db.get(pid)["task_kwargs"]["passport_path"] == str(passport_file)
+        # cleanup
+        passport_file.unlink(missing_ok=True)
+        Path(services.TEMP_DIR / f"{pid}_video.mp4").unlink(missing_ok=True)
+
+    def test_passport_wrong_extension_rejected(self, client, monkeypatch):
+        from backend import routes
+
+        monkeypatch.setattr(routes, "validate_mime_type", lambda b: None)
+        monkeypatch.setattr(routes, "submit_task", lambda *a, **k: None)
+        resp = client.post(
+            "/api/v1/batch/upload",
+            data={"engine": "whisper", "whisper_model": "medium"},
+            files={
+                "file": ("video.mp4", b"\x00" * 64, "video/mp4"),
+                "passport": ("passport.txt", b"hello", "text/plain"),
+            },
+        )
+        assert resp.status_code == 400
+
+
 class TestProjectStatus:
     def test_not_found(self, client):
         resp = client.get("/api/v1/projects/nonexistent/status")

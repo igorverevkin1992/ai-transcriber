@@ -508,6 +508,178 @@ def gemini_infer_speaker_names(
     return out or None
 
 
+# --- Извлечение «паспорта съёмки» через Gemini (фолбэк к детерминированному парсеру) ---
+
+_PASSPORT_MAX_CHARS = 20000
+
+
+def gemini_extract_passport(text: str) -> dict | None:
+    """Извлечь из сырого текста паспорта структуру через Gemini (фолбэк).
+
+    Возвращает `{"speakers": [имена], "num_heroes": int, "description": str}` или
+    `None` (нет Gemini / сбой / пусто). Используется, когда детерминированный
+    разбор формы (`backend.passport.parse_passport`) не распознал поля.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    prompt = (
+        "Это «паспорт съёмки» — заполненная ассистентом форма о видеосъёмке "
+        "интервью. Извлеки СТРОГО JSON-объект вида "
+        '{"heroes": ["Имя ..."], "num_heroes": N, "description": "..."}.\n'
+        "heroes — имена героев (гостей) съёмки; num_heroes — их число (целое); "
+        'description — краткое описание/тема съёмки. Если поля нет — [] / 0 / "". '
+        "Никакого текста кроме JSON.\n\n"
+        f"Паспорт:\n{text[:_PASSPORT_MAX_CHARS]}"
+    )
+    try:
+        result = _gemini_call(prompt)
+    except GeminiPolishError:
+        return None
+    if not result:
+        return None
+    match = re.search(r"\{.*\}", result, re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    heroes = data.get("heroes") or []
+    if not isinstance(heroes, list):
+        heroes = []
+    heroes = [str(h).strip() for h in heroes if str(h).strip()]
+    num = data.get("num_heroes")
+    num = int(num) if isinstance(num, (int, float)) and num > 0 else len(heroes)
+    desc = str(data.get("description") or "").strip()
+    if not heroes and num <= 0 and not desc:
+        return None
+    return {"speakers": heroes, "num_heroes": num, "description": desc}
+
+
+# --- Gemini-правка границ спикеров ---
+
+_BOUNDARY_MAX_CHARS = 40000
+
+
+def _is_marker_text(text: str) -> bool:
+    """Реплика-ремарка (техмомент / неразборчиво / целиком в скобках) — не речь."""
+    text = (text or "").strip()
+    return (not text) or text in (UNCLEAR_TEXT, TECH_BREAK_TEXT) or bool(_FULL_PARENTHETICAL_RE.match(text))
+
+
+def _merge_adjacent_same_speaker(segments: list[dict]) -> list[dict]:
+    """Склеить соседние одно-спикерные речевые реплики (после переназначения
+    метки соседи могли стать одним говорящим). Ремарки не склеиваются."""
+    out: list[dict] = []
+    for seg in segments:
+        if (out and not _is_marker_text(seg.get("text", "")) and not _is_marker_text(out[-1].get("text", ""))
+                and str(out[-1].get("speaker")) == str(seg.get("speaker"))):
+            joined = (out[-1]["text"].rstrip() + " " + seg["text"].strip()).strip()
+            out[-1] = {**out[-1], "text": joined}
+        else:
+            out.append(seg)
+    return out
+
+
+def correct_speaker_boundaries(
+    segments: list[dict],
+    *,
+    speaker_labels: dict[str, str],
+    interviewer_id: str | None,
+    description: str = "",
+) -> list[dict]:
+    """Переназначить спикера у реплик, которые диаризация отнесла ЦЕЛИКОМ не тому
+    говорящему (ответ гостя в абзаце ведущего и наоборот), через Gemini.
+
+    ``segments`` — список ``{timecode, speaker, text}`` после ``build_turns``.
+    ``speaker_labels`` — ``{speaker_id: отображаемое имя}`` (интервьюер → АЗК,
+    гости → имена, прочие → «Спикер N») — только контекст промпта; переназначение
+    возвращается в исходных id. Соседние одно-спикерные реплики после правки
+    склеиваются. При недоступности Gemini / сбое / некорректном ответе —
+    возвращается ИСХОДНЫЙ список без изменений (как прочие Gemini-функции).
+    """
+    indexed = [(i, seg) for i, seg in enumerate(segments) if not _is_marker_text(seg.get("text", ""))]
+    if len(indexed) < 2:
+        return segments
+
+    valid_ids = {str(seg.get("speaker")) for _, seg in indexed}
+    if len(valid_ids) < 2:
+        return segments  # один говорящий — переназначать нечего
+
+    n_to_idx = {n: idx for n, (idx, _) in enumerate(indexed)}
+    lines = []
+    for n, (_, seg) in enumerate(indexed):
+        sid = str(seg.get("speaker"))
+        label = speaker_labels.get(sid, sid)
+        lines.append(f"{n}\t[{sid}: {label}] {seg['text'].strip()}")
+    transcript = "\n".join(lines)[:_BOUNDARY_MAX_CHARS]
+
+    roles = []
+    if interviewer_id is not None:
+        roles.append(f"[{interviewer_id}] — интервьюер (АЗК): задаёт вопросы из-за кадра.")
+    for sid, label in speaker_labels.items():
+        if sid != interviewer_id:
+            roles.append(f"[{sid}] — гость: {label}.")
+    roles_block = "\n".join(roles)
+    desc_block = f"Тема съёмки: {description.strip()}\n" if description and description.strip() else ""
+
+    prompt = (
+        "Это стенограмма телеинтервью на русском. Каждая строка — реплика с "
+        "НОМЕРОМ, метка спикера в скобках, например `12\t[0: АЗК] текст`.\n"
+        f"{desc_block}"
+        "Роли говорящих:\n"
+        f"{roles_block}\n\n"
+        "Автоматическая диаризация ИЗРЕДКА присваивает реплику целиком не тому "
+        "спикеру. Найди реплики с ЯВНО неверной меткой по логике диалога: вопрос/"
+        "побуждение/реакция ведущего — это интервьюер; содержательный ответ или "
+        "монолог по теме — гость; реплика, продолжающая предложение предыдущего "
+        "говорящего, принадлежит ЕМУ. Исправляй ТОЛЬКО когда уверен; сомневаешься "
+        "— не трогай.\n"
+        'Верни СТРОГО JSON-массив исправлений вида [{"id": НОМЕР, "speaker": '
+        '"<id_спикера>"}] (id_спикера — цифра в скобках, на которого надо заменить). '
+        "Если исправлять нечего — верни []. Никакого текста кроме JSON.\n\n"
+        f"Стенограмма:\n{transcript}"
+    )
+
+    try:
+        result = _gemini_call(prompt)
+    except GeminiPolishError:
+        return segments
+    if not result:
+        return segments
+    match = re.search(r"\[.*\]", result, re.DOTALL)
+    if not match:
+        return segments
+    try:
+        data = json.loads(match.group(0))
+    except (ValueError, TypeError):
+        return segments
+    if not isinstance(data, list):
+        return segments
+
+    out = [dict(s) for s in segments]
+    reassigned = 0
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        n = item.get("id")
+        new_sid = str(item.get("speaker"))
+        if not isinstance(n, int) or n not in n_to_idx or new_sid not in valid_ids:
+            continue
+        idx = n_to_idx[n]
+        if str(out[idx].get("speaker")) != new_sid:
+            out[idx]["speaker"] = new_sid
+            reassigned += 1
+    if not reassigned:
+        return segments
+    logger.info("Gemini-правка границ: переназначено реплик: %d", reassigned)
+    return _merge_adjacent_same_speaker(out)
+
+
 def postprocess_segments(
     segments: list[dict],
     use_gemini: bool = True,

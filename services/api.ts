@@ -189,11 +189,12 @@ export const api = {
 
   // --- Batch methods ---
 
-  batchUploadFile: async (file: File, engine: string = 'whisper', whisperModel: string = 'medium'): Promise<string> => {
+  batchUploadFile: async (file: File, engine: string = 'whisper', whisperModel: string = 'medium', passport?: File | null): Promise<string> => {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('engine', engine);
     formData.append('whisper_model', whisperModel);
+    if (passport) formData.append('passport', passport);
 
     const response = await fetch(`${API_BASE_URL}/batch/upload`, {
       method: 'POST',

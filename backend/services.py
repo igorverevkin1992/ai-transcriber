@@ -28,6 +28,7 @@ from backend.config import (
     OCR_TIMECODE,
     OCR_TIMECODE_REGION,
     OUTPUT_DIR,
+    SPEAKER_BOUNDARY_CORRECTION,
     SPEAKER_NAME_AUTODETECT,
     SPEECHKIT_LITERATURE_TEXT,
     SQLITE_DB_PATH,
@@ -562,6 +563,17 @@ def _make_diarize_pipeline(cls, hf_token, device):
     kwargs = {"device": device}
     if "model_name" in params:
         kwargs["model_name"] = DIARIZATION_MODEL
+        logger.info("Диаризация: модель '%s'", DIARIZATION_MODEL)
+    else:
+        # Конструктор этой версии whisperx не принимает model_name — env
+        # DIARIZATION_MODEL игнорируется, берётся дефолт whisperx. Предупреждаем,
+        # чтобы заданная модель (напр. community-1) не считалась активной молча.
+        logger.warning(
+            "Диаризация: эта версия whisperx не принимает model_name — "
+            "DIARIZATION_MODEL='%s' ИГНОРИРУЕТСЯ, используется модель по умолчанию. "
+            "Обновите whisperx (>=3.4), чтобы задавать модель через env.",
+            DIARIZATION_MODEL,
+        )
 
     if "token" in params:
         return cls(token=hf_token, **kwargs)
@@ -714,6 +726,7 @@ def _transcribe_with_whisperx(
     model_name: str = "medium",
     initial_prompt: str | None = None,
     original_filename: str | None = None,
+    passport: dict | None = None,
 ) -> list[dict]:
     """Распознавание через WhisperX: транскрипция + alignment + диаризация pyannote.
 
@@ -802,6 +815,7 @@ def _transcribe_with_whisperx(
         # (токен/env) задаём как min == max — без «свободы» ±1 у кластеризации;
         # из числа имён оставляем прежний диапазон n..n+1 (имён может быть меньше,
         # чем реальных голосов: ведущий и т.п.).
+        passport_heroes = (passport or {}).get("num_heroes", 0) or 0
         exact_n = 0
         names_n = 0
         if original_filename:
@@ -810,7 +824,16 @@ def _transcribe_with_whisperx(
             exact_n = meta.get("num_speakers", 0) or 0
         if exact_n < 2 and DIARIZATION_NUM_SPEAKERS >= 2:
             exact_n = DIARIZATION_NUM_SPEAKERS
-        if exact_n >= 2:
+        if passport_heroes >= 1:
+            # Паспорт приоритетнее: герои (гости) + 1 закадровый ведущий; запас +1
+            # на члена съёмочной группы (он затем сворачивается в техмоменты),
+            # поэтому диапазон, а не жёсткое min == max.
+            lo, hi = passport_heroes + 1, passport_heroes + 2
+            diarize_kwargs["min_speakers"] = lo
+            diarize_kwargs["max_speakers"] = hi
+            logger.info("[%s] Диаризация: хинт %d-%d спикеров из паспорта (%d героев + ведущий)",
+                        project_id[:8], lo, hi, passport_heroes)
+        elif exact_n >= 2:
             diarize_kwargs["min_speakers"] = exact_n
             diarize_kwargs["max_speakers"] = exact_n
             logger.info("[%s] Диаризация: хинт ровно %d спикеров", project_id[:8], exact_n)
@@ -999,9 +1022,19 @@ def _fold_unnamed_speakers_into_tech(
 
 
 def _process_recognition_result(project_id: str, segments: list[dict], original_filename: str, video_path,
-                                extra_warnings: list[str] | None = None):
+                                extra_warnings: list[str] | None = None, passport: dict | None = None):
     """Обрабатывает результат распознавания v3 и сохраняет в projects_db."""
     meta = parse_filename_metadata(original_filename)
+    # Паспорт съёмки приоритетнее имени файла: достоверные имена героев, их число
+    # и описание (контекст для Gemini-правки границ).
+    if passport:
+        if passport.get("speakers"):
+            meta["speakers"] = passport["speakers"]
+        if passport.get("num_heroes"):
+            meta["num_heroes"] = passport["num_heroes"]
+        meta["description"] = passport.get("description", "") or ""
+        logger.info("[%s] Паспорт съёмки: %d героев, имена: %s", project_id[:8],
+                    passport.get("num_heroes", 0), passport.get("speakers", []))
     projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
 
     if video_path.exists():
@@ -1140,6 +1173,23 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             logger.info("[%s] Имена гостей из диалога: %s", project_id[:8],
                         {v: inferred[v] for v in unnamed_guests if v in inferred})
 
+    # Gemini-правка границ: переназначить реплики, целиком отнесённые не тому
+    # спикеру. Контекст — роли (ведущий/гости) + тема из паспорта. opt-in.
+    if SPEAKER_BOUNDARY_CORRECTION and len(speaker_durations) >= 2:
+        from backend.postprocess import correct_speaker_boundaries
+        speaker_labels = {}
+        for vid in speaker_durations:
+            if vid == interviewer_id:
+                speaker_labels[vid] = INTERVIEWER_LABEL
+            elif vid in guest_names:
+                speaker_labels[vid] = guest_names[vid]
+            else:
+                speaker_labels[vid] = f"Спикер {int(vid) + 1}" if vid.isdigit() else f"Спикер {vid}"
+        raw_segments = correct_speaker_boundaries(
+            raw_segments, speaker_labels=speaker_labels,
+            interviewer_id=interviewer_id, description=meta.get("description", ""),
+        )
+
     for voice_id, dur in speaker_durations.items():
         if voice_id == interviewer_id:
             suggested = INTERVIEWER_LABEL
@@ -1272,12 +1322,36 @@ def process_video_task(project_id: str, disk_url: str):
                 pass
 
 
+def _load_passport(passport_path, project_id: str) -> dict | None:
+    """Загрузить «паспорт съёмки» (.docx): детерминированный разбор формы →
+    Gemini-фолбэк. Возвращает {speakers, num_heroes, description} или None."""
+    if not passport_path:
+        return None
+    pp = Path(passport_path)
+    if not pp.exists():
+        return None
+    from backend.passport import parse_passport, read_passport_text
+    data = parse_passport(pp)
+    if data is None:
+        # Поля формы не распознаны — пробуем извлечь через Gemini (мягко: без
+        # ключа/при сбое вернёт None).
+        from backend.postprocess import gemini_extract_passport
+        data = gemini_extract_passport(read_passport_text(pp))
+    if data:
+        logger.info("[%s] Паспорт съёмки: %d героев %s", project_id[:8],
+                    data.get("num_heroes", 0), data.get("speakers", []))
+    else:
+        logger.warning("[%s] Паспорт не распознан (%s)", project_id[:8], pp.name)
+    return data
+
+
 def process_uploaded_file_task(
     project_id: str,
     local_video_path,
     original_filename: str,
     engine: str = "speechkit",
     whisper_model: str = "medium",
+    passport_path: str | None = None,
 ):
     """Фоновая задача для локально загруженного файла.
 
@@ -1293,6 +1367,7 @@ def process_uploaded_file_task(
     try:
         _cleanup_old_projects()
         projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
+        passport_data = _load_passport(passport_path, project_id)
 
         if local_video_path.exists():
             _check_disk_space(local_video_path.stat().st_size * 2)
@@ -1307,6 +1382,7 @@ def process_uploaded_file_task(
                     project_id, local_video_path, whisper_model,
                     initial_prompt=initial_prompt,
                     original_filename=original_filename,
+                    passport=passport_data,
                 )
             else:
                 logger.info("[%s] faster-whisper (без диаризации): модель %s", project_id[:8], whisper_model)
@@ -1329,7 +1405,7 @@ def process_uploaded_file_task(
         segments = postprocess_segments(segments, warnings=pp_warnings)
 
         _process_recognition_result(project_id, segments, original_filename, local_video_path,
-                                    extra_warnings=pp_warnings)
+                                    extra_warnings=pp_warnings, passport=passport_data)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
         transcribe_duration.labels(engine=engine).observe(time.time() - task_start)
         logger.info("[%s] Файл обработан: %s", project_id[:8], original_filename)
@@ -1374,6 +1450,12 @@ def process_uploaded_file_task(
             try:
                 if local_video_path.exists():
                     local_video_path.unlink()
+            except OSError:
+                pass
+            # Паспорт — маленький .docx, на повтор не нужен; удаляем вместе с видео.
+            try:
+                if passport_path and Path(passport_path).exists():
+                    Path(passport_path).unlink()
             except OSError:
                 pass
 
@@ -1499,9 +1581,9 @@ def cancel_project(project_id: str) -> bool:
         return False
 
     # Best-effort cleanup of any temp/output files
-    for prefix in (f"{project_id}_video", f"{project_id}.opus", f"transcript_{project_id}.docx",
-                   f"batch_export_{project_id}.docx", f"batch_verified_{project_id}.docx",
-                   f"autosave_{project_id}.docx"):
+    for prefix in (f"{project_id}_video", f"{project_id}.opus", f"{project_id}_passport",
+                   f"transcript_{project_id}.docx", f"batch_export_{project_id}.docx",
+                   f"batch_verified_{project_id}.docx", f"autosave_{project_id}.docx"):
         for p in TEMP_DIR.glob(f"{prefix}*"):
             try:
                 p.unlink()

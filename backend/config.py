@@ -211,6 +211,14 @@ TECH_MOMENT_DETECTION = os.getenv("TECH_MOMENT_DETECTION", "true").lower() in ("
 # консервативный режим (риск задеть реальные реплики). Требует GEMINI_API_KEY.
 TECH_MOMENT_AGGRESSIVE = os.getenv("TECH_MOMENT_AGGRESSIVE", "false").lower() in ("1", "true", "yes")
 
+# Gemini-правка границ спикеров: pyannote изредка относит короткую реплику ЦЕЛИКОМ
+# не тому спикеру (ответ гостя в абзаце ведущего и наоборот). Отдельный проход
+# читает диалог с текущими метками + контекст (ведущий АЗК закадровый, гости =
+# имена героев, тема из паспорта) и переназначает ТОЛЬКО высокоуверенно
+# перепутанные реплики. Дефолт false (opt-in; вероятностная правка, риск задеть
+# верные реплики; требует GEMINI_API_KEY). Логика в correct_speaker_boundaries.
+SPEAKER_BOUNDARY_CORRECTION = os.getenv("SPEAKER_BOUNDARY_CORRECTION", "false").lower() in ("1", "true", "yes")
+
 # --- OCR выжженного в кадр таймкода ---
 # Когда стартовый ТК не задан ни в имени файла, ни в метаданных контейнера —
 # попытаться распознать выжженный в кадр SMPTE-таймкод (easyocr). default: true.

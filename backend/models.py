@@ -69,6 +69,8 @@ class MetaResult(BaseModel):
     speakers: List[str]
     start_tc: str
     original_filename: str
+    description: Optional[str] = None
+    num_heroes: Optional[int] = None
 
 
 class SegmentResult(BaseModel):

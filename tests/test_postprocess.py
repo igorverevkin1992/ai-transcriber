@@ -1,10 +1,13 @@
 import backend.postprocess as pp
 from backend.postprocess import (
     GeminiPolishError,
+    correct_speaker_boundaries,
+    gemini_extract_passport,
     gemini_infer_speaker_names,
     postprocess_segments,
     regex_cleanup,
 )
+from backend.turns import TECH_BREAK_TEXT
 
 
 class TestGeminiInferSpeakerNames:
@@ -506,3 +509,93 @@ class TestTechnicalMoments:
         out = postprocess_segments([{"text": "Камера, дубль.", "words": []}], warnings=[])
         assert out[0]["text"] == TECH_BREAK_TEXT
         assert polished == []  # маркер тех. момента не полируется
+
+
+class TestCorrectSpeakerBoundaries:
+    LABELS = {"0": "АЗК", "1": "Олег Александрович"}
+
+    def _qa(self):
+        return [
+            {"timecode": "00:00:01:00", "speaker": "0", "text": "Вопрос?"},
+            {"timecode": "00:00:05:00", "speaker": "1", "text": "Ответ."},
+        ]
+
+    def test_reassigns_and_merges(self, monkeypatch):
+        segs = [
+            {"timecode": "00:00:01:00", "speaker": "0", "text": "Меня занесло случайно."},
+            {"timecode": "00:00:05:00", "speaker": "1", "text": "Я занимался борьбой."},
+        ]
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: '[{"id": 0, "speaker": "1"}]')
+        out = correct_speaker_boundaries(segs, speaker_labels=self.LABELS, interviewer_id="0")
+        assert len(out) == 1
+        assert out[0]["speaker"] == "1"
+        assert out[0]["text"] == "Меня занесло случайно. Я занимался борьбой."
+        assert out[0]["timecode"] == "00:00:01:00"
+
+    def test_no_change_on_empty_corrections(self, monkeypatch):
+        segs = self._qa()
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: "[]")
+        assert correct_speaker_boundaries(segs, speaker_labels=self.LABELS, interviewer_id="0") == segs
+
+    def test_unchanged_when_gemini_unavailable(self, monkeypatch):
+        segs = self._qa()
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: None)
+        assert correct_speaker_boundaries(segs, speaker_labels=self.LABELS, interviewer_id="0") == segs
+
+    def test_unchanged_on_gemini_error(self, monkeypatch):
+        segs = self._qa()
+
+        def boom(prompt):
+            raise GeminiPolishError("x")
+
+        monkeypatch.setattr(pp, "_gemini_call", boom)
+        assert correct_speaker_boundaries(segs, speaker_labels=self.LABELS, interviewer_id="0") == segs
+
+    def test_ignores_invalid_speaker_id(self, monkeypatch):
+        segs = self._qa()
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: '[{"id": 0, "speaker": "9"}]')
+        assert correct_speaker_boundaries(segs, speaker_labels=self.LABELS, interviewer_id="0") == segs
+
+    def test_skips_tech_markers(self, monkeypatch):
+        segs = [
+            {"timecode": "00:00:01:00", "speaker": "1", "text": TECH_BREAK_TEXT},
+            {"timecode": "00:00:05:00", "speaker": "0", "text": "Вопрос?"},
+            {"timecode": "00:00:09:00", "speaker": "1", "text": "Ответ."},
+        ]
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: '[{"id": 0, "speaker": "1"}]')
+        out = correct_speaker_boundaries(segs, speaker_labels=self.LABELS, interviewer_id="0")
+        assert out[0]["text"] == TECH_BREAK_TEXT
+        assert any(s["text"] == "Вопрос? Ответ." and s["speaker"] == "1" for s in out)
+
+
+class TestGeminiExtractPassport:
+    def test_parses_json(self, monkeypatch):
+        monkeypatch.setattr(
+            pp, "_gemini_call",
+            lambda prompt: '{"heroes": ["Иванов", "Петров"], "num_heroes": 2, "description": "интервью"}',
+        )
+        data = gemini_extract_passport("любой текст паспорта")
+        assert data["speakers"] == ["Иванов", "Петров"]
+        assert data["num_heroes"] == 2
+        assert data["description"] == "интервью"
+
+    def test_num_from_heroes_when_missing(self, monkeypatch):
+        monkeypatch.setattr(
+            pp, "_gemini_call",
+            lambda prompt: '{"heroes": ["А", "Б", "В"], "num_heroes": 0, "description": ""}',
+        )
+        assert gemini_extract_passport("t")["num_heroes"] == 3
+
+    def test_none_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt: None)
+        assert gemini_extract_passport("t") is None
+
+    def test_none_on_empty_text(self):
+        assert gemini_extract_passport("") is None
+
+    def test_none_on_error(self, monkeypatch):
+        def boom(prompt):
+            raise GeminiPolishError("x")
+
+        monkeypatch.setattr(pp, "_gemini_call", boom)
+        assert gemini_extract_passport("t") is None

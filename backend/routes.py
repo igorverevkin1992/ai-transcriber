@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -42,6 +42,9 @@ from backend.utils import sanitize_filename, validate_file_extension, validate_u
 
 router = APIRouter(prefix="/api/v1")
 limiter = Limiter(key_func=get_remote_address)
+
+# Паспорт съёмки — небольшой .docx; ограничиваем размер.
+_MAX_PASSPORT_BYTES = 10 * 1024 * 1024
 
 
 def _safe_unlink(path: str) -> None:
@@ -170,11 +173,13 @@ async def upload_file(
     file: UploadFile,
     engine: str = Form("whisper"),
     whisper_model: str = Form("medium"),
+    passport: UploadFile | None = File(None),
 ):
     """Загружает один файл с локальной машины и запускает обработку.
 
     engine: 'whisper' (бесплатно, локально) или 'speechkit' (облако, диаризация)
     whisper_model: 'tiny', 'base', 'small', 'medium', 'large' (только для Whisper)
+    passport: необязательный «паспорт съёмки» (.docx) с именами героев и их числом
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="Имя файла не указано")
@@ -238,6 +243,26 @@ async def upload_file(
                 pass
             raise HTTPException(status_code=400, detail=mime_err)
 
+    # Необязательный «паспорт съёмки» (.docx): имена героев + их число.
+    passport_path = None
+    if passport is not None and passport.filename:
+        if not sanitize_filename(passport.filename).lower().endswith(".docx"):
+            try:
+                local_path.unlink()
+            except OSError:
+                pass
+            raise HTTPException(status_code=400, detail="Паспорт должен быть в формате .docx")
+        passport_content = await passport.read()
+        if len(passport_content) > _MAX_PASSPORT_BYTES:
+            try:
+                local_path.unlink()
+            except OSError:
+                pass
+            raise HTTPException(status_code=413, detail="Паспорт слишком большой (макс. 10 МБ)")
+        passport_path = str(TEMP_DIR / f"{pid}_passport.docx")
+        async with aiofiles.open(passport_path, "wb") as pf:
+            await pf.write(passport_content)
+
     projects_db.create(pid, {
         "id": pid,
         "status": ProjectStatusEnum.QUEUED,
@@ -247,12 +272,14 @@ async def upload_file(
         "retry_count": 0,
         "task_func": "process_uploaded_file_task",
         "task_args": (pid, str(local_path), safe_filename),
-        "task_kwargs": {"engine": engine, "whisper_model": whisper_model},
+        "task_kwargs": {"engine": engine, "whisper_model": whisper_model,
+                        "passport_path": passport_path},
     })
 
     submit_task(
         process_uploaded_file_task, pid, str(local_path), safe_filename,
         project_id=pid, engine=engine, whisper_model=whisper_model,
+        passport_path=passport_path,
     )
     logger.info("Файл загружен: %s -> проект %s (engine=%s)", safe_filename, pid[:8], engine)
     return CreateProjectResponse(id=pid)
