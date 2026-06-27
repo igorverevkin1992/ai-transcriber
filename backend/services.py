@@ -816,6 +816,7 @@ def _transcribe_with_whisperx(
         # из числа имён оставляем прежний диапазон n..n+1 (имён может быть меньше,
         # чем реальных голосов: ведущий и т.п.).
         passport_heroes = (passport or {}).get("num_heroes", 0) or 0
+        host_offset = 1 if (passport or {}).get("has_host", True) else 0
         exact_n = 0
         names_n = 0
         if original_filename:
@@ -825,14 +826,16 @@ def _transcribe_with_whisperx(
         if exact_n < 2 and DIARIZATION_NUM_SPEAKERS >= 2:
             exact_n = DIARIZATION_NUM_SPEAKERS
         if passport_heroes >= 1:
-            # Паспорт приоритетнее: герои (гости) + 1 закадровый ведущий; запас +1
-            # на члена съёмочной группы (он затем сворачивается в техмоменты),
-            # поэтому диапазон, а не жёсткое min == max.
-            lo, hi = passport_heroes + 1, passport_heroes + 2
+            # Паспорт приоритетнее: герои (гости) + закадровый ведущий (если есть);
+            # запас +1 на члена съёмочной группы (он затем сворачивается в
+            # техмоменты), поэтому диапазон, а не жёсткое min == max.
+            lo = passport_heroes + host_offset
+            hi = lo + 1
             diarize_kwargs["min_speakers"] = lo
             diarize_kwargs["max_speakers"] = hi
-            logger.info("[%s] Диаризация: хинт %d-%d спикеров из паспорта (%d героев + ведущий)",
-                        project_id[:8], lo, hi, passport_heroes)
+            logger.info("[%s] Диаризация: хинт %d-%d спикеров из паспорта (%d героев%s)",
+                        project_id[:8], lo, hi, passport_heroes,
+                        " + ведущий" if host_offset else "")
         elif exact_n >= 2:
             diarize_kwargs["min_speakers"] = exact_n
             diarize_kwargs["max_speakers"] = exact_n
@@ -1032,9 +1035,12 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             meta["speakers"] = passport["speakers"]
         if passport.get("num_heroes"):
             meta["num_heroes"] = passport["num_heroes"]
+        if passport.get("crew"):
+            meta["crew"] = passport["crew"]
         meta["description"] = passport.get("description", "") or ""
-        logger.info("[%s] Паспорт съёмки: %d героев, имена: %s", project_id[:8],
-                    passport.get("num_heroes", 0), passport.get("speakers", []))
+        logger.info("[%s] Паспорт съёмки: %d героев %s, группа: %s", project_id[:8],
+                    passport.get("num_heroes", 0), passport.get("speakers", []),
+                    passport.get("crew", []))
     projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
 
     if video_path.exists():
@@ -1402,7 +1408,8 @@ def process_uploaded_file_task(
         from backend.postprocess import postprocess_segments
         logger.info("[%s] Постобработка текста...", project_id[:8])
         pp_warnings: list[str] = []
-        segments = postprocess_segments(segments, warnings=pp_warnings)
+        crew_names = (passport_data or {}).get("crew") or None
+        segments = postprocess_segments(segments, warnings=pp_warnings, crew_names=crew_names)
 
         _process_recognition_result(project_id, segments, original_filename, local_video_path,
                                     extra_warnings=pp_warnings, passport=passport_data)

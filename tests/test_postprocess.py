@@ -599,3 +599,34 @@ class TestGeminiExtractPassport:
 
         monkeypatch.setattr(pp, "_gemini_call", boom)
         assert gemini_extract_passport("t") is None
+
+
+class TestPassportCrewAndHost:
+    def test_extracts_host_and_crew(self, monkeypatch):
+        monkeypatch.setattr(
+            pp, "_gemini_call",
+            lambda p: '{"heroes":["Иванов"],"num_heroes":1,"host":true,"crew":["Оператор Петя"],"description":"тема"}',
+        )
+        data = gemini_extract_passport("t")
+        assert data["speakers"] == ["Иванов"]
+        assert data["crew"] == ["Оператор Петя"]
+        assert data["has_host"] is True
+
+    def test_host_false(self, monkeypatch):
+        monkeypatch.setattr(
+            pp, "_gemini_call",
+            lambda p: '{"heroes":["Иванов"],"num_heroes":1,"host":false,"crew":[],"description":""}',
+        )
+        assert gemini_extract_passport("t")["has_host"] is False
+
+    def test_crew_names_injected_into_tech_prompt(self, monkeypatch):
+        captured = {}
+
+        def fake_call(prompt):
+            captured["prompt"] = prompt
+            return ""  # ничего не помечаем
+
+        monkeypatch.setattr(pp, "_gemini_call", fake_call)
+        segs = [{"text": "Обычная реплика интервью.", "words": []}]
+        pp.detect_technical_segments(segs, crew_names=["Иван Петров"])
+        assert "Иван Петров" in captured["prompt"]

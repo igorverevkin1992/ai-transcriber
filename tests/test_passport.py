@@ -72,6 +72,60 @@ class TestParsePassportParagraphs:
         assert data["description"] == "интервью о кино"
 
 
+class TestRealTemplate:
+    def test_value_under_label_and_crew(self, tmp_path):
+        # Шаблон пользователя: подпись на строке, значение — ниже; группа отдельными
+        # полями; «Герой» в ед. числе; «Что снято» как описание.
+        p = tmp_path / "p.docx"
+        _make_para_passport(p, [
+            "Дата съемки: 17.06.2026",
+            "Локация: вуз",
+            "Герой:",
+            "Олег Александрович",
+            "Галина Васильевна",
+            "",
+            "Что снято:",
+            "Тренировка по бадминтону, интервью с тренером.",
+            "",
+            "Автор: Михаил Ломов",
+            "Оператор: Иван Петров",
+            "Инженер: Семён Сидоров",
+        ])
+        data = parse_passport(p)
+        assert data["speakers"] == ["Олег Александрович", "Галина Васильевна"]
+        assert data["num_heroes"] == 2
+        assert data["has_host"] is True
+        assert data["crew"] == ["Иван Петров", "Семён Сидоров"]
+        assert "бадминтон" in data["description"].lower()
+        # Дата/Локация игнорируются, в группу/героев не попадают.
+        assert "17.06.2026" not in data["description"]
+
+    def test_inline_hero_singular(self, tmp_path):
+        p = tmp_path / "p.docx"
+        _make_para_passport(p, ["Герой: Майданов Денис", "Что снято: интервью о кино"])
+        data = parse_passport(p)
+        assert data["speakers"] == ["Майданов Денис"]
+        assert data["description"] == "интервью о кино"
+
+    def test_host_negative_disables(self, tmp_path):
+        p = tmp_path / "p.docx"
+        _make_para_passport(p, ["Герой: Иванов", "Ведущий: нет"])
+        data = parse_passport(p)
+        assert data["has_host"] is False
+
+    def test_host_default_true_when_absent(self, tmp_path):
+        p = tmp_path / "p.docx"
+        _make_para_passport(p, ["Герой: Иванов"])
+        data = parse_passport(p)
+        assert data["has_host"] is True
+
+    def test_crew_comma_separated(self, tmp_path):
+        p = tmp_path / "p.docx"
+        _make_para_passport(p, ["Герой: Иванов", "Съёмочная группа: Петров, Сидоров"])
+        data = parse_passport(p)
+        assert data["crew"] == ["Петров", "Сидоров"]
+
+
 class TestParsePassportEdgeCases:
     def test_missing_file(self, tmp_path):
         assert parse_passport(tmp_path / "nope.docx") is None

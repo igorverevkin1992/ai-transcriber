@@ -362,6 +362,7 @@ _TECH_BATCH_CHARS = 5000
 def detect_technical_segments(
     segments: list[dict],
     warnings: list[str] | None = None,
+    crew_names: list[str] | None = None,
 ) -> list[dict]:
     """Консервативно помечает реплики съёмочной группы маркером тех. момента.
 
@@ -370,6 +371,9 @@ def detect_technical_segments(
     — далее ``build_turns`` выведет их как курсивную ремарку. При сомнении
     фрагмент остаётся без изменений. При сбое Gemini — предупреждение в
     ``warnings``, текст не меняется.
+
+    ``crew_names`` (из «паспорта съёмки») — известные члены съёмочной группы; их
+    реплики и обращения к ним по имени надёжнее помечаются техническими.
     """
     if not segments:
         return segments
@@ -398,6 +402,13 @@ def detect_technical_segments(
         batches.append(cur)
 
     prompt = _TECH_MOMENT_PROMPT_AGGRESSIVE if TECH_MOMENT_AGGRESSIVE else _TECH_MOMENT_PROMPT
+    crew = [str(c).strip() for c in (crew_names or []) if str(c).strip()]
+    if crew:
+        prompt += (
+            "\nИзвестные члены съёмочной группы (НЕ участники интервью): "
+            f"{', '.join(crew)}. Их реплики и обращения к ним по имени помечай "
+            "техническими моментами.\n"
+        )
     failed = False
     for batch in batches:
         numbered = "\n".join(
@@ -526,9 +537,13 @@ def gemini_extract_passport(text: str) -> dict | None:
     prompt = (
         "Это «паспорт съёмки» — заполненная ассистентом форма о видеосъёмке "
         "интервью. Извлеки СТРОГО JSON-объект вида "
-        '{"heroes": ["Имя ..."], "num_heroes": N, "description": "..."}.\n'
-        "heroes — имена героев (гостей) съёмки; num_heroes — их число (целое); "
-        'description — краткое описание/тема съёмки. Если поля нет — [] / 0 / "". '
+        '{"heroes": ["Имя ..."], "num_heroes": N, "host": true, '
+        '"crew": ["Имя ..."], "description": "..."}.\n'
+        "heroes — имена героев (гостей) в кадре; num_heroes — их число (целое); "
+        "host — есть ли закадровый ведущий/автор/корреспондент (true/false); "
+        "crew — имена съёмочной группы (оператор, инженер, продюсер, ассистенты), "
+        "НЕ гости; description — краткое описание/тема съёмки. Ведущего и группу в "
+        'heroes НЕ включай. Если поля нет — [] / 0 / true / "". '
         "Никакого текста кроме JSON.\n\n"
         f"Паспорт:\n{text[:_PASSPORT_MAX_CHARS]}"
     )
@@ -548,16 +563,23 @@ def gemini_extract_passport(text: str) -> dict | None:
     if not isinstance(data, dict):
         return None
 
-    heroes = data.get("heroes") or []
-    if not isinstance(heroes, list):
-        heroes = []
-    heroes = [str(h).strip() for h in heroes if str(h).strip()]
+    def _names(key):
+        val = data.get(key) or []
+        if not isinstance(val, list):
+            return []
+        return [str(x).strip() for x in val if str(x).strip()]
+
+    heroes = _names("heroes")
+    crew = _names("crew")
     num = data.get("num_heroes")
     num = int(num) if isinstance(num, (int, float)) and num > 0 else len(heroes)
+    has_host = data.get("host")
+    has_host = False if has_host is False else True  # дефолт True
     desc = str(data.get("description") or "").strip()
-    if not heroes and num <= 0 and not desc:
+    if not heroes and num <= 0 and not desc and not crew:
         return None
-    return {"speakers": heroes, "num_heroes": num, "description": desc}
+    return {"speakers": heroes, "num_heroes": num, "has_host": has_host,
+            "crew": crew, "description": desc}
 
 
 # --- Gemini-правка границ спикеров ---
@@ -684,12 +706,14 @@ def postprocess_segments(
     segments: list[dict],
     use_gemini: bool = True,
     warnings: list[str] | None = None,
+    crew_names: list[str] | None = None,
 ) -> list[dict]:
     """Постобработка сегментов: regex-чистка + опционально Gemini-полировка.
 
     Батчит сегменты для Gemini (~5000 символов за раз) для экономии API-вызовов.
     Если передан ``warnings``, при сбоях Gemini туда добавляется предупреждение
     (текст остаётся без AI-коррекции, но glossary/regex уже применены).
+    ``crew_names`` (из паспорта) передаётся в детекцию технических моментов.
     """
     if not segments:
         return segments
@@ -706,7 +730,7 @@ def postprocess_segments(
 
     # Консервативно сворачиваем крон-чаттер в маркер тех. момента ДО полировки.
     if TECH_MOMENT_DETECTION:
-        detect_technical_segments(segments, warnings=warnings)
+        detect_technical_segments(segments, warnings=warnings, crew_names=crew_names)
 
     batch_texts = []
     batch_indices = []

@@ -71,6 +71,7 @@ class MetaResult(BaseModel):
     original_filename: str
     description: Optional[str] = None
     num_heroes: Optional[int] = None
+    crew: Optional[List[str]] = None
 
 
 class SegmentResult(BaseModel):
