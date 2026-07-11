@@ -28,9 +28,9 @@ from backend.models import (
 from backend.security import validate_mime_type
 from backend.services import (
     WHISPER_AVAILABLE,
-    _compute_smart_abbreviations,
     auto_export_project,
     cancel_project,
+    compute_display_names_and_abbrs,
     get_whisper_model,
     process_uploaded_file_task,
     process_video_task,
@@ -425,8 +425,10 @@ async def batch_verification_data(ids: str = Query(..., description="ID прое
         speakers = result.get("speakers", {})
         segments = result.get("segments", [])
 
-        name_map = {sid: info.get("suggested_name", f"Спикер {sid}") for sid, info in speakers.items()}
-        abbr_map = _compute_smart_abbreviations(name_map)
+        # Отображаемая форма имени и согласованная аббревиатура — тот же путь,
+        # что в auto_export_project, иначе UI и итоговый DOCX расходятся.
+        raw_names = {sid: info.get("suggested_name", f"Спикер {sid}") for sid, info in speakers.items()}
+        name_map, abbr_map = compute_display_names_and_abbrs(raw_names)
 
         speaker_list = []
         for speaker_id, info in speakers.items():

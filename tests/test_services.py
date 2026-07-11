@@ -347,3 +347,44 @@ class TestResolveWhisperText:
     def test_missing_metrics_kept(self):
         from backend.services import _resolve_whisper_text
         assert _resolve_whisper_text("Текст.", None, None) == "Текст."
+
+
+class TestAbbrTwoLetter:
+    def test_two_letter_mode(self, monkeypatch):
+        import backend.services as services
+        monkeypatch.setattr(services, "ABBR_TWO_LETTER", True)
+        result = _compute_smart_abbreviations({
+            "0": "Арнальди Федерико", "1": "Морфео Доменико",
+        })
+        assert result == {"0": "АФ", "1": "МД"}
+
+    def test_default_single_letter(self):
+        result = _compute_smart_abbreviations({"0": "Майданов Денис"})
+        assert result == {"0": "М"}
+
+    def test_two_letter_patronymic_unchanged(self, monkeypatch):
+        # Имя-отчество и так даёт инициалы — флаг ничего не меняет.
+        import backend.services as services
+        monkeypatch.setattr(services, "ABBR_TWO_LETTER", True)
+        result = _compute_smart_abbreviations({"0": "Олег Александрович"})
+        assert result == {"0": "ОА"}
+
+
+class TestComputeDisplayNamesAndAbbrs:
+    def test_default_keeps_surname_letter(self):
+        # Конвенция f7/f8: показ «Имя Фамилия», аббревиатура — от фамилии.
+        from backend.services import compute_display_names_and_abbrs
+        display, abbrs = compute_display_names_and_abbrs({"0": "Довлатова Алла"})
+        assert display == {"0": "Алла Довлатова"}
+        assert abbrs == {"0": "Д"}
+
+    def test_two_letter_from_displayed_form(self, monkeypatch):
+        # Конвенция ф13: паспорт «Федерико Арнальди» → показ «Арнальди Федерико»,
+        # аббревиатура — инициалы показываемой формы: «АФ».
+        import backend.services as services
+        from backend.services import compute_display_names_and_abbrs
+        monkeypatch.setattr(services, "ABBR_TWO_LETTER", True)
+        display, abbrs = compute_display_names_and_abbrs(
+            {"0": "Федерико Арнальди", "1": "Доменико Морфео"})
+        assert display == {"0": "Арнальди Федерико", "1": "Морфео Доменико"}
+        assert abbrs == {"0": "АФ", "1": "МД"}

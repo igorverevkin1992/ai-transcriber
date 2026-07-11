@@ -13,6 +13,7 @@ import grpc
 import requests
 
 from backend.config import (
+    ABBR_TWO_LETTER,
     DIARIZATION_MODEL,
     DIARIZATION_NUM_SPEAKERS,
     HALLUCINATION_BLACKLIST,
@@ -1194,6 +1195,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         raw_segments = correct_speaker_boundaries(
             raw_segments, speaker_labels=speaker_labels,
             interviewer_id=interviewer_id, description=meta.get("description", ""),
+            warnings=warnings,
         )
 
     for voice_id, dur in speaker_durations.items():
@@ -1409,7 +1411,10 @@ def process_uploaded_file_task(
         logger.info("[%s] Постобработка текста...", project_id[:8])
         pp_warnings: list[str] = []
         crew_names = (passport_data or {}).get("crew") or None
-        segments = postprocess_segments(segments, warnings=pp_warnings, crew_names=crew_names)
+        segments = postprocess_segments(
+            segments, warnings=pp_warnings, crew_names=crew_names,
+            description=(passport_data or {}).get("description") or None,
+        )
 
         _process_recognition_result(project_id, segments, original_filename, local_video_path,
                                     extra_warnings=pp_warnings, passport=passport_data)
@@ -1703,12 +1708,26 @@ def auto_export_project(project_id: str, output_path: str) -> str | None:
             legend_exclude.add(speaker_id)
 
     named_map = {sid: n for sid, n in final_map.items() if sid not in legend_exclude}
-    abbr_map = _compute_smart_abbreviations(named_map)
+    display_map, abbr_map = compute_display_names_and_abbrs(named_map)
+    final_map.update(display_map)
     for sid in legend_exclude:
         abbr_map[sid] = final_map[sid]
-    for sid in named_map:
-        final_map[sid] = _invert_name(final_map[sid])
     return generate_docx(proj, final_map, abbr_map, output_path, legend_exclude=legend_exclude)
+
+
+def compute_display_names_and_abbrs(name_map: dict) -> tuple[dict, dict]:
+    """Отображаемая форма имени + согласованная аббревиатура (общий путь для
+    DOCX-экспорта и verification-UI).
+
+    Показ: `_invert_name` («Довлатова Алла» → «Алла Довлатова»; паспортное
+    «Федерико Арнальди» → «Арнальди Федерико»). Аббревиатура: в дефолте — от
+    ИСХОДНОЙ формы (первая буква первого слова = фамилия при имени из имени
+    файла: «Довлатова Алла» → «Д», конвенция f7/f8); при ``ABBR_TWO_LETTER`` —
+    инициалы ПОКАЗЫВАЕМОЙ формы («Арнальди Федерико» → «АФ», конвенция ф13).
+    """
+    display_map = {sid: _invert_name(n) for sid, n in name_map.items()}
+    abbr_map = _compute_smart_abbreviations(display_map if ABBR_TWO_LETTER else name_map)
+    return display_map, abbr_map
 
 
 def _compute_smart_abbreviations(name_map: dict) -> dict:
@@ -1716,8 +1735,10 @@ def _compute_smart_abbreviations(name_map: dict) -> dict:
 
     База аббревиатуры:
     - имя-отчество («Олег Александрович») → инициалы обоих слов: «ОА»;
-    - иначе (фамилия / «Фамилия Имя» из имени файла) → первая буква первого
-      слова: «Майданов Денис» → «М», «Спикер 1» → «С».
+    - двухсловное имя без отчества: при ``ABBR_TWO_LETTER`` — инициалы обоих
+      слов («Арнальди Федерико» → «АФ», эталон ф13), иначе первая буква
+      («Майданов Денис» → «М», эталоны f7/f8);
+    - прочее (фамилия, «Спикер 1») → первая буква первого слова.
     Затем для совпадающих баз присваиваются индексы (С1, С2, ОА1, ОА2…).
     """
     base_to_sids: dict[str, list[str]] = {}
@@ -1728,8 +1749,10 @@ def _compute_smart_abbreviations(name_map: dict) -> dict:
         if not words or not words[0] or not words[0][0].isalpha():
             fallback_map[speaker_id] = f"С{speaker_id}"
             continue
-        # «Имя Отчество» → инициалы (ОА/ГВ как в эталоне); прочее — первая буква.
-        if len(words) >= 2 and _PATRONYMIC_NAME_RE.match(words[1]):
+        # «Имя Отчество» → инициалы (ОА/ГВ как в эталоне); двухсловное имя при
+        # ABBR_TWO_LETTER — тоже инициалы; прочее — первая буква.
+        two_words = len(words) >= 2 and words[1] and words[1][0].isalpha()
+        if two_words and (_PATRONYMIC_NAME_RE.match(words[1]) or ABBR_TWO_LETTER):
             base = (words[0][0] + words[1][0]).upper()
         else:
             base = words[0][0].upper()

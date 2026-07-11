@@ -201,6 +201,13 @@ SPEECHKIT_LITERATURE_TEXT = os.getenv("SPEECHKIT_LITERATURE_TEXT", "false").lowe
 
 # --- Gemini tuning ---
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+# Более сильная модель для «умных» пассов (правка границ спикеров, техмоменты,
+# имена, паспорт): рассуждение о смысле диалога, где flash слабее. Полировка
+# текста остаётся на дешёвой GEMINI_MODEL. Пусто → используется GEMINI_MODEL.
+GEMINI_MODEL_SMART = os.getenv("GEMINI_MODEL_SMART", "").strip() or GEMINI_MODEL
+# Проверка доступности Gemini при старте сервера (один тестовый вызов): сбой
+# ключа/прокси виден сразу в логе, а не как молчаливая деградация пассов.
+GEMINI_HEALTHCHECK = os.getenv("GEMINI_HEALTHCHECK", "true").lower() in ("1", "true", "yes")
 # Консервативное определение «технических моментов» (реплики съёмочной группы,
 # перезапуски камеры, проверка микрофона и т.п.) через Gemini: ЯВНО не-интервью
 # фрагменты заменяются маркером «(Технические моменты).». Требует GEMINI_API_KEY.
@@ -224,9 +231,10 @@ SPEAKER_BOUNDARY_CORRECTION = os.getenv("SPEAKER_BOUNDARY_CORRECTION", "false").
 # попытаться распознать выжженный в кадр SMPTE-таймкод (easyocr). default: true.
 OCR_TIMECODE = os.getenv("OCR_TIMECODE", "true").lower() in ("1", "true", "yes")
 # Область кадра с таймкодом, доли 0-1: "left,top,right,bottom". По умолчанию —
-# нижняя полоса от центра до правого края (широкий бокс ТК обычно там): ускоряет
-# OCR и отсекает посторонний текст. Пустая строка → искать по всему кадру.
-OCR_TIMECODE_REGION = os.getenv("OCR_TIMECODE_REGION", "0.3,0.7,1.0,1.0")
+# ВСЯ нижняя треть кадра: бокс ТК встречается и по центру снизу (ф13), и справа;
+# прежний дефолт 0.3,0.7 обрезал левый разряд центрального бокса. Пустая строка →
+# искать по всему кадру.
+OCR_TIMECODE_REGION = os.getenv("OCR_TIMECODE_REGION", "0.0,0.65,1.0,1.0")
 
 # --- DOCX formatting ---
 # Тире между именем и аббревиатурой в легенде: «Имя – ОА» (en-dash, как f7/f8)
@@ -239,6 +247,11 @@ LEGEND_TRAILING_DOT = os.getenv("LEGEND_TRAILING_DOT", "true").lower() in ("1", 
 # гостя (при >1 госте). true = текущее поведение; false — единый блок легенды
 # сверху, без повторов (как в бадминтонном эталоне).
 SECTION_DIVIDERS_ENABLED = os.getenv("SECTION_DIVIDERS_ENABLED", "true").lower() in ("1", "true", "yes")
+# Двухбуквенные аббревиатуры для двухсловных имён БЕЗ отчества: «Арнальди
+# Федерико» → «АФ», «Морфео Доменико» → «МД» (как в эталоне ф13). Дефолт false —
+# одна буква («Майданов Денис» → «М», как в эталонах f7/f8). Имя-отчество всегда
+# даёт инициалы (ОА/ГВ) независимо от флага.
+ABBR_TWO_LETTER = os.getenv("ABBR_TWO_LETTER", "false").lower() in ("1", "true", "yes")
 
 # --- DOCX metadata ---
 DOCX_AUTHOR = os.getenv("DOCX_AUTHOR", "")

@@ -208,6 +208,11 @@ def detect_start_timecode(file_path: str) -> str | None:
                 if normalized:
                     logger.info("Встроенный таймкод (тег %s): %s", key, normalized)
                     return normalized
+        # ТК не найден — логируем, какие теги вообще есть в контейнере: по логу
+        # видно, где (и есть ли) ТК в конкретном .wmv, без доступа к файлу.
+        all_tags = {k: v for tags in tag_dicts for k, v in tags.items()}
+        logger.info("ТК в контейнере не найден; теги контейнера: %s",
+                    (json.dumps(all_tags, ensure_ascii=False)[:500] if all_tags else "нет"))
     except Exception as e:
         logger.warning("Не удалось прочитать встроенный таймкод: %s", e)
     return None

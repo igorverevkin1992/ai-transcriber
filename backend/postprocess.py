@@ -6,6 +6,7 @@ import time
 from backend.config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
+    GEMINI_MODEL_SMART,
     GLOSSARY_REPLACEMENTS,
     TECH_MOMENT_AGGRESSIVE,
     TECH_MOMENT_DETECTION,
@@ -75,6 +76,12 @@ REPEATED_WORDS_RE = re.compile(r"\b([а-яА-ЯёЁa-zA-Z]+)(?:\s+\1\b){2,}", re
 REPEATED_PHRASE_RE = re.compile(
     r"\b((?:[а-яА-ЯёЁa-zA-Z]+\s+){1,4}[а-яА-ЯёЁa-zA-Z]+)(?:\s+\1\b){2,}", re.IGNORECASE,
 )
+# Whisper-петля в дефисной форме: «оп-оп-оп-…»×100. Живую речь («да-да-да»,
+# 3 повтора) эталоны сохраняют, поэтому схлопываем только 5+ повторов — до трёх.
+HYPHEN_LOOP_RE = re.compile(r"\b([а-яА-ЯёЁa-zA-Z]+)(?:-\1){4,}\b", re.IGNORECASE)
+# ASR-артефакт: серия «Участник 2. Участник 3. …» (метки говорящих, просочившиеся
+# в текст) — удаляем только ПОВТОРЯЮЩИЕСЯ подряд (одиночное «участник» — речь).
+PARTICIPANT_LOOP_RE = re.compile(r"(?:\bУчастник \d+(?:-\d+)?[.,]?\s*){2,}", re.IGNORECASE)
 # Запятая, за которой идёт другой знак, — артефакт удаления филлера
 # («ну, эээ, давай» → «ну,, давай»). В эталонах ",," и ",." — 0 случаев.
 DUP_PUNCT_RE = re.compile(r",\s*([,.;:!?])")
@@ -152,6 +159,8 @@ def regex_cleanup(text: str) -> str:
     text = FILLER_WORDS_RE.sub("", text)
     text = REPEATED_WORDS_RE.sub(r"\1", text)
     text = REPEATED_PHRASE_RE.sub(r"\1", text)
+    text = HYPHEN_LOOP_RE.sub(lambda m: f"{m.group(1)}-{m.group(1).lower()}-{m.group(1).lower()}", text)
+    text = PARTICIPANT_LOOP_RE.sub("", text)
     # Дубли пунктуации после удаления филлеров; до 2 проходов («, , ,»)
     for _ in range(2):
         text, n = DUP_PUNCT_RE.subn(r"\1", text)
@@ -228,27 +237,57 @@ def _clean_gemini_response(result: str) -> str:
     return result.strip()
 
 
-def _gemini_call(prompt: str) -> str | None:
-    """Вызов Gemini с ретраями на rate-limit/5xx. Общее ядро для полировки и
-    классификации технических моментов.
+def _gemini_ready() -> bool:
+    """Доступен ли Gemini-клиент (лениво создаёт и кэширует).
 
-    Возвращает очищенный текст ответа (может быть пустым), ``None`` — если модель
-    недоступна (нет пакета/ключа). Окончательный сбой после ретраев →
-    ``GeminiPolishError``.
+    False = ключ не задан / пакет отсутствует / клиент не создался (прокси и
+    т.п.) — в этом случае все смысловые пассы деградируют, и вызывающий код
+    обязан сделать это ВИДИМЫМ (warning в UI/лог), а не молчать.
     """
     global _gemini_client
     if _gemini_client is None:
         with _gemini_lock:
             if _gemini_client is None:
                 _gemini_client = _get_gemini_client()
-    if _gemini_client is None:
+    return _gemini_client is not None
+
+
+def gemini_health_check() -> tuple[bool, str | None]:
+    """Однократная проверка работоспособности Gemini (для старта сервера).
+
+    Возвращает (ok, причина-если-нет). Реальный минимальный вызов API: ловит и
+    ошибку создания клиента (ключ/прокси), и сетевые/авторизационные сбои.
+    """
+    if not _gemini_ready():
+        return False, ("клиент не создан — проверьте GEMINI_API_KEY и настройки "
+                       "прокси (подробности выше в логе)")
+    try:
+        result = _gemini_call("Ответь одним словом: да")
+    except GeminiPolishError as e:
+        return False, str(e)
+    if result is None:
+        return False, "клиент недоступен"
+    return True, None
+
+
+def _gemini_call(prompt: str, model: str | None = None) -> str | None:
+    """Вызов Gemini с ретраями на rate-limit/5xx. Общее ядро для полировки и
+    классификации технических моментов.
+
+    ``model`` — переопределение модели (умные пассы используют
+    ``GEMINI_MODEL_SMART``); по умолчанию ``GEMINI_MODEL``.
+    Возвращает очищенный текст ответа (может быть пустым), ``None`` — если модель
+    недоступна (нет пакета/ключа). Окончательный сбой после ретраев →
+    ``GeminiPolishError``.
+    """
+    if not _gemini_ready():
         return None
 
     for attempt in range(GEMINI_MAX_RETRIES):
         try:
             # temperature=0: корректор/классификатор должен быть детерминированным
             response = _gemini_client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=model or GEMINI_MODEL,
                 contents=prompt,
                 config={"temperature": 0.0},
             )
@@ -270,18 +309,35 @@ def _gemini_call(prompt: str) -> str | None:
     return None
 
 
-def gemini_polish(text: str) -> str:
-    """Полировка текста через Gemini API с retry на rate-limit/5xx."""
+def gemini_polish(text: str, context: str | None = None) -> str:
+    """Полировка текста через Gemini API с retry на rate-limit/5xx.
+
+    ``context`` — описание съёмки из паспорта: даёт корректору тему (правильные
+    имена/термины по смыслу) и включает правило про иностранную речь — участники
+    кулинарных/национальных съёмок часто переходят на другой язык, который ASR
+    транслитерирует кириллицей в бессмыслицу.
+    """
     glossary_rule = ""
     if TRANSCRIPT_GLOSSARY:
         glossary_rule = (
             f"\nГлоссарий правильных написаний (имена, термины, названия) — "
             f"приводи распознанные варианты к ним: {TRANSCRIPT_GLOSSARY}.\n"
         )
+    context_rule = ""
+    if context and context.strip():
+        context_rule = (
+            f"\nКонтекст съёмки: {context.strip()}\n"
+            "Если участник по контексту говорит на иностранном языке, а фраза "
+            "выглядит как кириллическая транслитерация иностранной речи — "
+            "восстанови её на языке оригинала латиницей, ТОЛЬКО если уверен "
+            "(например «гварда» → «guarda», «алора» → «allora»); если фраза "
+            "бессвязна и восстановить её нельзя — оставь без изменений.\n"
+        )
 
     prompt = (
         "Ты — корректор ДОСЛОВНОЙ стенограммы телеинтервью на русском языке.\n"
         f"{glossary_rule}"
+        f"{context_rule}"
         "Правила:\n"
         "1. НЕ удаляй и НЕ добавляй слова. Разговорные «ну», «вот», «как бы», "
         "«типа», «короче», «значит», «хм» — часть стенограммы, сохраняй их. "
@@ -323,7 +379,9 @@ _TECH_MOMENT_PROMPT = (
     "по темам беседы.\n"
     "Найди фрагменты, которые ЯВНО НЕ относятся к интервью: команды съёмочной\n"
     "группы, перезапуск/настройка камеры, проверка микрофона, технические\n"
-    "указания, обращения к оператору или режиссёру, отсчёт, хлопушка.\n"
+    "указания, обращения к оператору или режиссёру, отсчёт, хлопушка,\n"
+    "обсуждение ракурсов и планов съёмки («кто общий, кто крупный?», «я общий»,\n"
+    "«сначала крупный план», «доски поближе к камере», «не надо снимать»).\n"
     "ВАЖНО: при ЛЮБОМ сомнении НЕ помечай фрагмент — лучше оставить лишнюю\n"
     "фразу, чем потерять реплику интервью. Большинство фрагментов — НЕ\n"
     "технические.\n"
@@ -346,7 +404,9 @@ _TECH_MOMENT_PROMPT_AGGRESSIVE = (
     "  отсчёт, хлопушка;\n"
     "- закадровая организация процесса: обращения к посторонним по имени\n"
     "  (оператор, ассистенты), «давай с тебя», «кто-то ещё попробуйте»,\n"
-    "  «пойду умоюсь», «подождите», обсуждение, кто и когда играет/снимает.\n"
+    "  «пойду умоюсь», «подождите», обсуждение, кто и когда играет/снимает;\n"
+    "- обсуждение ракурсов и планов съёмки: «кто общий, кто крупный?»,\n"
+    "  «я общий», «сначала крупный план», «не надо это снимать».\n"
     "ОСТАВЛЯЙ как интервью: содержательные ответы и вопросы по теме, даже с\n"
     "разговорными «ну», «вот», «как бы»; реплики про сам предмет беседы.\n"
     "При сомнении между «по теме» и «организация» — НЕ помечай.\n"
@@ -410,12 +470,13 @@ def detect_technical_segments(
             "техническими моментами.\n"
         )
     failed = False
+    total_flagged = 0
     for batch in batches:
         numbered = "\n".join(
             f"{n}. {segments[idx]['text']}" for n, idx in enumerate(batch, 1)
         )
         try:
-            result = _gemini_call(prompt + numbered)
+            result = _gemini_call(prompt + numbered, model=GEMINI_MODEL_SMART)
         except GeminiPolishError:
             failed = True
             continue
@@ -425,12 +486,15 @@ def detect_technical_segments(
         for n, idx in enumerate(batch, 1):
             if n in flagged:
                 segments[idx]["text"] = TECH_BREAK_TEXT
+                total_flagged += 1
 
     if warnings is not None and failed:
         warnings.append(
             "Определение технических моментов не выполнено (сбой Gemini) — "
             "реплики съёмочной группы могли остаться в тексте."
         )
+    logger.info("Техмоменты (Gemini): помечено %d фрагментов%s",
+                total_flagged, " (были сбои батчей)" if failed else "")
     return segments
 
 
@@ -492,7 +556,7 @@ def gemini_infer_speaker_names(
     )
 
     try:
-        result = _gemini_call(prompt)
+        result = _gemini_call(prompt, model=GEMINI_MODEL_SMART)
     except GeminiPolishError:
         return None
     if not result:
@@ -548,7 +612,7 @@ def gemini_extract_passport(text: str) -> dict | None:
         f"Паспорт:\n{text[:_PASSPORT_MAX_CHARS]}"
     )
     try:
-        result = _gemini_call(prompt)
+        result = _gemini_call(prompt, model=GEMINI_MODEL_SMART)
     except GeminiPolishError:
         return None
     if not result:
@@ -613,6 +677,7 @@ def correct_speaker_boundaries(
     speaker_labels: dict[str, str],
     interviewer_id: str | None,
     description: str = "",
+    warnings: list[str] | None = None,
 ) -> list[dict]:
     """Переназначить спикера у реплик, которые диаризация отнесла ЦЕЛИКОМ не тому
     говорящему (ответ гостя в абзаце ведущего и наоборот), через Gemini.
@@ -667,21 +732,29 @@ def correct_speaker_boundaries(
         f"Стенограмма:\n{transcript}"
     )
 
+    def _fail(reason: str) -> list[dict]:
+        logger.warning("Правка границ спикеров НЕ выполнена: %s", reason)
+        if warnings is not None:
+            warnings.append(f"Правка границ спикеров не выполнена ({reason}).")
+        return segments
+
     try:
-        result = _gemini_call(prompt)
-    except GeminiPolishError:
-        return segments
+        result = _gemini_call(prompt, model=GEMINI_MODEL_SMART)
+    except GeminiPolishError as e:
+        return _fail(f"сбой Gemini: {e}")
+    if result is None:
+        return _fail("Gemini недоступен — ключ/прокси")
     if not result:
-        return segments
+        return _fail("пустой ответ Gemini")
     match = re.search(r"\[.*\]", result, re.DOTALL)
     if not match:
-        return segments
+        return _fail("нераспознанный ответ Gemini")
     try:
         data = json.loads(match.group(0))
     except (ValueError, TypeError):
-        return segments
+        return _fail("некорректный JSON в ответе Gemini")
     if not isinstance(data, list):
-        return segments
+        return _fail("некорректный JSON в ответе Gemini")
 
     out = [dict(s) for s in segments]
     reassigned = 0
@@ -696,9 +769,9 @@ def correct_speaker_boundaries(
         if str(out[idx].get("speaker")) != new_sid:
             out[idx]["speaker"] = new_sid
             reassigned += 1
+    logger.info("Gemini-правка границ: переназначено реплик: %d", reassigned)
     if not reassigned:
         return segments
-    logger.info("Gemini-правка границ: переназначено реплик: %d", reassigned)
     return _merge_adjacent_same_speaker(out)
 
 
@@ -707,13 +780,15 @@ def postprocess_segments(
     use_gemini: bool = True,
     warnings: list[str] | None = None,
     crew_names: list[str] | None = None,
+    description: str | None = None,
 ) -> list[dict]:
     """Постобработка сегментов: regex-чистка + опционально Gemini-полировка.
 
     Батчит сегменты для Gemini (~5000 символов за раз) для экономии API-вызовов.
     Если передан ``warnings``, при сбоях Gemini туда добавляется предупреждение
     (текст остаётся без AI-коррекции, но glossary/regex уже применены).
-    ``crew_names`` (из паспорта) передаётся в детекцию технических моментов.
+    ``crew_names`` (из паспорта) передаётся в детекцию технических моментов;
+    ``description`` (тема съёмки из паспорта) — контекст для полировки.
     """
     if not segments:
         return segments
@@ -726,6 +801,16 @@ def postprocess_segments(
     segments = [seg for seg in segments if seg["text"].strip()]
 
     if not use_gemini or not GEMINI_API_KEY:
+        return segments
+
+    # Недоступный клиент (ключ/прокси) раньше деградировал МОЛЧА — все пассы
+    # тихо превращались в no-op. Делаем сбой видимым в UI и прекращаем сразу.
+    if not _gemini_ready():
+        if warnings is not None:
+            warnings.append(
+                "Gemini недоступен (ключ/прокси — см. лог сервера): полировка, "
+                "техмоменты и правка границ спикеров НЕ выполнены."
+            )
         return segments
 
     # Консервативно сворачиваем крон-чаттер в маркер тех. момента ДО полировки.
@@ -763,7 +848,7 @@ def postprocess_segments(
     failed_batches = 0
     for batch_text, indices in zip(batch_texts, batch_indices):
         try:
-            polished = gemini_polish(batch_text)
+            polished = gemini_polish(batch_text, context=description)
         except GeminiPolishError:
             failed_batches += 1
             continue  # текст остаётся без AI-коррекции
@@ -778,7 +863,7 @@ def postprocess_segments(
             # batch didn't split cleanly — polish individually
             for idx in indices:
                 try:
-                    polished_text = gemini_polish(segments[idx]["text"])
+                    polished_text = gemini_polish(segments[idx]["text"], context=description)
                 except GeminiPolishError:
                     failed_batches += 1
                     break
@@ -790,5 +875,7 @@ def postprocess_segments(
             f"Gemini-полировка не выполнена для {failed_batches} фрагментов — "
             "возможны ошибки в именах собственных и пунктуации."
         )
+    logger.info("Gemini-полировка: %d/%d батчей успешно",
+                len(batch_texts) - failed_batches, len(batch_texts))
 
     return segments

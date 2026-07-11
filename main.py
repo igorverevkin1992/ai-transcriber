@@ -10,7 +10,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.auth import ApiKeyMiddleware
-from backend.config import API_KEY, AUTO_RECOVER_ON_STARTUP, CORS_ORIGINS, OUTPUT_DIR, SQLITE_DB_PATH, TEMP_DIR, YANDEX_API_KEY, logger
+from backend.config import (
+    API_KEY,
+    AUTO_RECOVER_ON_STARTUP,
+    CORS_ORIGINS,
+    GEMINI_API_KEY,
+    GEMINI_HEALTHCHECK,
+    GEMINI_MODEL,
+    GEMINI_MODEL_SMART,
+    OUTPUT_DIR,
+    SQLITE_DB_PATH,
+    TEMP_DIR,
+    YANDEX_API_KEY,
+    logger,
+)
 from backend.metrics import CONTENT_TYPE_LATEST, generate_latest
 from backend.models import HealthResponse, ProjectStatusEnum
 from backend.routes import router
@@ -144,6 +157,22 @@ async def lifespan(app: FastAPI):
         logger.error("FFmpeg не найден в PATH. Установите ffmpeg.")
     except Exception as e:
         logger.error("Ошибка при проверке FFmpeg: %s", e)
+
+    # Здоровье Gemini: раньше сбой клиента (ключ/прокси) обнаруживался только по
+    # косвенным признакам (нет техмоментов/полировки). Проверяем при старте явно.
+    if GEMINI_API_KEY and GEMINI_HEALTHCHECK:
+        from backend.postprocess import gemini_health_check
+        ok, reason = gemini_health_check()
+        if ok:
+            logger.info("Gemini доступен (модель: %s, умные пассы: %s)",
+                        GEMINI_MODEL, GEMINI_MODEL_SMART)
+        else:
+            logger.error(
+                "Gemini НЕДОСТУПЕН: %s. Полировка, техмоменты и правка границ "
+                "спикеров работать НЕ будут — стенограммы будут черновыми.", reason,
+            )
+    elif not GEMINI_API_KEY:
+        logger.warning("GEMINI_API_KEY не задан — полировка/техмоменты/правка границ отключены.")
 
     _backup_sqlite()
     _cleanup_old_docx()
