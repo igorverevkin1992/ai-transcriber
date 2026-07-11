@@ -10,6 +10,7 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt
 
 from backend.config import (
+    DOC_TITLE_ENABLED,
     DOCX_AUTHOR,
     DOCX_TEMPLATE_PATH,
     LEGEND_DASH,
@@ -457,14 +458,16 @@ def generate_docx(
 
     # Заголовочный блок (имя файла, разделитель, легенда) в эталонах несёт
     # <w:caps/> — отображается ПРОПИСНЫМИ (f7/f8/ф14-15; разделитель после
-    # легенды и реплики — уже без caps).
-    header_para = doc.add_paragraph()
-    _configure_paragraph(header_para, caps=True)
-    _add_run(header_para, title_text, caps=True)
-    _add_goback_bookmark(header_para)
+    # легенды и реплики — уже без caps). Титульная строка с именем файла —
+    # конвенция f7/f8; эталон ф13 начинается сразу с легенды → DOC_TITLE_ENABLED.
+    if DOC_TITLE_ENABLED:
+        header_para = doc.add_paragraph()
+        _configure_paragraph(header_para, caps=True)
+        _add_run(header_para, title_text, caps=True)
+        _add_goback_bookmark(header_para)
 
-    empty1 = doc.add_paragraph()
-    _configure_paragraph(empty1, caps=True)
+        empty1 = doc.add_paragraph()
+        _configure_paragraph(empty1, caps=True)
 
     speakers_info = project["result"].get("speakers", {})
     segments = segments_override if segments_override is not None else project["result"]["segments"]

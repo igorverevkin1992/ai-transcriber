@@ -752,3 +752,23 @@ class TestSmartModelFallback:
         ok, reason = pp.gemini_health_check()
         assert ok is True and reason is None
         assert "bad-pro" in pp._broken_models
+
+
+class TestBoundaryCorrectionMergeParam:
+    LABELS = {"0": "АЗК", "1": "Гость"}
+
+    def test_no_merge_when_disabled(self, monkeypatch):
+        # События до склейки: переназначение есть, но соседние одно-спикерные
+        # НЕ склеиваются (этим займётся build_turns).
+        segs = [
+            {"speaker": "0", "text": "Первое.", "start_s": 1.0, "end_s": 2.0},
+            {"speaker": "1", "text": "Второе.", "start_s": 3.0, "end_s": 4.0},
+            {"speaker": "0", "text": "Третье.", "start_s": 5.0, "end_s": 6.0},
+        ]
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt, **kw: '[{"id": 1, "speaker": "0"}]')
+        out = correct_speaker_boundaries(
+            segs, speaker_labels=self.LABELS, interviewer_id="0", merge_adjacent=False,
+        )
+        assert len(out) == 3  # не склеено
+        assert [s["speaker"] for s in out] == ["0", "0", "0"]
+        assert out[1]["start_s"] == 3.0  # поля события сохранены

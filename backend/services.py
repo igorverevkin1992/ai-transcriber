@@ -1109,22 +1109,25 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             speaker_durations[channel] = speaker_durations.get(channel, 0) + (end_s - start_s)
             speech_events.append(ev)
 
-    if TURN_MERGE_ENABLED:
-        raw_segments = build_turns(
-            events, start_frames, fps,
-            inline_tc_seconds=TURN_INLINE_TC_SECONDS,
-            tech_break_gap_seconds=TECH_BREAK_GAP_SECONDS,
-        )
-    else:
+    def _assemble_turns(evts: list[dict]) -> list[dict]:
+        """Сборка реплик из событий — вызывается повторно после правки границ."""
+        if TURN_MERGE_ENABLED:
+            return build_turns(
+                evts, start_frames, fps,
+                inline_tc_seconds=TURN_INLINE_TC_SECONDS,
+                tech_break_gap_seconds=TECH_BREAK_GAP_SECONDS,
+            )
         # Legacy: один ASR-сегмент = один абзац
-        raw_segments = [
+        return [
             {
                 "timecode": offset_tc(start_frames, ev["start_s"], fps),
                 "speaker": ev["speaker"],
                 "text": ev["text"],
             }
-            for ev in events
+            for ev in evts
         ]
+
+    raw_segments = _assemble_turns(events)
 
     from backend.diarization_post import (
         build_speaker_sequence,
@@ -1180,8 +1183,11 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             logger.info("[%s] Имена гостей из диалога: %s", project_id[:8],
                         {v: inferred[v] for v in unnamed_guests if v in inferred})
 
-    # Gemini-правка границ: переназначить реплики, целиком отнесённые не тому
-    # спикеру. Контекст — роли (ведущий/гости) + тема из паспорта. opt-in.
+    # Gemini-правка границ на уровне СЫРЫХ ASR-событий (гранулярность ≈
+    # предложение): чинит и целиком перепутанные реплики, и — главное —
+    # разрезает склейки мульти-спикерных реплик, которые правка на уровне
+    # склеенных turns разрезать не могла («Да? Да, конечно. Готов?» внутри
+    # чужого абзаца). После правки реплики пересобираются заново. opt-in.
     if SPEAKER_BOUNDARY_CORRECTION and len(speaker_durations) >= 2:
         from backend.postprocess import correct_speaker_boundaries
         speaker_labels = {}
@@ -1192,11 +1198,14 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
                 speaker_labels[vid] = guest_names[vid]
             else:
                 speaker_labels[vid] = f"Спикер {int(vid) + 1}" if vid.isdigit() else f"Спикер {vid}"
-        raw_segments = correct_speaker_boundaries(
-            raw_segments, speaker_labels=speaker_labels,
+        corrected_events = correct_speaker_boundaries(
+            events, speaker_labels=speaker_labels,
             interviewer_id=interviewer_id, description=meta.get("description", ""),
-            warnings=warnings,
+            warnings=warnings, merge_adjacent=False,
         )
+        if corrected_events is not events:
+            events = corrected_events
+            raw_segments = _assemble_turns(events)
 
     for voice_id, dur in speaker_durations.items():
         if voice_id == interviewer_id:

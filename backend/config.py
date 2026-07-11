@@ -247,6 +247,9 @@ LEGEND_TRAILING_DOT = os.getenv("LEGEND_TRAILING_DOT", "true").lower() in ("1", 
 # гостя (при >1 госте). true = текущее поведение; false — единый блок легенды
 # сверху, без повторов (как в бадминтонном эталоне).
 SECTION_DIVIDERS_ENABLED = os.getenv("SECTION_DIVIDERS_ENABLED", "true").lower() in ("1", "true", "yes")
+# Титульная строка документа (имя файла ПРОПИСНЫМИ) перед легендой. Конвенция
+# f7/f8 (default true); эталон ф13 начинается сразу с легенды → false.
+DOC_TITLE_ENABLED = os.getenv("DOC_TITLE_ENABLED", "true").lower() in ("1", "true", "yes")
 # Двухбуквенные аббревиатуры для двухсловных имён БЕЗ отчества: «Арнальди
 # Федерико» → «АФ», «Морфео Доменико» → «МД» (как в эталоне ф13). Дефолт false —
 # одна буква («Майданов Денис» → «М», как в эталонах f7/f8). Имя-отчество всегда

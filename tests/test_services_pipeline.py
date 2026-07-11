@@ -562,3 +562,65 @@ class TestEnsureExecutor:
         # submit a trivial task to prove it's live
         fut = ex.submit(lambda: 42)
         assert fut.result(timeout=5) == 42
+
+
+class TestEventLevelBoundaryCorrection:
+    def test_glued_turn_split_after_correction(self, fresh_store, monkeypatch):
+        # Событие «Вы готовы?» ошибочно помечено гостем: правка на уровне
+        # событий переназначает его ведущему, и пересборка реплик разрезает
+        # склейку (реплика гостя больше не содержит чужой вопрос).
+        store, _, _ = fresh_store
+        store.create("ev1", {"id": "ev1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        monkeypatch.setattr(services, "SPEAKER_BOUNDARY_CORRECTION", True)
+        monkeypatch.setattr(services, "INTERVIEWER_AUTODETECT", False)
+
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "_gemini_call", lambda prompt, **kw: '[{"id": 1, "speaker": "0"}]')
+
+        segments = [
+            {"channel_tag": "1", "text": "Длинный ответ гостя.",
+             "words": [{"text": "Длинный ответ гостя.", "start_ms": 0, "end_ms": 2000}]},
+            {"channel_tag": "1", "text": "Вы готовы?",
+             "words": [{"text": "Вы готовы?", "start_ms": 2500, "end_ms": 3500}]},
+            {"channel_tag": "0", "text": "Да, готов.",
+             "words": [{"text": "Да, готов.", "start_ms": 4000, "end_ms": 5000}]},
+        ]
+        services._process_recognition_result("ev1", segments, "file.mp4", Path("/nope.mp4"))
+
+        result = store["ev1"]["result"]
+        texts = [(s["speaker"], s["text"]) for s in result["segments"]]
+        # Вопрос ушёл из реплики гостя и склеился с ответом спикера 0.
+        assert ("1", "Длинный ответ гостя.") in texts
+        assert any(sp == "0" and "Вы готовы?" in t and "Да, готов." in t for sp, t in texts)
+
+
+class TestDocTitleFlag:
+    def _project(self, store):
+        store.create("t1", {
+            "id": "t1", "status": ProjectStatusEnum.COMPLETED, "created_at": 1.0,
+            "original_filename": "интервью_ф13.wmv",
+            "result": {
+                "speakers": {"0": {"duration_sec": 10.0, "suggested_name": "Иванов"}},
+                "segments": [{"timecode": "00:00:01:00", "speaker": "0", "text": "Текст."}],
+            },
+        })
+
+    def test_title_present_by_default(self, fresh_store):
+        store, temp_dir, _ = fresh_store
+        self._project(store)
+        out = str(temp_dir / "t1.docx")
+        services.auto_export_project("t1", out)
+        from docx import Document
+        texts = [p.text for p in Document(out).paragraphs]
+        assert any("интервью_ф13" in t for t in texts)
+
+    def test_title_hidden_when_disabled(self, fresh_store, monkeypatch):
+        import backend.docx_export as dx
+        monkeypatch.setattr(dx, "DOC_TITLE_ENABLED", False)
+        store, temp_dir, _ = fresh_store
+        self._project(store)
+        out = str(temp_dir / "t1.docx")
+        services.auto_export_project("t1", out)
+        from docx import Document
+        texts = [p.text for p in Document(out).paragraphs]
+        assert not any("интервью_ф13" in t for t in texts)
