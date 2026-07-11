@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { BatchUploadForm, EngineType, WhisperModel } from './components/BatchUploadForm';
+import { BatchUploadForm, EngineType, PassportMap, WhisperModel } from './components/BatchUploadForm';
 import { BatchProgress } from './components/BatchProgress';
 import { BatchVerification } from './components/BatchVerification';
 import { ProcessingStatus } from './components/ProcessingStatus';
@@ -18,6 +18,7 @@ const App: React.FC = () => {
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [projectData, setProjectData] = useState<ProjectData | null>(null);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [batchPassports, setBatchPassports] = useState<PassportMap>({});
   const [batchEngine, setBatchEngine] = useState<EngineType>('whisper');
   const [batchWhisperModel, setBatchWhisperModel] = useState<WhisperModel>('small');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -95,8 +96,9 @@ const App: React.FC = () => {
     addToast('success', 'Монтажный лист успешно сформирован');
   };
 
-  const handleStartBatch = (files: File[], engine: EngineType, whisperModel: WhisperModel) => {
+  const handleStartBatch = (files: File[], engine: EngineType, whisperModel: WhisperModel, passports: PassportMap) => {
     setBatchFiles(files);
+    setBatchPassports(passports);
     setBatchEngine(engine);
     setBatchWhisperModel(whisperModel);
     setStatus('BATCH_PROCESSING');
@@ -106,6 +108,7 @@ const App: React.FC = () => {
     setStatus('IDLE');
     setProjectData(null);
     setBatchFiles([]);
+    setBatchPassports({});
     setBatchProjectIds([]);
   };
 
@@ -241,6 +244,7 @@ const App: React.FC = () => {
         {status === 'BATCH_PROCESSING' && (batchFiles.length > 0 || recoveredSession) && (
           <BatchProgress
             files={batchFiles}
+            passports={batchPassports}
             engine={batchEngine}
             whisperModel={batchWhisperModel}
             onDone={(projectIds) => {

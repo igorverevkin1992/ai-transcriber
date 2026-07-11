@@ -1,11 +1,16 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, Link as LinkIcon, AlertCircle, X, Cpu, Cloud, ChevronDown, ChevronUp } from 'lucide-react';
+import { UploadCloud, Link as LinkIcon, AlertCircle, X, Cpu, Cloud, ChevronDown, ChevronUp, FileText, Paperclip } from 'lucide-react';
 
 export type EngineType = 'whisper' | 'speechkit';
 export type WhisperModel = 'small' | 'medium' | 'large';
 
+/** Паспорта съёмки, привязанные к видеофайлам по ключу `${name}_${size}`. */
+export type PassportMap = Record<string, File>;
+
+export const fileKey = (f: File) => `${f.name}_${f.size}`;
+
 interface Props {
-  onStartBatch: (files: File[], engine: EngineType, whisperModel: WhisperModel) => void;
+  onStartBatch: (files: File[], engine: EngineType, whisperModel: WhisperModel, passports: PassportMap) => void;
   onUploadLink: (link: string) => void;
 }
 
@@ -30,7 +35,11 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onUploadLink })
   const [engine, setEngine] = useState<EngineType>('whisper');
   const [whisperModel, setWhisperModel] = useState<WhisperModel>('small');
   const [showSettings, setShowSettings] = useState(false);
+  const [passports, setPassports] = useState<PassportMap>({});
   const inputRef = useRef<HTMLInputElement>(null);
+  const passportInputRef = useRef<HTMLInputElement>(null);
+  // Ключ видеофайла, для которого сейчас выбирается паспорт.
+  const passportTargetRef = useRef<string | null>(null);
   const dragCounter = useRef(0);
 
   const filterValidFiles = (fileList: FileList | File[]): { valid: File[]; oversized: string[] } => {
@@ -108,7 +117,42 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onUploadLink })
   };
 
   const handleRemoveFile = (index: number) => {
+    const removed = files[index];
     setFiles(prev => prev.filter((_, i) => i !== index));
+    if (removed) {
+      setPassports(prev => {
+        const next = { ...prev };
+        delete next[fileKey(removed)];
+        return next;
+      });
+    }
+  };
+
+  const handlePickPassport = (file: File) => {
+    passportTargetRef.current = fileKey(file);
+    passportInputRef.current?.click();
+  };
+
+  const handlePassportSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const passport = e.target.files?.[0];
+    const target = passportTargetRef.current;
+    e.target.value = '';
+    passportTargetRef.current = null;
+    if (!passport || !target) return;
+    if (!passport.name.toLowerCase().endsWith('.docx')) {
+      setError('Паспорт съёмки должен быть в формате .docx');
+      return;
+    }
+    setError('');
+    setPassports(prev => ({ ...prev, [target]: passport }));
+  };
+
+  const handleRemovePassport = (file: File) => {
+    setPassports(prev => {
+      const next = { ...prev };
+      delete next[fileKey(file)];
+      return next;
+    });
   };
 
   const handleSubmitFiles = () => {
@@ -116,7 +160,7 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onUploadLink })
       setError('Выберите файлы для обработки');
       return;
     }
-    onStartBatch(files, engine, whisperModel);
+    onStartBatch(files, engine, whisperModel, passports);
   };
 
   const handleSubmitLink = (e: React.FormEvent) => {
@@ -190,6 +234,14 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onUploadLink })
                 aria-label="Выберите медиафайлы"
                 onChange={handleFileSelect}
               />
+              <input
+                ref={passportInputRef}
+                type="file"
+                accept=".docx"
+                className="hidden"
+                aria-label="Выберите паспорт съёмки (.docx)"
+                onChange={handlePassportSelect}
+              />
 
               <div
                 onDragEnter={handleDragEnter}
@@ -231,21 +283,50 @@ export const BatchUploadForm: React.FC<Props> = ({ onStartBatch, onUploadLink })
                     </div>
 
                     <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
-                      {files.map((file, i) => (
-                        <div key={`${file.name}_${file.size}_${file.lastModified}`} className="flex items-center justify-between px-3 py-2 hover:bg-gray-50">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm text-gray-700 truncate">{file.name}</p>
-                            <p className="text-xs text-gray-400">{formatSize(file.size)}</p>
+                      {files.map((file, i) => {
+                        const passport = passports[fileKey(file)];
+                        return (
+                          <div key={`${file.name}_${file.size}_${file.lastModified}`} className="px-3 py-2 hover:bg-gray-50">
+                            <div className="flex items-center justify-between">
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm text-gray-700 truncate">{file.name}</p>
+                                <p className="text-xs text-gray-400">{formatSize(file.size)}</p>
+                              </div>
+                              {!passport && (
+                                <button
+                                  onClick={() => handlePickPassport(file)}
+                                  aria-label={`Прикрепить паспорт съёмки к ${file.name}`}
+                                  title="Прикрепить паспорт съёмки (.docx)"
+                                  className="ml-2 flex items-center gap-1 px-2 py-1 text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded"
+                                >
+                                  <Paperclip className="w-3.5 h-3.5" />
+                                  Паспорт
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleRemoveFile(i)}
+                                aria-label={`Удалить ${file.name}`}
+                                className="ml-2 p-1 text-gray-400 hover:text-red-500"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                            </div>
+                            {passport && (
+                              <div className="mt-1 flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 rounded px-2 py-1 w-fit max-w-full">
+                                <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                                <span className="truncate">Паспорт: {passport.name}</span>
+                                <button
+                                  onClick={() => handleRemovePassport(file)}
+                                  aria-label={`Открепить паспорт от ${file.name}`}
+                                  className="p-0.5 text-emerald-500 hover:text-red-500"
+                                >
+                                  <X className="w-3 h-3" />
+                                </button>
+                              </div>
+                            )}
                           </div>
-                          <button
-                            onClick={() => handleRemoveFile(i)}
-                            aria-label={`Удалить ${file.name}`}
-                            className="ml-2 p-1 text-gray-400 hover:text-red-500"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
 
                     {isDragging && (

@@ -17,6 +17,8 @@ import { BatchFileInfo } from '../types';
 
 interface Props {
   files: File[];
+  /** Паспорта съёмки по ключу `${name}_${size}` видеофайла (см. BatchUploadForm). */
+  passports?: Record<string, File>;
   engine?: string;
   whisperModel?: string;
   onDone: (projectIds: string[]) => void;
@@ -75,7 +77,7 @@ const STEP_LABELS: Record<string, string> = {
   error: 'Ошибка',
 };
 
-export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whisperModel = 'small', onDone, onError, onPhaseChange, recoveredProjectIds, recoveredFileNames }) => {
+export const BatchProgress: React.FC<Props> = ({ files, passports, engine = 'whisper', whisperModel = 'small', onDone, onError, onPhaseChange, recoveredProjectIds, recoveredFileNames }) => {
   const isRecovery = !!recoveredProjectIds && recoveredProjectIds.length > 0;
   const [state, setState] = useState<UploadState>(isRecovery ? 'processing' : 'uploading');
   const [trackers, setTrackers] = useState<FileTracker[]>(() => {
@@ -186,9 +188,10 @@ export const BatchProgress: React.FC<Props> = ({ files, engine = 'whisper', whis
         if (cancelledRef.current) return;
         const file = queue[index];
         setCurrentUploadName(file.name);
-        addLog(`Загрузка: ${file.name} (${formatSize(file.size)})`);
+        const passport = passports?.[`${file.name}_${file.size}`] ?? null;
+        addLog(`Загрузка: ${file.name} (${formatSize(file.size)})${passport ? ` + паспорт «${passport.name}»` : ''}`);
         try {
-          const projectId = await api.batchUploadFile(file, engine, whisperModel);
+          const projectId = await api.batchUploadFile(file, engine, whisperModel, passport);
           updated[index] = { ...updated[index], projectId };
           addLog(`✓ Загружен: ${file.name}`);
         } catch (e: any) {
