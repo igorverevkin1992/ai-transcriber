@@ -692,3 +692,63 @@ class TestGeminiVisibility:
         monkeypatch.setattr(pp, "_gemini_call", boom)
         ok, reason = pp.gemini_health_check()
         assert ok is False and "403" in reason
+
+
+class TestSmartModelFallback:
+    class _Resp:
+        text = "ок"
+
+    class _FakeModels:
+        def __init__(self, bad="bad-pro"):
+            self.bad = bad
+            self.calls = []
+
+        def generate_content(self, model, contents, config):
+            self.calls.append(model)
+            if model == self.bad:
+                raise Exception(
+                    "404 NOT_FOUND. models/bad-pro is not found for API version v1beta")
+            return TestSmartModelFallback._Resp()
+
+        def list(self):
+            class _M:
+                def __init__(self, name):
+                    self.name = name
+            return [_M("models/gemini-3.5-flash"), _M("models/gemini-2.5-pro")]
+
+    def _setup(self, monkeypatch):
+        client = type("C", (), {})()
+        client.models = self._FakeModels()
+        monkeypatch.setattr(pp, "_gemini_client", client)
+        monkeypatch.setattr(pp, "_gemini_ready", lambda: True)
+        monkeypatch.setattr(pp, "_broken_models", set())
+        return client
+
+    def test_404_falls_back_to_default_model(self, monkeypatch):
+        client = self._setup(monkeypatch)
+        result = pp._gemini_call("привет", model="bad-pro")
+        assert result == "ок"
+        assert client.models.calls == ["bad-pro", pp.GEMINI_MODEL]
+        assert "bad-pro" in pp._broken_models
+
+    def test_broken_model_skipped_on_next_call(self, monkeypatch):
+        client = self._setup(monkeypatch)
+        pp._broken_models.add("bad-pro")
+        result = pp._gemini_call("привет", model="bad-pro")
+        assert result == "ок"
+        assert client.models.calls == [pp.GEMINI_MODEL]  # 404 не повторяется
+
+    def test_404_on_default_model_still_raises(self, monkeypatch):
+        client = self._setup(monkeypatch)
+        client.models.bad = pp.GEMINI_MODEL
+        import pytest
+        with pytest.raises(GeminiPolishError):
+            pp._gemini_call("привет")  # база сама не существует — честный сбой
+        assert pp.GEMINI_MODEL not in pp._broken_models
+
+    def test_health_check_smart_404_still_ok(self, monkeypatch):
+        self._setup(monkeypatch)
+        monkeypatch.setattr(pp, "GEMINI_MODEL_SMART", "bad-pro")
+        ok, reason = pp.gemini_health_check()
+        assert ok is True and reason is None
+        assert "bad-pro" in pp._broken_models

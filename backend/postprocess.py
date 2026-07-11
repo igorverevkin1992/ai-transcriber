@@ -215,6 +215,9 @@ def _get_gemini_client():
 
 _gemini_client = None
 _gemini_lock = threading.Lock()
+# Модели, вернувшие 404 (не существуют для этого ключа/версии API): все
+# последующие вызовы с ними сразу идут на GEMINI_MODEL, без повторных 404.
+_broken_models: set[str] = set()
 
 
 GEMINI_MAX_RETRIES = 3
@@ -252,11 +255,29 @@ def _gemini_ready() -> bool:
     return _gemini_client is not None
 
 
+def _list_available_models(limit: int = 20) -> str:
+    """Имена доступных gemini-моделей (для подсказки при неверном ID в конфиге)."""
+    try:
+        names = []
+        for m in _gemini_client.models.list():
+            name = (getattr(m, "name", "") or "").removeprefix("models/")
+            if "gemini" in name:
+                names.append(name)
+            if len(names) >= limit:
+                break
+        return ", ".join(names) or "список пуст"
+    except Exception as e:
+        return f"не удалось получить список ({e})"
+
+
 def gemini_health_check() -> tuple[bool, str | None]:
     """Однократная проверка работоспособности Gemini (для старта сервера).
 
     Возвращает (ok, причина-если-нет). Реальный минимальный вызов API: ловит и
     ошибку создания клиента (ключ/прокси), и сетевые/авторизационные сбои.
+    Дополнительно проверяет GEMINI_MODEL_SMART (если отличается): её 404 не
+    делает ok=False (база работает, пассы откатятся сами), но громко логируется
+    вместе со списком доступных моделей.
     """
     if not _gemini_ready():
         return False, ("клиент не создан — проверьте GEMINI_API_KEY и настройки "
@@ -267,6 +288,19 @@ def gemini_health_check() -> tuple[bool, str | None]:
         return False, str(e)
     if result is None:
         return False, "клиент недоступен"
+
+    if GEMINI_MODEL_SMART != GEMINI_MODEL and GEMINI_MODEL_SMART not in _broken_models:
+        try:
+            _gemini_call("Ответь одним словом: да", model=GEMINI_MODEL_SMART)
+        except GeminiPolishError as e:
+            logger.error("GEMINI_MODEL_SMART='%s': ошибка проверки (%s)",
+                         GEMINI_MODEL_SMART, e)
+        if GEMINI_MODEL_SMART in _broken_models:
+            logger.error(
+                "GEMINI_MODEL_SMART='%s' не существует для этого ключа — умные "
+                "пассы будут работать на '%s'. Доступные модели: %s",
+                GEMINI_MODEL_SMART, GEMINI_MODEL, _list_available_models(),
+            )
     return True, None
 
 
@@ -275,7 +309,10 @@ def _gemini_call(prompt: str, model: str | None = None) -> str | None:
     классификации технических моментов.
 
     ``model`` — переопределение модели (умные пассы используют
-    ``GEMINI_MODEL_SMART``); по умолчанию ``GEMINI_MODEL``.
+    ``GEMINI_MODEL_SMART``); по умолчанию ``GEMINI_MODEL``. Несуществующая
+    override-модель (404 NOT_FOUND — неверный ID для этого ключа) НЕ роняет пасс:
+    вызов автоматически откатывается на ``GEMINI_MODEL``, модель запоминается в
+    ``_broken_models`` и дальше не пробуется.
     Возвращает очищенный текст ответа (может быть пустым), ``None`` — если модель
     недоступна (нет пакета/ключа). Окончательный сбой после ретраев →
     ``GeminiPolishError``.
@@ -283,11 +320,15 @@ def _gemini_call(prompt: str, model: str | None = None) -> str | None:
     if not _gemini_ready():
         return None
 
+    use_model = model or GEMINI_MODEL
+    if use_model in _broken_models:
+        use_model = GEMINI_MODEL
+
     for attempt in range(GEMINI_MAX_RETRIES):
         try:
             # temperature=0: корректор/классификатор должен быть детерминированным
             response = _gemini_client.models.generate_content(
-                model=model or GEMINI_MODEL,
+                model=use_model,
                 contents=prompt,
                 config={"temperature": 0.0},
             )
@@ -296,6 +337,18 @@ def _gemini_call(prompt: str, model: str | None = None) -> str | None:
             return result
         except Exception as e:
             err_str = str(e).lower()
+            is_404 = "not_found" in err_str or "is not found" in err_str or "404" in err_str
+            if is_404 and use_model != GEMINI_MODEL:
+                # Неверный ID умной модели: откат на базовую и запоминаем,
+                # чтобы не ловить 404 на каждом батче.
+                logger.warning(
+                    "Модель Gemini '%s' не найдена (404) — откат на '%s' для этого "
+                    "и последующих вызовов. Список доступных моделей печатается "
+                    "при старте сервера.", use_model, GEMINI_MODEL,
+                )
+                _broken_models.add(use_model)
+                use_model = GEMINI_MODEL
+                continue
             is_retryable = any(s in err_str for s in ("rate limit", "429", "503", "500", "timeout", "deadline"))
             if attempt < GEMINI_MAX_RETRIES - 1 and is_retryable:
                 delay = GEMINI_BACKOFF[attempt]
