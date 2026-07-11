@@ -25,6 +25,7 @@ temp_files/
 transcript_*.docx
 !backend/transcript_template.docx
 video_source.mp4
+completed_docx/
 
 # SQLite database
 *.db
