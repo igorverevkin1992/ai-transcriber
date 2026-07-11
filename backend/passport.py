@@ -25,7 +25,11 @@ from backend.config import logger
 # «количество героев» проверяется раньше «герои». Матч по равенству/startswith.
 _FIELD_LABELS = [
     ("count", ("количество героев", "число героев", "кол-во героев", "количество", "кол-во")),
-    ("host", ("ведущий", "автор", "корреспондент", "интервьюер")),
+    # Явное поле «Ведущий» — решающее. «Автор/корреспондент/интервьюер» — слабый
+    # сигнал наличия ведущего: учитывается ТОЛЬКО если поля «Ведущий» нет
+    # (иначе «Ведущий: нет» + «Автор: Имя» ошибочно давали has_host=True).
+    ("host", ("ведущий",)),
+    ("host_weak", ("автор", "корреспондент", "интервьюер")),
     ("crew", ("съёмочная группа", "съемочная группа", "группа", "оператор", "инженер",
               "продюсер", "ассистент", "режиссёр", "режиссер", "звукорежиссёр", "звукорежиссер")),
     ("heroes", ("имена героев", "герои", "герой", "гость", "гости", "участники", "спикеры")),
@@ -35,7 +39,11 @@ _FIELD_LABELS = [
 ]
 
 # Значение поля «Ведущий», означающее отсутствие закадрового ведущего.
-_HOST_NEGATIVE = {"нет", "no", "-", "—", "–", "не было", "без ведущего"}
+_HOST_NEGATIVE = {"нет", "no", "-", "—", "–", "не было", "без ведущего", "отсутствует"}
+
+
+def _is_host_negative(value: str) -> bool:
+    return value.strip(" \t.!—–-").lower() in _HOST_NEGATIVE
 
 # Разделители списка имён внутри одного значения.
 _NAME_SPLIT = (";", ",", "\n", "•", " - ")
@@ -81,6 +89,7 @@ class _Fields:
         self.crew: list[str] = []
         self.host_values: list[str] = []
         self.host_seen = False
+        self.host_weak_values: list[str] = []
         self.count_text: str | None = None
         self.desc_lines: list[str] = []
 
@@ -94,6 +103,9 @@ class _Fields:
             self.host_seen = True
             if value:
                 self.host_values.append(value)
+        elif field == "host_weak":
+            if value:
+                self.host_weak_values.append(value)
         elif field == "count":
             if self.count_text is None and value:
                 self.count_text = value
@@ -112,10 +124,13 @@ class _Fields:
         if num <= 0:
             num = len(self.heroes)
 
-        if self.host_seen and self.host_values and all(
-            v.lower() in _HOST_NEGATIVE for v in self.host_values
-        ):
-            has_host = False
+        if self.host_seen and self.host_values:
+            # Явное поле «Ведущий» решает («нет» → False), «Автор» его не перебивает.
+            has_host = not all(_is_host_negative(v) for v in self.host_values)
+        elif self.host_weak_values:
+            # Поля «Ведущий» нет — наличие заполненного «Автор/корреспондент»
+            # трактуем как наличие закадрового ведущего.
+            has_host = not all(_is_host_negative(v) for v in self.host_weak_values)
         else:
             has_host = True  # дефолт: интервью обычно с закадровым ведущим
 

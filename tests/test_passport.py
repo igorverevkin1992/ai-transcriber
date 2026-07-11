@@ -113,6 +113,28 @@ class TestRealTemplate:
         data = parse_passport(p)
         assert data["has_host"] is False
 
+    def test_explicit_host_no_beats_author(self, tmp_path):
+        # «Ведущий: нет» решает, даже если «Автор» заполнен именем.
+        p = tmp_path / "p.docx"
+        _make_para_passport(p, [
+            "Герой: Иванов, Петров",
+            "Ведущий: нет",
+            "Автор: Михаил Ломов",
+        ])
+        data = parse_passport(p)
+        assert data["has_host"] is False
+
+    def test_host_negative_with_trailing_dot(self, tmp_path):
+        p = tmp_path / "p.docx"
+        _make_para_passport(p, ["Герой: Иванов", "Ведущий за кадром: Нет."])
+        assert parse_passport(p)["has_host"] is False
+
+    def test_author_alone_implies_host(self, tmp_path):
+        # Поля «Ведущий» нет — заполненный «Автор» означает закадрового ведущего.
+        p = tmp_path / "p.docx"
+        _make_para_passport(p, ["Герой: Иванов", "Автор: Михаил Ломов"])
+        assert parse_passport(p)["has_host"] is True
+
     def test_host_default_true_when_absent(self, tmp_path):
         p = tmp_path / "p.docx"
         _make_para_passport(p, ["Герой: Иванов"])
