@@ -35,6 +35,7 @@ from backend.config import (
     SQLITE_DB_PATH,
     STRICT_DIARIZATION,
     TECH_BREAK_GAP_SECONDS,
+    TECH_MOMENT_VISION,
     TEMP_DIR,
     TRANSCRIPT_GLOSSARY,
     TURN_INLINE_TC_SECONDS,
@@ -1252,6 +1253,16 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     if meta["start_tc"] == "00:00:00:00":
         warnings.append("Стартовый таймкод не найден — отсчёт с 00:00:00:00. "
                         "Укажите TC в имени файла (например, …_04.41.18.00_…).")
+
+    # Видео-описания техмоментов: «(Технические моменты. Съемка …)». Мягкая
+    # деградация внутри annotate_tech_markers — задача не падает.
+    if TECH_MOMENT_VISION and video_path.exists():
+        from backend.tech_vision import annotate_tech_markers
+        raw_segments = annotate_tech_markers(
+            raw_segments, str(video_path), fps, start_frames,
+            heroes=meta.get("speakers") or [],
+            description=meta.get("description", "") or "",
+        )
 
     projects_db.set_result(
         project_id,

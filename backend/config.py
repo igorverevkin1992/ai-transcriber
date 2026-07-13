@@ -226,6 +226,18 @@ TECH_MOMENT_AGGRESSIVE = os.getenv("TECH_MOMENT_AGGRESSIVE", "false").lower() in
 # верные реплики; требует GEMINI_API_KEY). Логика в correct_speaker_boundaries.
 SPEAKER_BOUNDARY_CORRECTION = os.getenv("SPEAKER_BOUNDARY_CORRECTION", "false").lower() in ("1", "true", "yes")
 
+# --- Видео-описания техмоментов (Gemini Vision) ---
+# Обогащать маркеры «(Технические моменты)» описанием происходящего в кадре:
+# «(Технические моменты. Съемка нарезки помидоров двумя поварами)» — как в
+# человеческих эталонах. Извлекает 1-2 кадра на маркер (ffmpeg) и описывает их
+# мультимодальным Gemini. default: false (opt-in: время/стоимость; требует
+# GEMINI_API_KEY, ffmpeg и исходное видео). Логика в backend/tech_vision.py.
+TECH_MOMENT_VISION = os.getenv("TECH_MOMENT_VISION", "false").lower() in ("1", "true", "yes")
+# Максимум маркеров с описаниями на файл (остальные остаются «голыми»).
+TECH_VISION_MAX_MARKERS = int(os.getenv("TECH_VISION_MAX_MARKERS", "30") or "30")
+# Маркеры короче этого интервала (сек) не описываются — кадр малоинформативен.
+TECH_VISION_MIN_GAP_SECONDS = float(os.getenv("TECH_VISION_MIN_GAP_SECONDS", "3") or "3")
+
 # --- OCR выжженного в кадр таймкода ---
 # Когда стартовый ТК не задан ни в имени файла, ни в метаданных контейнера —
 # попытаться распознать выжженный в кадр SMPTE-таймкод (easyocr). default: true.
