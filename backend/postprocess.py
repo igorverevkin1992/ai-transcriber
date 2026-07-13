@@ -705,6 +705,13 @@ def gemini_extract_passport(text: str) -> dict | None:
 
 _BOUNDARY_MAX_CHARS = 40000
 
+# Разрез текста на предложения (для split_after в правке границ).
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+
+
+def _split_sentences(text: str) -> list[str]:
+    return [p for p in _SENTENCE_SPLIT_RE.split(text.strip()) if p]
+
 
 def _is_marker_text(text: str) -> bool:
     """Реплика-ремарка (техмомент / неразборчиво / целиком в скобках) — не речь."""
@@ -785,9 +792,16 @@ def correct_speaker_boundaries(
         "монолог по теме — гость; реплика, продолжающая предложение предыдущего "
         "говорящего, принадлежит ЕМУ. Исправляй ТОЛЬКО когда уверен; сомневаешься "
         "— не трогай.\n"
-        'Верни СТРОГО JSON-массив исправлений вида [{"id": НОМЕР, "speaker": '
-        '"<id_спикера>"}] (id_спикера — цифра в скобках, на которого надо заменить). '
-        "Если исправлять нечего — верни []. Никакого текста кроме JSON.\n\n"
+        "Два вида исправлений:\n"
+        '1) вся реплика не того спикера: {"id": НОМЕР, "speaker": "<id>"};\n'
+        "2) внутри реплики после какого-то предложения говорящий СМЕНИЛСЯ "
+        "(склейка двух голосов): {\"id\": НОМЕР, \"split_after\": K, "
+        '"tail_speaker": "<id>"} — после K-го предложения (счёт с 1) хвост '
+        "принадлежит tail_speaker. Пример: реплика гостя «…хранить буррату "
+        "тёплой. Кстати, вы говорили про моцареллу.» — последнее предложение "
+        "начинает НОВУЮ мысль другого голоса → split_after на границе.\n"
+        "Верни СТРОГО JSON-массив исправлений. Если исправлять нечего — верни []. "
+        "Никакого текста кроме JSON.\n\n"
         f"Стенограмма:\n{transcript}"
     )
 
@@ -817,19 +831,57 @@ def correct_speaker_boundaries(
 
     out = [dict(s) for s in segments]
     reassigned = 0
+    splits: dict[int, tuple[int, str]] = {}  # idx → (split_after, tail_speaker)
     for item in data:
         if not isinstance(item, dict):
             continue
         n = item.get("id")
-        new_sid = str(item.get("speaker"))
-        if not isinstance(n, int) or n not in n_to_idx or new_sid not in valid_ids:
+        if not isinstance(n, int) or n not in n_to_idx:
             continue
         idx = n_to_idx[n]
+        if "split_after" in item:
+            k = item.get("split_after")
+            tail_sid = str(item.get("tail_speaker"))
+            if (isinstance(k, int) and k >= 1 and tail_sid in valid_ids
+                    and tail_sid != str(out[idx].get("speaker"))):
+                splits[idx] = (k, tail_sid)
+            continue
+        new_sid = str(item.get("speaker"))
+        if new_sid not in valid_ids:
+            continue
         if str(out[idx].get("speaker")) != new_sid:
             out[idx]["speaker"] = new_sid
             reassigned += 1
-    logger.info("Gemini-правка границ: переназначено реплик: %d", reassigned)
-    if not reassigned:
+
+    split_count = 0
+    if splits:
+        rebuilt: list[dict] = []
+        for i, seg in enumerate(out):
+            if i in splits:
+                k, tail_sid = splits[i]
+                sentences = _split_sentences(seg.get("text", ""))
+                if 1 <= k < len(sentences):
+                    head = " ".join(sentences[:k]).strip()
+                    tail = " ".join(sentences[k:]).strip()
+                    if head and tail:
+                        seg_head = {**seg, "text": head}
+                        seg_tail = {**seg, "text": tail, "speaker": tail_sid}
+                        # События несут start_s/end_s — точку разреза
+                        # интерполируем по доле длины текста.
+                        if "start_s" in seg and "end_s" in seg:
+                            frac = len(head) / max(1, len(seg["text"]))
+                            cut = seg["start_s"] + (seg["end_s"] - seg["start_s"]) * frac
+                            seg_head["end_s"] = cut
+                            seg_tail["start_s"] = cut
+                        rebuilt.extend([seg_head, seg_tail])
+                        split_count += 1
+                        continue
+            rebuilt.append(seg)
+        out = rebuilt
+
+    logger.info("Gemini-правка границ: переназначено реплик: %d, разрезано склеек: %d",
+                reassigned, split_count)
+    if not reassigned and not split_count:
         return segments
     return _merge_adjacent_same_speaker(out) if merge_adjacent else out
 

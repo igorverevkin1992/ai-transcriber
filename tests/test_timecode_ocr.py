@@ -138,3 +138,31 @@ class TestPreprocessVariants:
         p = str(tmp_path / "nope.png")
         variants = _preprocess_variants(p)
         assert variants == [("v3", p)]
+
+
+class TestHourModeVoting:
+    def test_hour_corrected_by_majority(self):
+        # v1 (бинаризация) систематически читает «15» вместо «11» и выигрывает
+        # голосование стартов; v2/v3 читают «11» верно → мода часов ≥2/3 чинит час.
+        samples = [
+            (25, ["15:59:22:04", "11:59:22:04", "11:59:22:04"]),
+            (50, ["15:59:23:04", "11:59:23:04", "11:59:23:04"]),
+        ]
+        # Старты: 15:59:21 (2 голоса) и 11:59:21 (2 голоса) — берётся первый по
+        # сортировке... часовая мода 11 (4 из 6) исправляет итог на 11:59:21.
+        assert parse_start_timecode_from_ocr(samples, 25) == "11:59:21:00"
+
+    def test_no_correction_without_majority(self):
+        # Голоса часов 50/50 (легитимный переход часа) — правка не запускается.
+        samples = [
+            (25, ["11:59:59:04", "12:00:00:04"]),
+            (50, ["12:00:00:04", "11:59:59:04"]),
+        ]
+        result = parse_start_timecode_from_ocr(samples, 25)
+        assert result is not None  # какой-то согласованный старт есть
+
+    def test_all_variants_wrong_hour_stays(self):
+        # Все чтения дают «15» — мода совпадает с выигравшим часом, правки нет
+        # (systematic misread всех вариантов этим механизмом не лечится).
+        samples = [(25, ["15:59:22:04"]), (50, ["15:59:23:04"])]
+        assert parse_start_timecode_from_ocr(samples, 25) == "15:59:21:00"

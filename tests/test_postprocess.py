@@ -772,3 +772,67 @@ class TestBoundaryCorrectionMergeParam:
         assert len(out) == 3  # не склеено
         assert [s["speaker"] for s in out] == ["0", "0", "0"]
         assert out[1]["start_s"] == 3.0  # поля события сохранены
+
+
+class TestBoundarySplitInsideSegment:
+    LABELS = {"0": "АФ", "1": "МД"}
+
+    def test_split_after_sentence(self, monkeypatch):
+        segs = [
+            {"speaker": "1", "text": "Буррата должна быть тёплой. Кстати, вы говорили про моцареллу.",
+             "start_s": 10.0, "end_s": 20.0},
+            {"speaker": "0", "text": "Оказывается, никто не знает об этом.",
+             "start_s": 21.0, "end_s": 24.0},
+        ]
+        monkeypatch.setattr(
+            pp, "_gemini_call",
+            lambda prompt, **kw: '[{"id": 0, "split_after": 1, "tail_speaker": "0"}]',
+        )
+        out = correct_speaker_boundaries(
+            segs, speaker_labels=self.LABELS, interviewer_id=None, merge_adjacent=False,
+        )
+        assert len(out) == 3
+        assert out[0]["speaker"] == "1"
+        assert out[0]["text"] == "Буррата должна быть тёплой."
+        assert out[1]["speaker"] == "0"
+        assert out[1]["text"] == "Кстати, вы говорили про моцареллу."
+        # Тайминги монотонны: разрез интерполирован внутри исходного события.
+        assert out[0]["start_s"] == 10.0
+        assert out[0]["end_s"] == out[1]["start_s"]
+        assert 10.0 < out[1]["start_s"] < 20.0
+        assert out[1]["end_s"] == 20.0
+
+    def test_invalid_split_ignored(self, monkeypatch):
+        segs = [
+            {"speaker": "1", "text": "Одно предложение.", "start_s": 1.0, "end_s": 2.0},
+            {"speaker": "0", "text": "Другое.", "start_s": 3.0, "end_s": 4.0},
+        ]
+        # split_after=5 при одном предложении и tail_speaker вне valid_ids.
+        monkeypatch.setattr(
+            pp, "_gemini_call",
+            lambda prompt, **kw: '[{"id": 0, "split_after": 5, "tail_speaker": "0"}, '
+                                 '{"id": 1, "split_after": 1, "tail_speaker": "9"}]',
+        )
+        out = correct_speaker_boundaries(
+            segs, speaker_labels=self.LABELS, interviewer_id=None, merge_adjacent=False,
+        )
+        assert out == segs  # ничего не изменилось
+
+    def test_split_and_reassign_combined(self, monkeypatch):
+        segs = [
+            {"speaker": "1", "text": "Ответ. Новый вопрос?", "start_s": 0.0, "end_s": 4.0},
+            {"speaker": "1", "text": "Целиком чужая реплика.", "start_s": 5.0, "end_s": 7.0},
+            {"speaker": "0", "text": "Реплика второго голоса.", "start_s": 8.0, "end_s": 9.0},
+        ]
+        monkeypatch.setattr(
+            pp, "_gemini_call",
+            lambda prompt, **kw: '[{"id": 0, "split_after": 1, "tail_speaker": "0"}, '
+                                 '{"id": 1, "speaker": "0"}]',
+        )
+        out = correct_speaker_boundaries(
+            segs, speaker_labels=self.LABELS, interviewer_id=None, merge_adjacent=False,
+        )
+        assert [(s["speaker"], s["text"]) for s in out] == [
+            ("1", "Ответ."), ("0", "Новый вопрос?"), ("0", "Целиком чужая реплика."),
+            ("0", "Реплика второго голоса."),
+        ]

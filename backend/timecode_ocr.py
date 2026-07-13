@@ -20,6 +20,7 @@ import re
 import subprocess
 import threading
 import uuid
+from collections import Counter
 from pathlib import Path
 
 from backend.config import OCR_TIMECODE_REGION, TEMP_DIR, logger
@@ -92,6 +93,17 @@ def _candidates_from_text(text: str, fps: int) -> set[int]:
     return out
 
 
+def _hours_from_text(text: str, fps: int) -> set[int]:
+    """Часы всех валидных чтений ТК в строке (для пер-полевого голосования)."""
+    out: set[int] = set()
+    for m in _TC_IN_TEXT_RE.finditer(text):
+        h, mn, s, f = (int(g) for g in m.groups())
+        if f >= fps or not _validate_tc_parts(h, mn, s, f):
+            continue
+        out.add(h)
+    return out
+
+
 def parse_start_timecode_from_ocr(
     samples: list[tuple[int, list[str]]], fps: int
 ) -> str | None:
@@ -106,15 +118,19 @@ def parse_start_timecode_from_ocr(
         return None
 
     starts_per_frame: list[set[int]] = []
+    hour_votes: list[int] = []
     for frame_index, texts in samples:
         frame_offset_s = round(frame_index / fps)
         tc_seconds: set[int] = set()
+        frame_hours: set[int] = set()
         # И каждая строка, и склейка всех строк кадра (через пробел и без).
         joined = " ".join(texts)
         for candidate_text in (*texts, joined, joined.replace(" ", "")):
             tc_seconds |= _candidates_from_text(candidate_text, fps)
+            frame_hours |= _hours_from_text(candidate_text, fps)
         frame_starts = {sec - frame_offset_s for sec in tc_seconds if sec - frame_offset_s >= 0}
         starts_per_frame.append(frame_starts)
+        hour_votes.extend(frame_hours)  # ≤1 голос за час с кадра-варианта
 
     candidates = sorted({s for fs in starts_per_frame for s in fs})
     best, best_count = None, 0
@@ -132,6 +148,21 @@ def parse_start_timecode_from_ocr(
 
     if best is None or best_count < 2:
         return None
+
+    # Пер-полевое голосование ЧАСА: один вариант предобработки может
+    # систематически врать в одной цифре («11»→«15» во всех кадрах) и выиграть
+    # общее голосование. Час в 15-секундном окне почти константен, поэтому если
+    # явное большинство (≥2/3) всех чтений даёт ДРУГОЙ час — доверяем ему.
+    # (Легитимный переход часа внутри окна делит голоса ~пополам и правку
+    # не запускает.)
+    best_hour = best // 3600
+    if hour_votes:
+        mode_hour, mode_n = Counter(hour_votes).most_common(1)[0]
+        if (mode_hour != best_hour and 0 <= mode_hour <= 23
+                and mode_n * 3 >= len(hour_votes) * 2):
+            logger.info("[OCR ТК] час скорректирован по большинству чтений: %02d → %02d",
+                        best_hour, mode_hour)
+            best = mode_hour * 3600 + best % 3600
     return frames_to_tc(best * fps, fps)
 
 
