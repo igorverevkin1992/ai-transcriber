@@ -77,3 +77,64 @@ class TestParseRegion:
 
     def test_out_of_range_rejected(self):
         assert _parse_region("0.5,0.5,1.5,1.0") is None
+
+
+class TestFindTcBox:
+    def _strip_with_box(self, w=960, h=240):
+        cv2 = __import__("cv2")
+        np = __import__("numpy")
+        rng = np.random.default_rng(42)
+        # Пёстрый светлый фон (кухня) + чёрная лента ТК с белыми цифрами по центру.
+        img = rng.integers(120, 220, size=(h, w), dtype=np.uint8)
+        x0, y0, bw, bh = 280, 150, 400, 60  # aspect ≈ 6.7
+        img[y0:y0 + bh, x0:x0 + bw] = 10
+        cv2.putText(img, "11:59:22:04", (x0 + 15, y0 + 45),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.4, 255, 3)
+        return img, (x0, y0, bw, bh)
+
+    def test_box_found_and_covers_digits(self):
+        import pytest
+        pytest.importorskip("cv2")
+        from backend.timecode_ocr import _find_tc_box
+        img, (x0, y0, bw, bh) = self._strip_with_box()
+        box = _find_tc_box(img)
+        assert box is not None
+        x, y, w, h = box
+        # Найденный бокс покрывает ленту ТК (с учётом padding).
+        assert x <= x0 and x + w >= x0 + bw
+        assert y <= y0 and y + h >= y0 + bh
+
+    def test_no_box_returns_none(self):
+        import pytest
+        pytest.importorskip("cv2")
+        np = __import__("numpy")
+        from backend.timecode_ocr import _find_tc_box
+        rng = np.random.default_rng(1)
+        img = rng.integers(120, 220, size=(240, 960), dtype=np.uint8)
+        assert _find_tc_box(img) is None
+
+
+class TestPreprocessVariants:
+    def test_variants_with_box(self, tmp_path):
+        import pytest
+        cv2 = pytest.importorskip("cv2")
+        from backend.timecode_ocr import _preprocess_variants
+        img, _ = TestFindTcBox()._strip_with_box()
+        p = str(tmp_path / "strip.png")
+        cv2.imwrite(p, img)
+        variants = _preprocess_variants(p)
+        labels = [lbl for lbl, _ in variants]
+        assert labels == ["v1", "v2", "v3"]
+        np = __import__("numpy")
+        v1 = dict(variants)["v1"]
+        # v1 бинаризован: только два уровня яркости, цифры тёмные на белом.
+        assert set(np.unique(v1)).issubset({0, 255})
+        assert v1.mean() > 127
+
+    def test_missing_file_falls_back(self, tmp_path):
+        import pytest
+        pytest.importorskip("cv2")
+        from backend.timecode_ocr import _preprocess_variants
+        p = str(tmp_path / "nope.png")
+        variants = _preprocess_variants(p)
+        assert variants == [("v3", p)]

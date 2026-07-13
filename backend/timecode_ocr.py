@@ -179,17 +179,100 @@ def _extract_frames(
     return pairs
 
 
+def _find_tc_box(gray) -> tuple[int, int, int, int] | None:
+    """Найти чёрный прямоугольник-ленту ТК в кадре-полосе.
+
+    Бокс ТК — тёмная широкая лента с белыми цифрами. Ищем крупный тёмный контур
+    с «ленточной» геометрией: ширина ≥ 25% полосы, aspect ratio 3–12, высота
+    10–60% полосы. Возвращает (x, y, w, h) с padding или None (работаем по всей
+    полосе, как раньше).
+    """
+    import cv2
+
+    h_img, w_img = gray.shape[:2]
+    # Тёмная маска; закрытие по горизонтали склеивает ленту, разорванную цифрами.
+    _, dark = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(9, w_img // 40), 3))
+    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best = None
+    best_area = 0
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w < 0.25 * w_img or h <= 0:
+            continue
+        aspect = w / h
+        if not (3 <= aspect <= 12):
+            continue
+        if not (0.10 * h_img <= h <= 0.60 * h_img):
+            continue
+        if w * h > best_area:
+            best_area = w * h
+            best = (x, y, w, h)
+    if best is None:
+        return None
+    x, y, w, h = best
+    pad_x, pad_y = int(w * 0.05), int(h * 0.20)
+    x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
+    x1, y1 = min(w_img, x + w + pad_x), min(h_img, y + h + pad_y)
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def _preprocess_variants(path: str) -> list[tuple[str, object]]:
+    """Варианты изображения для OCR: (метка, ndarray или путь).
+
+    v1 — точный кроп бокса ТК ×4 + бинаризация (Otsu, цифры тёмные на белом):
+    самый читаемый вариант для размытых LCD-цифр; v2 — тот же кроп ×4 в сером;
+    v3 — исходная полоса (прежнее поведение, страховка). Без cv2 — только v3.
+    """
+    try:
+        import cv2
+    except ImportError:
+        logger.warning("[OCR ТК] opencv недоступен — предобработка пропущена")
+        return [("v3", path)]
+
+    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return [("v3", path)]
+
+    variants: list[tuple[str, object]] = []
+    box = _find_tc_box(img)
+    if box is not None:
+        x, y, w, h = box
+        crop = img[y:y + h, x:x + w]
+        crop4 = cv2.resize(crop, (w * 4, h * 4), interpolation=cv2.INTER_CUBIC)
+        # Белые цифры на чёрном → Otsu → инверсия: тёмные цифры на белом.
+        _, binar = cv2.threshold(crop4, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if binar.mean() < 127:
+            binar = cv2.bitwise_not(binar)
+        variants.append(("v1", binar))
+        variants.append(("v2", crop4))
+    variants.append(("v3", path))
+    return variants
+
+
 def _ocr_frames(reader, pairs: list[tuple[int, str]]) -> list[tuple[int, list[str]]]:
-    """OCR каждого извлечённого кадра; логирует сырой текст (для диагностики)."""
+    """OCR каждого извлечённого кадра во всех вариантах предобработки.
+
+    Тексты всех вариантов кадра сливаются в один список — голосование в
+    ``parse_start_timecode_from_ocr`` объединяет кандидатов кадра само.
+    Сырой текст логируется по вариантам (для диагностики мисридов).
+    """
     samples: list[tuple[int, list[str]]] = []
     for frame_index, path in pairs:
-        try:
-            texts = reader.readtext(path, detail=0, allowlist=_OCR_ALLOWLIST)
-        except Exception as e:
-            logger.warning("OCR кадра %d не удался: %s", frame_index, e)
-            continue
-        logger.info("[OCR ТК] кадр %d: %r", frame_index, texts)
-        samples.append((frame_index, texts))
+        texts: list[str] = []
+        for label, image in _preprocess_variants(path):
+            try:
+                got = reader.readtext(image, detail=0, allowlist=_OCR_ALLOWLIST,
+                                      mag_ratio=1.5)
+            except Exception as e:
+                logger.warning("OCR кадра %d (%s) не удался: %s", frame_index, label, e)
+                continue
+            logger.info("[OCR ТК] кадр %d (%s): %r", frame_index, label, got)
+            texts.extend(got)
+        if texts:
+            samples.append((frame_index, texts))
     return samples
 
 
