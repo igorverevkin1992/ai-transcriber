@@ -166,3 +166,56 @@ class TestHourModeVoting:
         # (systematic misread всех вариантов этим механизмом не лечится).
         samples = [(25, ["15:59:22:04"]), (50, ["15:59:23:04"])]
         assert parse_start_timecode_from_ocr(samples, 25) == "15:59:21:00"
+
+
+class TestColonMisreadRecovery:
+    def test_real_f13_log_recovers_true_hour(self):
+        # Реальные чтения f13: двоеточие после «11» прочитано как «5»
+        # («11:59» → «11559»), сырой разбор давал 15:59:20. Восстановление
+        # удалением одной цифры должно вернуть 11:59:20.
+        samples = [
+            (25, ["179 212"]),
+            (50, ["159 22  2"]),
+            (75, ["11559 28 22"]),
+            (100, ["11559 24 22"]),
+            (125, ["1150 25 22"]),
+            (150, ["119 20722"]),
+            (175, ["11559 27 22"]),
+            (200, ["11559 28 22"]),
+            (225, ["11759 29 22"]),
+            (250, ["1159  30 22"]),
+            (300, ["11559  32722"]),
+            (375, ["11559  35  22"]),
+        ]
+        assert parse_start_timecode_from_ocr(samples, 25) == "11:59:20:00"
+
+    def test_clean_readings_unaffected(self):
+        # Чистые чтения (без лишних цифр) работают как раньше.
+        samples = [(25, ["04:41:19:00"]), (50, ["04:41:20:00"])]
+        assert parse_start_timecode_from_ocr(samples, 25) == "04:41:18:00"
+
+
+class TestFindTcBoxRobustness:
+    def test_blurred_box_found(self):
+        import pytest
+        cv2 = pytest.importorskip("cv2")
+        from backend.timecode_ocr import _find_tc_box
+        img, (x0, y0, bw, bh) = TestFindTcBox()._strip_with_box()
+        img = cv2.GaussianBlur(img, (7, 7), 2.0)  # мыльный исходник
+        box = _find_tc_box(img)
+        assert box is not None
+        x, y, w, h = box
+        assert x <= x0 + 10 and x + w >= x0 + bw - 10
+        assert y <= y0 + 5 and y + h >= y0 + bh - 5
+
+    def test_dark_distractor_does_not_win(self):
+        # Тёмная тень слева (высокая, не «ленточная») не должна перебить бокс ТК.
+        import pytest
+        pytest.importorskip("cv2")
+        from backend.timecode_ocr import _find_tc_box
+        img, (x0, y0, bw, bh) = TestFindTcBox()._strip_with_box()
+        img[0:240, 0:100] = 20  # вертикальная тень: aspect << 2.5
+        box = _find_tc_box(img)
+        assert box is not None
+        x, y, w, h = box
+        assert x <= x0 and x + w >= x0 + bw  # найден именно бокс ТК

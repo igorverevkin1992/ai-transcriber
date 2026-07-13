@@ -104,6 +104,23 @@ def _hours_from_text(text: str, fps: int) -> set[int]:
     return out
 
 
+def _deletion_variants(text: str) -> list[str]:
+    """Варианты длинного цифрового блока с удалением одной цифры.
+
+    Блёклое двоеточие OCR часто читает как ЛИШНЮЮ цифру («11:59» → «11559»),
+    после чего разбор захватывает сдвинутое окно («15:59…»). Удаление одной
+    цифры восстанавливает истинное чтение; ложные варианты не согласуются
+    между кадрами и голосов не набирают. Часы из этих вариантов в пер-полевое
+    голосование не подмешиваются (они содержат оба прочтения).
+    """
+    digits_only = re.sub(r"\D", "", text)
+    out: list[str] = []
+    if 9 <= len(digits_only) <= 12:
+        for i in range(len(digits_only)):
+            out.append(digits_only[:i] + digits_only[i + 1:])
+    return out
+
+
 def parse_start_timecode_from_ocr(
     samples: list[tuple[int, list[str]]], fps: int
 ) -> str | None:
@@ -128,6 +145,10 @@ def parse_start_timecode_from_ocr(
         for candidate_text in (*texts, joined, joined.replace(" ", "")):
             tc_seconds |= _candidates_from_text(candidate_text, fps)
             frame_hours |= _hours_from_text(candidate_text, fps)
+        # Восстановление «двоеточие прочитано как цифра»: кандидаты из блока с
+        # удалением одной цифры (часы отсюда в моду не идут — см. докстринг).
+        for recovered in _deletion_variants(joined):
+            tc_seconds |= _candidates_from_text(recovered, fps)
         frame_starts = {sec - frame_offset_s for sec in tc_seconds if sec - frame_offset_s >= 0}
         starts_per_frame.append(frame_starts)
         hour_votes.extend(frame_hours)  # ≤1 голос за час с кадра-варианта
@@ -213,40 +234,76 @@ def _extract_frames(
 def _find_tc_box(gray) -> tuple[int, int, int, int] | None:
     """Найти чёрный прямоугольник-ленту ТК в кадре-полосе.
 
-    Бокс ТК — тёмная широкая лента с белыми цифрами. Ищем крупный тёмный контур
-    с «ленточной» геометрией: ширина ≥ 25% полосы, aspect ratio 3–12, высота
-    10–60% полосы. Возвращает (x, y, w, h) с padding или None (работаем по всей
-    полосе, как раньше).
+    Профильный метод (устойчивее контуров на мыльных ×3-растянутых полосах):
+    1) строки с заметной долей тёмных пикселей → горизонтальные полосы-кандидаты;
+    2) внутри полосы — непрерывный ряд преимущественно тёмных колонок нужной
+       ширины и «ленточных» пропорций.
+    Возвращает (x, y, w, h) с padding или None (работаем по всей полосе).
     """
     import cv2
 
     h_img, w_img = gray.shape[:2]
-    # Тёмная маска; закрытие по горизонтали склеивает ленту, разорванную цифрами.
-    _, dark = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(9, w_img // 40), 3))
-    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, kernel)
-
-    contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    best = None
-    best_area = 0
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        if w < 0.25 * w_img or h <= 0:
-            continue
-        aspect = w / h
-        if not (3 <= aspect <= 12):
-            continue
-        if not (0.10 * h_img <= h <= 0.60 * h_img):
-            continue
-        if w * h > best_area:
-            best_area = w * h
-            best = (x, y, w, h)
-    if best is None:
+    if h_img < 8 or w_img < 8:
         return None
-    x, y, w, h = best
-    pad_x, pad_y = int(w * 0.05), int(h * 0.20)
+
+    # Даунскейл для устойчивости профилей и скорости (полоса уже растянута ×3).
+    scale = 1.0
+    gray_s = gray
+    if w_img > 1200:
+        scale = 1200.0 / w_img
+        gray_s = cv2.resize(gray, (1200, max(1, int(h_img * scale))),
+                            interpolation=cv2.INTER_AREA)
+    hs, ws = gray_s.shape[:2]
+    dark = (gray_s < 70).astype("float32")
+
+    # 1) Горизонтальные полосы: строки, где тёмного заметно БОЛЬШЕ фонового
+    # уровня. Порог относительный (медиана + 0.08): вертикальная тень во весь
+    # кадр поднимает профиль всех строк равномерно, а лента ТК — всплеск над ним.
+    row_frac = dark.mean(axis=1)
+    row_threshold = max(0.10, float(sorted(row_frac)[hs // 2]) + 0.08)
+    bands: list[tuple[int, int]] = []
+    start = None
+    for i, is_dark_row in enumerate(list(row_frac > row_threshold) + [False]):
+        if is_dark_row and start is None:
+            start = i
+        elif not is_dark_row and start is not None:
+            bands.append((start, i))
+            start = None
+
+    # 2) Внутри полосы — самый «тяжёлый» непрерывный тёмный ряд колонок.
+    best_box = None
+    best_score = 0.0
+    for r0, r1 in bands:
+        band_h = r1 - r0
+        if not (0.08 * hs <= band_h <= 0.65 * hs):
+            continue
+        # Порог колонок низкий (0.12): колонки со штрихами белых цифр внутри
+        # бокса тёмные лишь на 20-30%, а фон вне бокса почти не даёт тёмного.
+        col_frac = dark[r0:r1].mean(axis=0)
+        c_start = None
+        for j, is_dark_col in enumerate(list(col_frac > 0.12) + [False]):
+            if is_dark_col and c_start is None:
+                c_start = j
+            elif not is_dark_col and c_start is not None:
+                col_w = j - c_start
+                aspect = col_w / band_h
+                if col_w >= 0.15 * ws and 2.5 <= aspect <= 14:
+                    score = col_w * band_h * float(dark[r0:r1, c_start:j].mean())
+                    if score > best_score:
+                        best_score = score
+                        best_box = (c_start, r0, col_w, band_h)
+                c_start = None
+
+    if best_box is None:
+        return None
+    x, y, w, h = best_box
+    inv = 1.0 / scale
+    x, y, w, h = int(x * inv), int(y * inv), int(w * inv), int(h * inv)
+    pad_x, pad_y = int(w * 0.05), int(h * 0.25)
     x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
     x1, y1 = min(w_img, x + w + pad_x), min(h_img, y + h + pad_y)
+    if x1 <= x0 or y1 <= y0:
+        return None
     return x0, y0, x1 - x0, y1 - y0
 
 
@@ -291,9 +348,13 @@ def _ocr_frames(reader, pairs: list[tuple[int, str]]) -> list[tuple[int, list[st
     Сырой текст логируется по вариантам (для диагностики мисридов).
     """
     samples: list[tuple[int, list[str]]] = []
+    box_frames = 0
     for frame_index, path in pairs:
         texts: list[str] = []
-        for label, image in _preprocess_variants(path):
+        variants = _preprocess_variants(path)
+        if any(lbl == "v1" for lbl, _ in variants):
+            box_frames += 1
+        for label, image in variants:
             try:
                 got = reader.readtext(image, detail=0, allowlist=_OCR_ALLOWLIST,
                                       mag_ratio=1.5)
@@ -304,6 +365,9 @@ def _ocr_frames(reader, pairs: list[tuple[int, str]]) -> list[tuple[int, list[st
             texts.extend(got)
         if texts:
             samples.append((frame_index, texts))
+    # Диагностика: если бокс не находится (0 из N) — v1/v2 не работают и OCR
+    # читает сырую полосу; это первое, что смотреть при мисридах.
+    logger.info("[OCR ТК] бокс ТК найден на %d из %d кадров", box_frames, len(pairs))
     return samples
 
 
