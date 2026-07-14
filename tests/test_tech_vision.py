@@ -159,3 +159,56 @@ class TestEnrichedMarkerItalics:
         _add_text_with_italics(p, "(Технические моменты. Съемка на кухне ресторана)")
         runs = [(r.text, bool(r.italic)) for r in p.runs if r.text.strip()]
         assert runs and all(it for _, it in runs)
+
+
+class TestPromptPolish:
+    def test_prompt_prefers_syomka_style(self, monkeypatch):
+        prompts = []
+
+        def fake_generate(contents):
+            prompts.append(contents[-1])
+            return "{}"
+
+        monkeypatch.setattr(tv, "_vision_generate", fake_generate)
+        monkeypatch.setattr(tv, "_image_part", lambda data, mime: data)
+        gemini_describe_frames([(0, [(b"x", "image/jpeg")])])
+        assert "Съемка нарезки помидоров" in prompts[0]
+        assert prompts[0].index("Съемка") < prompts[0].index("Исполнение")
+
+    def test_speech_context_in_batch(self, monkeypatch):
+        batches = []
+
+        def fake_generate(contents):
+            batches.append(contents)
+            return "{}"
+
+        monkeypatch.setattr(tv, "_vision_generate", fake_generate)
+        monkeypatch.setattr(tv, "_image_part", lambda data, mime: data)
+        gemini_describe_frames(
+            [(3, [(b"x", "image/jpeg")])],
+            speech_context={3: ("аллора рагацци", "продолжаем сервировку")},
+        )
+        joined = " ".join(s for s in batches[0] if isinstance(s, str))
+        assert "аллора рагацци" in joined and "продолжаем сервировку" in joined
+        assert "иностранном языке" in batches[0][-1]
+
+    def test_speech_context_built_from_segments(self):
+        segs = [
+            _seg("00:00:00:00", "Хвост предыдущей реплики героя."),
+            _seg("00:00:10:00", TM),
+            _seg("00:00:30:00", "Начало следующей реплики."),
+        ]
+        before, after = tv._speech_context(segs, 1)
+        assert before.endswith("героя.")
+        assert after.startswith("Начало")
+
+    def test_speech_context_skips_markers(self):
+        segs = [
+            _seg("00:00:00:00", "Реплика."),
+            _seg("00:00:10:00", TM),
+            _seg("00:00:20:00", TM),
+            _seg("00:00:40:00", "Дальше."),
+        ]
+        before, after = tv._speech_context(segs, 2)
+        assert before == "Реплика."
+        assert after == "Дальше."

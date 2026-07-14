@@ -144,13 +144,18 @@ def gemini_describe_frames(
     *,
     heroes: list[str] | None = None,
     description: str | None = None,
+    speech_context: dict[int, tuple[str, str]] | None = None,
 ) -> dict[int, str]:
     """Описать кадры маркеров через Gemini Vision.
 
     ``marker_images`` — [(id маркера, [(bytes, mime), …]), …]. Возвращает
     {id: описание}; сбой любого батча — просто пропуск его маркеров.
+    ``speech_context`` — {id: (текст до, текст после)}: обрывки реплик вокруг
+    паузы, чтобы модель могла отразить и аудио-контекст («герои говорят на
+    итальянском»), которого на кадрах не видно.
     """
     results: dict[int, str] = {}
+    speech_context = speech_context or {}
     heroes_line = ""
     if heroes:
         heroes_line = (f"Известные участники съёмки: {', '.join(heroes)}. "
@@ -162,15 +167,23 @@ def gemini_describe_frames(
         contents: list = []
         for marker_id, images in chunk:
             contents.append(f"Кадры технической паузы №{marker_id}:")
+            before, after = speech_context.get(marker_id, ("", ""))
+            if before or after:
+                contents.append(
+                    f"Речь вокруг паузы №{marker_id}: «…{before}» → «{after}…»"
+                )
             for data, mime in images:
                 contents.append(_image_part(data, mime))
         contents.append(
             "Это кадры технических пауз телевизионной съёмки.\n"
             f"{context_line}{heroes_line}"
             "Для КАЖДОГО номера паузы дай описание происходящего в кадре — "
-            "3–10 слов в стиле монтажного листа, начиная с отглагольного "
-            "существительного: «Съемка нарезки помидоров двумя поварами», "
-            "«Исполнение песни у микрофона», «Подготовка рабочей поверхности». "
+            "3–10 слов в стиле монтажного листа. Предпочитай форму «Съемка …»: "
+            "«Съемка нарезки помидоров двумя поварами», «Съемка подготовки "
+            "рабочей поверхности»; когда «Съемка» не подходит — отглагольное "
+            "существительное («Исполнение песни у микрофона»). Если из речи "
+            "вокруг паузы очевидно, что участники говорят на иностранном языке "
+            "— отрази это («Герои говорят между собой на итальянском»). "
             'Верни СТРОГО JSON-объект вида {"<номер>": "описание"}. '
             "Никакого текста кроме JSON."
         )
@@ -199,6 +212,22 @@ def gemini_describe_frames(
             if mid in valid_ids and isinstance(value, str):
                 results[mid] = value
     return results
+
+
+def _speech_context(segments: list[dict], marker_idx: int, span: int = 120) -> tuple[str, str]:
+    """Обрывки речи вокруг маркера: хвост предыдущей реплики и начало следующей."""
+    before = after = ""
+    for j in range(marker_idx - 1, -1, -1):
+        text = str(segments[j].get("text", ""))
+        if text and not text.startswith(_MARKER_PREFIX):
+            before = text[-span:]
+            break
+    for j in range(marker_idx + 1, len(segments)):
+        text = str(segments[j].get("text", ""))
+        if text and not text.startswith(_MARKER_PREFIX):
+            after = text[:span]
+            break
+    return before, after
 
 
 def annotate_tech_markers(
@@ -247,6 +276,7 @@ def annotate_tech_markers(
             return segments
         descriptions = gemini_describe_frames(
             sorted(images_by_marker.items()), heroes=heroes, description=description,
+            speech_context={idx: _speech_context(segments, idx) for idx in images_by_marker},
         )
         logger.info("[Vision ТМ] описано %d из %d маркеров (интервалов ≥%.0f c: %d)",
                     len(descriptions), total_markers, TECH_VISION_MIN_GAP_SECONDS,
