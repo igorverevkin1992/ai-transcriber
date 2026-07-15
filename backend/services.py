@@ -1,4 +1,5 @@
 import inspect
+import json
 import logging
 import os
 import re
@@ -6,6 +7,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import ffmpeg
@@ -722,6 +724,92 @@ def _resegment_by_word_speakers(
     return parts
 
 
+@contextmanager
+def _stage_timer(project_id: str, stage: str, audio_seconds: float | None = None):
+    """Логирует wall-clock длительность этапа (и кратность к длительности аудио).
+
+    Логирует и при исключении — чтобы упавший этап тоже оставлял след времени.
+    """
+    t0 = time.time()
+    try:
+        yield
+    finally:
+        minutes = (time.time() - t0) / 60
+        if audio_seconds:
+            logger.info("[%s] Этап «%s»: %.1f мин (%.1fx длительности аудио)",
+                        project_id[:8], stage, minutes, (time.time() - t0) / audio_seconds)
+        else:
+            logger.info("[%s] Этап «%s»: %.1f мин", project_id[:8], stage, minutes)
+
+
+def _set_stage(project_id: str, detail: str | None, percent: int | None):
+    """Подэтап для UI: текст поверх status_label + грубый прогресс.
+
+    Раньше весь путь Whisper→alignment→диаризация показывался одним статичным
+    «Распознавание речи» без прогресса — на CPU это часы без признаков жизни.
+    Оба поля memory-only (как progress_percent) — слишком часто для диска.
+    """
+    projects_db.update_field(project_id, "status_detail", detail)
+    projects_db.update_field(project_id, "progress_percent", percent)
+
+
+# --- Чекпоинт распознавания ---
+# Авторетрай (_maybe_retry) перезапускает задачу целиком, поэтому падение в
+# ПОСТОБРАБОТКЕ раньше означало повторный многочасовой прогон Whisper+диаризации
+# (до 4 прогонов на CPU). Чекпоинт сохраняет сырые сегменты после распознавания;
+# повтор находит его и перескакивает сразу к постобработке.
+
+def _recognition_checkpoint_path(project_id: str) -> Path:
+    return TEMP_DIR / f"recognition_{project_id}.json"
+
+
+def _save_recognition_checkpoint(project_id: str, engine: str, model_name: str,
+                                 original_filename: str, segments: list[dict]):
+    """Никогда не бросает: чекпоинт — оптимизация, не данные."""
+    try:
+        path = _recognition_checkpoint_path(project_id)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({
+            "engine": engine,
+            "model": model_name,
+            "filename": original_filename,
+            "segments": segments,
+        }, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+        logger.info("[%s] Чекпоинт распознавания сохранён (%d сегментов)",
+                    project_id[:8], len(segments))
+    except Exception as e:
+        logger.warning("[%s] Не удалось сохранить чекпоинт распознавания: %s",
+                       project_id[:8], e)
+
+
+def _load_recognition_checkpoint(project_id: str, engine: str, model_name: str,
+                                 original_filename: str) -> list[dict] | None:
+    path = _recognition_checkpoint_path(project_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("[%s] Чекпоинт распознавания повреждён (%s) — игнорируем",
+                       project_id[:8], e)
+        return None
+    if (data.get("engine"), data.get("model"), data.get("filename")) != \
+            (engine, model_name, original_filename):
+        return None
+    segments = data.get("segments")
+    if not isinstance(segments, list) or not segments:
+        return None
+    return segments
+
+
+def _drop_recognition_checkpoint(project_id: str):
+    try:
+        _recognition_checkpoint_path(project_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _transcribe_with_whisperx(
     project_id: str,
     file_path,
@@ -752,38 +840,54 @@ def _transcribe_with_whisperx(
     # сразу на CPU. Иначе пробуем GPU и при CUDA-сбое откатываемся на CPU
     # (alignment и диаризация на torch остаются на GPU).
     transcribe_device = "cpu" if _whisperx_ct2_cuda_broken else device
+    _set_stage(project_id, "Распознавание речи (Whisper)…", 5)
+    lock_wait_t0 = time.time()
     with _whisper_lock:
+        lock_waited = time.time() - lock_wait_t0
+        if lock_waited > 5:
+            logger.info("[%s] Ожидание очереди Whisper: %.1f мин "
+                        "(модель занята параллельной задачей)",
+                        project_id[:8], lock_waited / 60)
         audio = whisperx.load_audio(str(file_path))
+        # 16 кГц — фиксированная частота whisperx.load_audio. Аномальная цифра
+        # здесь сразу выдаёт файл, декодированный не в свою длительность.
+        audio_seconds = len(audio) / 16000.0
+        logger.info("[%s] Длительность аудио: %.1f мин", project_id[:8], audio_seconds / 60)
         model = _load_whisperx_model(project_id, model_name, transcribe_device, initial_prompt)
-        try:
-            result = model.transcribe(
-                audio, batch_size=16 if transcribe_device == "cuda" else 4, language="ru",
-            )
-        except RuntimeError as e:
-            if transcribe_device == "cuda" and _is_cuda_error(e):
-                logger.warning(
-                    "[%s] CTranslate2 не смог использовать CUDA (%s) — "
-                    "транскрипция переключена на CPU (диаризация останется на GPU)",
-                    project_id[:8], e,
+        with _stage_timer(project_id, "транскрипция Whisper", audio_seconds):
+            try:
+                result = model.transcribe(
+                    audio, batch_size=16 if transcribe_device == "cuda" else 4, language="ru",
                 )
-                _whisperx_ct2_cuda_broken = True
-                model = _load_whisperx_model(project_id, model_name, "cpu", initial_prompt)
-                result = model.transcribe(audio, batch_size=4, language="ru")
-            else:
-                raise
+            except RuntimeError as e:
+                if transcribe_device == "cuda" and _is_cuda_error(e):
+                    logger.warning(
+                        "[%s] CTranslate2 не смог использовать CUDA (%s) — "
+                        "транскрипция переключена на CPU (диаризация останется на GPU)",
+                        project_id[:8], e,
+                    )
+                    _whisperx_ct2_cuda_broken = True
+                    model = _load_whisperx_model(project_id, model_name, "cpu", initial_prompt)
+                    result = model.transcribe(audio, batch_size=4, language="ru")
+                else:
+                    raise
     logger.info("[%s] WhisperX: транскрипция завершена, %d сегментов", project_id[:8], len(result["segments"]))
 
+    _set_stage(project_id, "Выравнивание таймкодов…", 55)
     with _whisper_lock:
         if _whisperx_align_model is None:
             logger.info("[%s] Загрузка alignment-модели...", project_id[:8])
             _whisperx_align_model, _whisperx_align_meta = whisperx.load_align_model(
                 language_code="ru", device=device,
             )
-    result = whisperx.align(
-        result["segments"], _whisperx_align_model, _whisperx_align_meta,
-        audio, device, return_char_alignments=False,
-    )
+    with _stage_timer(project_id, "выравнивание", audio_seconds):
+        result = whisperx.align(
+            result["segments"], _whisperx_align_model, _whisperx_align_meta,
+            audio, device, return_char_alignments=False,
+        )
     logger.info("[%s] WhisperX: alignment завершён", project_id[:8])
+
+    _set_stage(project_id, "Определение говорящих (диаризация)…", 65)
 
     with _whisper_lock:
         if _whisperx_diarize_pipeline is None:
@@ -847,14 +951,15 @@ def _transcribe_with_whisperx(
             diarize_kwargs["max_speakers"] = names_n + 1
             logger.info("[%s] Диаризация: хинт %d-%d спикеров из имени файла",
                         project_id[:8], names_n, names_n + 1)
-        try:
-            diarize_segments = _whisperx_diarize_pipeline(audio, **diarize_kwargs)
-            result = _get_assign_word_speakers()(diarize_segments, result)
-            logger.info("[%s] WhisperX: диаризация завершена", project_id[:8])
-        except Exception as e:
-            if STRICT_DIARIZATION:
-                raise RuntimeError(f"Ошибка диаризации: {e}") from e
-            logger.warning("[%s] Диаризация завершилась ошибкой (%s) — все сегменты = speaker 0", project_id[:8], e)
+        with _stage_timer(project_id, "диаризация", audio_seconds):
+            try:
+                diarize_segments = _whisperx_diarize_pipeline(audio, **diarize_kwargs)
+                result = _get_assign_word_speakers()(diarize_segments, result)
+                logger.info("[%s] WhisperX: диаризация завершена", project_id[:8])
+            except Exception as e:
+                if STRICT_DIARIZATION:
+                    raise RuntimeError(f"Ошибка диаризации: {e}") from e
+                logger.warning("[%s] Диаризация завершилась ошибкой (%s) — все сегменты = speaker 0", project_id[:8], e)
 
     segments = []
     last_speaker = "0"
@@ -1395,12 +1500,22 @@ def process_uploaded_file_task(
     try:
         _cleanup_old_projects()
         projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
+        projects_db.update_field(project_id, "status_detail", None)
         passport_data = _load_passport(passport_path, project_id)
 
         if local_video_path.exists():
             _check_disk_space(local_video_path.stat().st_size * 2)
 
-        if engine == "whisper":
+        # Чекпоинт от предыдущей (упавшей в постобработке) попытки: распознавание
+        # уже сделано — не гонять Whisper/диаризацию заново на авторетрае.
+        model_key = whisper_model if engine == "whisper" else "speechkit"
+        segments = _load_recognition_checkpoint(project_id, engine, model_key, original_filename)
+        if segments is not None:
+            projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
+            logger.info("[%s] Чекпоинт распознавания найден (%d сегментов) — "
+                        "транскрипция пропущена, повторяется только постобработка",
+                        project_id[:8], len(segments))
+        elif engine == "whisper":
             projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
             projects_db.update_field(project_id, "progress_percent", None)
             initial_prompt = _build_whisper_prompt(original_filename)
@@ -1418,6 +1533,7 @@ def process_uploaded_file_task(
                     project_id, local_video_path, whisper_model,
                     initial_prompt=initial_prompt,
                 )
+            _save_recognition_checkpoint(project_id, engine, model_key, original_filename, segments)
         else:
             projects_db.update_status(project_id, ProjectStatusEnum.CONVERTING)
             projects_db.update_field(project_id, "progress_percent", None)
@@ -1426,18 +1542,22 @@ def process_uploaded_file_task(
             projects_db.update_status(project_id, ProjectStatusEnum.TRANSCRIBING)
             logger.info("[%s] SpeechKit v3 с диаризацией...", project_id[:8])
             segments = _transcribe_with_speechkit(project_id, local_audio_path)
+            _save_recognition_checkpoint(project_id, engine, model_key, original_filename, segments)
 
         from backend.postprocess import postprocess_segments
         logger.info("[%s] Постобработка текста...", project_id[:8])
+        _set_stage(project_id, "Постобработка текста…", 85)
         pp_warnings: list[str] = []
         crew_names = (passport_data or {}).get("crew") or None
-        segments = postprocess_segments(
-            segments, warnings=pp_warnings, crew_names=crew_names,
-            description=(passport_data or {}).get("description") or None,
-        )
+        with _stage_timer(project_id, "постобработка"):
+            segments = postprocess_segments(
+                segments, warnings=pp_warnings, crew_names=crew_names,
+                description=(passport_data or {}).get("description") or None,
+            )
 
-        _process_recognition_result(project_id, segments, original_filename, local_video_path,
-                                    extra_warnings=pp_warnings, passport=passport_data)
+            _process_recognition_result(project_id, segments, original_filename, local_video_path,
+                                        extra_warnings=pp_warnings, passport=passport_data)
+        _set_stage(project_id, None, None)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
         transcribe_duration.labels(engine=engine).observe(time.time() - task_start)
         logger.info("[%s] Файл обработан: %s", project_id[:8], original_filename)
@@ -1458,6 +1578,7 @@ def process_uploaded_file_task(
     except Exception as e:
         project_errors.labels(stage="upload_task").inc()
         logger.exception("[%s] Ошибка обработки: %s", project_id[:8], e)
+        _set_stage(project_id, None, None)
         projects_db.update_status(project_id, ProjectStatusEnum.ERROR,
                                   error=str(e))
 
@@ -1490,6 +1611,8 @@ def process_uploaded_file_task(
                     Path(passport_path).unlink()
             except OSError:
                 pass
+            # Чекпоинт нужен только повтору: успех и финальный провал — удаляем.
+            _drop_recognition_checkpoint(project_id)
 
 
 # ==================== Task registry & retry ====================
@@ -1526,6 +1649,9 @@ def _maybe_retry(project_id: str):
     projects_db.update_field(project_id, "retry_count", retry_count, persist=True)
     projects_db.update_status(project_id, ProjectStatusEnum.QUEUED)
     projects_db.update_field(project_id, "error", None)
+    # Раньше цикл ретраев был виден только в логе — в UI задача молча
+    # «обрабатывалась» часами. Теперь повтор показывается прямо в статусе.
+    _set_stage(project_id, f"Повтор {retry_count}/{MAX_RETRIES} после ошибки…", None)
 
     func = _TASK_REGISTRY[task_func_name]
     task_kwargs = proj.get("task_kwargs", {})
@@ -1614,6 +1740,7 @@ def cancel_project(project_id: str) -> bool:
 
     # Best-effort cleanup of any temp/output files
     for prefix in (f"{project_id}_video", f"{project_id}.opus", f"{project_id}_passport",
+                   f"recognition_{project_id}",
                    f"transcript_{project_id}.docx", f"batch_export_{project_id}.docx",
                    f"batch_verified_{project_id}.docx", f"autosave_{project_id}.docx"):
         for p in TEMP_DIR.glob(f"{prefix}*"):

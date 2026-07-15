@@ -836,3 +836,31 @@ class TestBoundarySplitInsideSegment:
             ("1", "Ответ."), ("0", "Новый вопрос?"), ("0", "Целиком чужая реплика."),
             ("0", "Реплика второго голоса."),
         ]
+
+
+class TestGeminiClientTimeout:
+    def test_client_created_with_timeout(self, monkeypatch):
+        """Зависший сокет держал вызов неограниченно — клиент обязан иметь таймаут."""
+        import sys
+        import types as pytypes
+
+        import backend.postprocess as pp
+
+        captured = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        fake_genai = pytypes.ModuleType("google.genai")
+        fake_genai.Client = FakeClient
+        fake_google = pytypes.ModuleType("google")
+        fake_google.genai = fake_genai
+        monkeypatch.setitem(sys.modules, "google", fake_google)
+        monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+        monkeypatch.setattr(pp, "GEMINI_API_KEY", "test-key")
+
+        client = pp._get_gemini_client()
+        assert isinstance(client, FakeClient)
+        assert captured["api_key"] == "test-key"
+        assert captured["http_options"] == {"timeout": pp.GEMINI_TIMEOUT_SECONDS * 1000}

@@ -128,3 +128,39 @@ class TestExport:
             json={"mappings": [], "filename": "test.docx"},
         )
         assert resp.status_code == 404
+
+
+class TestStatusDetailLabel:
+    def test_status_detail_overrides_label(self, client):
+        """Подэтап (Whisper/диаризация/«Повтор N/M») виден в status_label без правок фронта."""
+        from backend.models import ProjectStatusEnum
+        from backend.routes import projects_db
+
+        pid = "test-status-detail-pid"
+        projects_db.create(pid, {
+            "id": pid, "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0,
+            "status_detail": "Определение говорящих (диаризация)…",
+            "progress_percent": 65,
+        })
+        try:
+            resp = client.get(f"/api/v1/projects/{pid}/status")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status_label"] == "Определение говорящих (диаризация)…"
+            assert data["progress_percent"] == 65
+        finally:
+            projects_db.pop(pid)
+
+    def test_plain_label_without_detail(self, client):
+        from backend.models import ProjectStatusEnum
+        from backend.routes import projects_db
+
+        pid = "test-no-detail-pid"
+        projects_db.create(pid, {
+            "id": pid, "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0,
+        })
+        try:
+            resp = client.get(f"/api/v1/projects/{pid}/status")
+            assert resp.json()["status_label"] != "transcribing"  # человекочитаемый лейбл
+        finally:
+            projects_db.pop(pid)

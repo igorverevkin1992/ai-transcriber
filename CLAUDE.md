@@ -43,8 +43,9 @@ docker compose --profile dev up   # dev: separate Vite dev server
 ## Key env vars
 - `YANDEX_API_KEY` — SpeechKit (optional, only for cloud engine)
 - `API_KEY` / `VITE_API_KEY` — API auth (optional, disabled if unset)
-- `MAX_CONCURRENT_TASKS` — parallel transcriptions (default: 2)
-- `MAX_RETRIES` — retry failed tasks (default: 3)
+- `MAX_CONCURRENT_TASKS` — parallel transcriptions (default: 2; set **1 on CPU-only machines** — two concurrent Whisper runs starve each other)
+- `MAX_RETRIES` — retry failed tasks (default: 3). A retry reuses the **recognition checkpoint** (`recognition_{id}.json` in TEMP_DIR, saved after ASR+diarization): a task that failed in postprocessing repeats only the postprocessing, not the hours-long Whisper/pyannote run. Checkpoint is dropped on success/final failure/cancel
+- `GEMINI_TIMEOUT_SECONDS` — per-request HTTP timeout for all Gemini calls incl. vision (default: 120); without it a hung socket stalled postprocessing indefinitely
 - `SQLITE_DB_PATH` — database location (default: projects.db)
 - `MIN_RAM_MB` — low-RAM warning threshold (default: 500)
 - `TURN_MERGE_ENABLED` — merge same-speaker segments into turn paragraphs (default: true)
@@ -88,8 +89,9 @@ npx tsc --noEmit --skipLibCheck       # TS type check
 ```
 
 ## Architecture notes
-- `ProjectStore` keeps all data in a dict for fast reads; SQLite persists on status changes and results. `progress_percent` is memory-only (too frequent for disk).
-- `ThreadPoolExecutor(max_workers=N)` queues tasks; `submit_task()` auto-retries on failure.
+- `ProjectStore` keeps all data in a dict for fast reads; SQLite persists on status changes and results. `progress_percent` and `status_detail` are memory-only (too frequent for disk). `status_detail` (sub-stage: Whisper / alignment / diarization / postprocess / «Повтор N/M…») overrides `status_label` in the status endpoints, so the UI shows where a long task actually is without frontend changes.
+- **CPU speed expectations**: Whisper `large` on CPU ≈ 2–5× audio duration for transcription alone, plus pyannote diarization; `medium` is ~3× faster (good for drafts). Every stage logs its wall-clock time and the decoded audio duration (`Этап «…»: N мин (K× длительности аудио)`), so a slow run is diagnosable from the log.
+- `ThreadPoolExecutor(max_workers=N)` queues tasks; `submit_task()` auto-retries on failure (whole task, but recognition is checkpointed — see `MAX_RETRIES` above).
 - On server restart, `_recover_inflight_projects()` resubmits QUEUED/in-flight tasks from SQLite.
 - Frontend saves batch projectIds to localStorage; on reload shows "Resume / Discard" banner.
 - **Shoot passport** (`backend/passport.py`): an optional `.docx` "паспорт съёмки" uploaded alongside the video (`passport` field in `/batch/upload`). Fields: **Герои** (guest names, one per line), **Количество героев**, **Ведущий за кадром** (yes/no — `has_host`), **Съёмочная группа** (crew names: Оператор/Инженер/Продюсер/Ассистент → folded into tech moments), **Что снято** (description). It is **authoritative over the filename**: hero names → guest legend, count+host → pyannote hint `min=heroes+host .. min+1` (guests + off-camera interviewer + a crew slack slot folded into tech moments), crew names → `detect_technical_segments` (their off-camera lines become `(Технические моменты)`), description → context for `SPEAKER_BOUNDARY_CORRECTION`. Parsed deterministically (`parse_passport`): labels matched case-insensitively by substring, value inline after `:` or on following lines under the label; also reads 2-col tables. Gemini fallback (`gemini_extract_passport`) when labels aren't recognized. **No glossary/terms and no start timecode in the passport** — terms stay on `GLOSSARY_REPLACEMENTS`/`TRANSCRIPT_GLOSSARY`, timecode is read from the `.wmv` container (`detect_start_timecode`). The interviewer/author isn't a hero, so they stay `АЗК`. Wired through `process_uploaded_file_task` → `_transcribe_with_whisperx` (count hint), `postprocess_segments`/`detect_technical_segments` (crew), `_process_recognition_result` (meta merge + boundary correction).

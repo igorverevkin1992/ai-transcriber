@@ -594,6 +594,141 @@ class TestEventLevelBoundaryCorrection:
         assert any(sp == "0" and "Вы готовы?" in t and "Да, готов." in t for sp, t in texts)
 
 
+class TestRecognitionCheckpoint:
+    SEGS = [
+        {"channel_tag": "0", "text": "Привет.",
+         "words": [{"text": "Привет.", "start_ms": 0, "end_ms": 1000}]},
+        {"channel_tag": "1", "text": "Здравствуйте.",
+         "words": [{"text": "Здравствуйте.", "start_ms": 1500, "end_ms": 2500}]},
+    ]
+
+    def test_roundtrip(self, fresh_store):
+        services._save_recognition_checkpoint("cp1", "whisper", "large", "f.wmv", self.SEGS)
+        assert services._load_recognition_checkpoint("cp1", "whisper", "large", "f.wmv") == self.SEGS
+
+    def test_mismatch_ignored(self, fresh_store):
+        services._save_recognition_checkpoint("cp2", "whisper", "large", "f.wmv", self.SEGS)
+        # Другая модель или другой файл — чекпоинт не подходит.
+        assert services._load_recognition_checkpoint("cp2", "whisper", "medium", "f.wmv") is None
+        assert services._load_recognition_checkpoint("cp2", "whisper", "large", "other.wmv") is None
+
+    def test_corrupted_ignored(self, fresh_store):
+        services._recognition_checkpoint_path("cp3").write_text("{оборвано", encoding="utf-8")
+        assert services._load_recognition_checkpoint("cp3", "whisper", "large", "f.wmv") is None
+
+    def test_retry_skips_transcription(self, fresh_store, monkeypatch):
+        """Падение в постобработке → повтор берёт чекпоинт и НЕ гоняет Whisper заново."""
+        import time as _time
+        store, temp_dir, _ = fresh_store
+        # created_at свежий: между двумя запусками проект в статусе ERROR не
+        # должен попасть под TTL-очистку в начале второго запуска.
+        store.create("cp4", {"id": "cp4", "status": ProjectStatusEnum.QUEUED,
+                             "created_at": _time.time()})
+        video = temp_dir / "cp4_video.wmv"
+        video.write_bytes(b"x")
+
+        transcribe_calls = []
+
+        def fake_transcribe(pid, path, model, **kw):
+            transcribe_calls.append(model)
+            return list(self.SEGS)
+
+        monkeypatch.setattr(services, "WHISPERX_AVAILABLE", True)
+        monkeypatch.setattr(services, "_transcribe_with_whisperx", fake_transcribe)
+        monkeypatch.setattr(services, "OCR_TIMECODE", False)
+
+        import backend.postprocess as pp
+        state = {"fail": True}
+
+        def fake_postprocess(segments, warnings=None, crew_names=None, description=None):
+            if state["fail"]:
+                raise RuntimeError("Gemini упал")
+            return segments
+
+        monkeypatch.setattr(pp, "postprocess_segments", fake_postprocess)
+
+        services.process_uploaded_file_task("cp4", video, "f.wmv",
+                                            engine="whisper", whisper_model="large")
+        assert store["cp4"]["status"] == ProjectStatusEnum.ERROR
+        # Чекпоинт и исходник сохранены для повтора.
+        assert services._recognition_checkpoint_path("cp4").exists()
+        assert video.exists()
+
+        state["fail"] = False
+        services.process_uploaded_file_task("cp4", video, "f.wmv",
+                                            engine="whisper", whisper_model="large")
+        assert store["cp4"]["status"] == ProjectStatusEnum.COMPLETED
+        assert transcribe_calls == ["large"]  # Whisper вызван ровно один раз
+        assert not services._recognition_checkpoint_path("cp4").exists()
+
+    def test_final_failure_drops_checkpoint(self, fresh_store, monkeypatch):
+        """Исчерпаны ретраи → чекпоинт не должен переживать задачу."""
+        store, temp_dir, _ = fresh_store
+        store.create("cp5", {"id": "cp5", "status": ProjectStatusEnum.QUEUED,
+                             "created_at": 1.0, "retry_count": services.MAX_RETRIES})
+        video = temp_dir / "cp5_video.wmv"
+        video.write_bytes(b"x")
+        services._save_recognition_checkpoint("cp5", "whisper", "large", "f.wmv",
+                                              self.SEGS)
+
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "postprocess_segments",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("упал")))
+
+        services.process_uploaded_file_task("cp5", video, "f.wmv",
+                                            engine="whisper", whisper_model="large")
+        assert store["cp5"]["status"] == ProjectStatusEnum.ERROR
+        assert not services._recognition_checkpoint_path("cp5").exists()
+        assert not video.exists()
+
+
+class TestStageTimerAndDetail:
+    def test_timer_logs_minutes_and_ratio(self, caplog):
+        import logging
+        with caplog.at_level(logging.INFO):
+            with services._stage_timer("proj4242", "тестовый", audio_seconds=60):
+                pass
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("Этап «тестовый»" in m and "длительности аудио" in m for m in msgs)
+
+    def test_timer_logs_on_exception(self, caplog):
+        import logging
+        with caplog.at_level(logging.INFO):
+            with pytest.raises(ValueError):
+                with services._stage_timer("proj4242", "упавший"):
+                    raise ValueError("boom")
+        assert any("Этап «упавший»" in r.getMessage() for r in caplog.records)
+
+    def test_set_stage_updates_fields(self, fresh_store):
+        store, _, _ = fresh_store
+        store.create("sd1", {"id": "sd1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        services._set_stage("sd1", "Определение говорящих (диаризация)…", 65)
+        assert store["sd1"]["status_detail"] == "Определение говорящих (диаризация)…"
+        assert store["sd1"]["progress_percent"] == 65
+
+    def test_set_stage_missing_project_noop(self, fresh_store):
+        services._set_stage("ghost", "Этап…", 10)  # не должно бросать
+
+    def test_retry_sets_visible_detail(self, fresh_store, monkeypatch):
+        store, _, _ = fresh_store
+
+        class FakeTimer:
+            def __init__(self, delay, func, args=(), kwargs=None):
+                pass
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(services.threading, "Timer", FakeTimer)
+        store.create("sd2", {
+            "id": "sd2", "status": ProjectStatusEnum.ERROR, "created_at": 1.0,
+            "retry_count": 0, "task_func": "process_video_task",
+            "task_args": ("sd2", "http://disk"),
+        })
+        services._maybe_retry("sd2")
+        assert "Повтор 1/" in store["sd2"]["status_detail"]
+
+
 class TestDocTitleFlag:
     def _project(self, store):
         store.create("t1", {

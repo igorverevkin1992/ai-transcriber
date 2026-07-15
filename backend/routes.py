@@ -94,7 +94,9 @@ async def get_status(pid: str):
     status = proj["status"]
     return ProjectStatusResponse(
         status=status.value,
-        status_label=STATUS_LABELS_RU.get(status, status.value),
+        # status_detail — подэтап из services (Whisper/диаризация/постобработка,
+        # «Повтор N/M…»); уточняет общий лейбл статуса, когда задан.
+        status_label=proj.get("status_detail") or STATUS_LABELS_RU.get(status, status.value),
         error=proj.get("error"),
         progress_percent=proj.get("progress_percent"),
     )
@@ -307,7 +309,7 @@ async def batch_status(ids: str = Query(..., description="ID проектов ч
             continue
 
         status = proj["status"]
-        label = STATUS_LABELS_RU.get(status, status.value)
+        label = proj.get("status_detail") or STATUS_LABELS_RU.get(status, status.value)
 
         if status == ProjectStatusEnum.COMPLETED:
             completed += 1

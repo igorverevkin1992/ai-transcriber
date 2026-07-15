@@ -7,6 +7,7 @@ from backend.config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     GEMINI_MODEL_SMART,
+    GEMINI_TIMEOUT_SECONDS,
     GLOSSARY_REPLACEMENTS,
     TECH_MOMENT_AGGRESSIVE,
     TECH_MOMENT_DETECTION,
@@ -199,7 +200,12 @@ def _get_gemini_client():
         return None
 
     try:
-        return genai.Client(api_key=GEMINI_API_KEY)
+        # timeout — в миллисекундах на КАЖДЫЙ HTTP-запрос (включая vision):
+        # зависший сокет больше не держит постобработку неограниченно.
+        return genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options={"timeout": GEMINI_TIMEOUT_SECONDS * 1000},
+        )
     except Exception as e:
         # Сбой создания клиента (например, неподдерживаемый httpx прокси вида
         # socks4://, кривой ключ) НЕ должен ронять всю задачу — полировка
