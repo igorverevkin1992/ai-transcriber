@@ -219,3 +219,70 @@ class TestFindTcBoxRobustness:
         assert box is not None
         x, y, w, h = box
         assert x <= x0 and x + w >= x0 + bw  # найден именно бокс ТК
+
+
+class TestReadTcAt:
+    def test_two_of_three_agree(self, monkeypatch):
+        import backend.timecode_ocr as tco
+        monkeypatch.setattr(tco, "_extract_frame_at", lambda vp, sec, reg: f"/fake/{sec}.png")
+        # Кадры k=0,1,2: ТК растёт с кадром; третий — мисрид.
+        base = 6 * 3600 + 50 * 60 + 0  # 06:50:00
+        readings = {0: ["06:50:00:10"], 1: ["06:50:01:10"], 2: ["99:99:99:99"]}
+        monkeypatch.setattr(tco, "_ocr_frames",
+                            lambda reader, pairs: [(k, readings[k]) for k, _ in pairs])
+        monkeypatch.setattr(tco.Path, "unlink", lambda self: None)
+        assert tco._read_tc_at(None, "v.wmv", 120.0, 25, None) == base
+
+    def test_disagreement_returns_none(self, monkeypatch):
+        import backend.timecode_ocr as tco
+        monkeypatch.setattr(tco, "_extract_frame_at", lambda vp, sec, reg: f"/fake/{sec}.png")
+        readings = {0: ["06:50:00:10"], 1: ["07:10:00:10"], 2: ["05:00:00:10"]}
+        monkeypatch.setattr(tco, "_ocr_frames",
+                            lambda reader, pairs: [(k, readings[k]) for k, _ in pairs])
+        monkeypatch.setattr(tco.Path, "unlink", lambda self: None)
+        assert tco._read_tc_at(None, "v.wmv", 120.0, 25, None) is None
+
+
+class TestReadTcAnchors:
+    def _patch(self, monkeypatch, tc_by_second):
+        import backend.timecode_ocr as tco
+        monkeypatch.setattr(tco, "_get_reader", lambda: object())
+        monkeypatch.setattr(
+            tco, "_read_tc_at",
+            lambda reader, vp, sec, fps, reg: tc_by_second(sec),
+        )
+        return tco
+
+    def test_anchors_include_start_and_readings(self, monkeypatch):
+        start = 6 * 3600 + 48 * 60  # 06:48:00
+        # ТК = старт + медиа (без дрейфа)
+        tco = self._patch(monkeypatch, lambda sec: start + round(sec))
+        anchors = tco.read_tc_anchors("v.wmv", 25, 400.0, start_tc_s=start, interval_s=120)
+        assert anchors[0] == (0.0, start)
+        assert (120.0, start + 120) in anchors and (240.0, start + 240) in anchors
+
+    def test_monotonicity_drops_misread(self, monkeypatch):
+        start = 1000
+        def fake(sec):
+            if sec == 120:
+                return start + 60  # offset -60: ТК «назад» — мисрид
+            return start + round(sec) + 10
+        tco = self._patch(monkeypatch, fake)
+        anchors = tco.read_tc_anchors("v.wmv", 25, 400.0, start_tc_s=start, interval_s=120)
+        assert (120.0, start + 180) not in anchors
+        assert all(t - m >= start - 1 for m, t in anchors)
+
+    def test_bisection_localizes_jump(self, monkeypatch):
+        start = 1000
+        # Скачок ТК +15 c на медиа-секунде 100: до неё offset 0, после +15.
+        def fake(sec):
+            return start + round(sec) + (15 if sec >= 100 else 0)
+        tco = self._patch(monkeypatch, fake)
+        anchors = tco.read_tc_anchors("v.wmv", 25, 300.0, start_tc_s=start,
+                                      interval_s=120, bisect_depth=4)
+        # Бисекция добавила точки между 0 и 120 — скачок локализован точнее 120 c.
+        mids = [m for m, _ in anchors if 0 < m < 120]
+        assert mids, f"нет бисекционных якорей: {anchors}"
+        # Есть якорь с offset 0 ниже 100 и якорь с offset 15 в (100, 120).
+        assert any(m < 100 and t - m == start for m, t in anchors)
+        assert any(100 <= m < 120 and t - m == start + 15 for m, t in anchors)

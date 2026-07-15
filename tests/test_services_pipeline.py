@@ -759,3 +759,50 @@ class TestDocTitleFlag:
         from docx import Document
         texts = [p.text for p in Document(out).paragraphs]
         assert not any("интервью_ф13" in t for t in texts)
+
+
+class TestTcAnchorMapper:
+    START = 6 * 3600 + 48 * 60  # 06:48:00 в секундах ТК
+
+    def _mapper(self, monkeypatch, anchors):
+        import backend.timecode_ocr as tco
+        monkeypatch.setattr(tco, "read_tc_anchors",
+                            lambda *a, **k: anchors)
+        return services._build_tc_anchor_mapper(
+            "testtcmap", Path("/nope.wmv"), 25, self.START * 25, 600.0, [],
+        )
+
+    def test_no_drift_returns_none(self, monkeypatch):
+        anchors = [(0.0, self.START), (120.0, self.START + 120), (240.0, self.START + 240)]
+        assert self._mapper(monkeypatch, anchors) == (None, None)
+
+    def test_piecewise_correction(self, monkeypatch):
+        # Скачок ТК +15 c между 120 и 240 медиа-секундами.
+        anchors = [
+            (0.0, self.START),
+            (120.0, self.START + 120),
+            (240.0, self.START + 240 + 15),
+        ]
+        warnings = []
+        import backend.timecode_ocr as tco
+        monkeypatch.setattr(tco, "read_tc_anchors", lambda *a, **k: anchors)
+        tc_fn, media_fn = services._build_tc_anchor_mapper(
+            "testtcmap", Path("/nope.wmv"), 25, self.START * 25, 600.0, warnings,
+        )
+        # До скачка — линейно от старта: медиа 60 c → 06:49:00.
+        assert tc_fn(60.0) == "06:49:00:00"
+        # После скачка — от якоря 240: медиа 300 c → старт + 300 + 15 = 06:53:15.
+        assert tc_fn(300.0) == "06:53:15:00"
+        # Обратный маппер согласован с прямым.
+        assert abs(media_fn((self.START + 315) * 25) - 300.0) < 1.0
+        assert abs(media_fn((self.START + 60) * 25) - 60.0) < 1.0
+        assert any("якор" in w for w in warnings)
+
+    def test_read_failure_returns_none(self, monkeypatch):
+        import backend.timecode_ocr as tco
+        def boom(*a, **k):
+            raise RuntimeError("нет ffmpeg")
+        monkeypatch.setattr(tco, "read_tc_anchors", boom)
+        assert services._build_tc_anchor_mapper(
+            "testtcmap", Path("/nope.wmv"), 25, 0, 600.0, [],
+        ) == (None, None)

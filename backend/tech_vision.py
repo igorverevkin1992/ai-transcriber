@@ -36,24 +36,34 @@ def _marker_intervals(
     *,
     min_gap_s: float = TECH_VISION_MIN_GAP_SECONDS,
     max_markers: int = TECH_VISION_MAX_MARKERS,
+    media_s_fn=None,
 ) -> list[tuple[int, float, float]]:
     """Интервалы маркеров техмоментов: (индекс сегмента, start_s, end_s).
 
     Смещение — из таймкода маркера относительно стартового ТК файла; конец —
     таймкод следующего сегмента (для последнего +10 c). Короче ``min_gap_s`` —
-    пропускаются; максимум ``max_markers`` первых.
+    пропускаются; максимум ``max_markers`` первых. ``media_s_fn`` — обратный
+    маппер «кадры ТК → секунды медиа» при кусочной коррекции по OCR-якорям
+    (free-run ТК: линейная формула дала бы кадры не из того места).
     """
     if fps <= 0:
         return []
+
+    def to_media(tc_str: str) -> float:
+        frames = tc_to_frames(tc_str, fps)
+        if media_s_fn is not None:
+            return media_s_fn(frames)
+        return (frames - start_frames) / fps
+
     out: list[tuple[int, float, float]] = []
     for i, seg in enumerate(segments):
         if not str(seg.get("text", "")).startswith(_MARKER_PREFIX):
             continue
-        start_s = (tc_to_frames(seg.get("timecode", ""), fps) - start_frames) / fps
+        start_s = to_media(seg.get("timecode", ""))
         if start_s < 0:
             continue
         if i + 1 < len(segments):
-            end_s = (tc_to_frames(segments[i + 1].get("timecode", ""), fps) - start_frames) / fps
+            end_s = to_media(segments[i + 1].get("timecode", ""))
         else:
             end_s = start_s + 10.0
         if end_s - start_s < min_gap_s:
@@ -238,11 +248,12 @@ def annotate_tech_markers(
     *,
     heroes: list[str] | None = None,
     description: str | None = None,
+    media_s_fn=None,
 ) -> list[dict]:
     """Обогатить маркеры техмоментов описаниями кадров. Никогда не бросает."""
     tmp_files: list[str] = []
     try:
-        intervals = _marker_intervals(segments, fps, start_frames)
+        intervals = _marker_intervals(segments, fps, start_frames, media_s_fn=media_s_fn)
         total_markers = sum(
             1 for s in segments if str(s.get("text", "")).startswith(_MARKER_PREFIX)
         )

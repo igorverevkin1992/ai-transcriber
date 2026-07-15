@@ -218,6 +218,29 @@ def detect_start_timecode(file_path: str) -> str | None:
     return None
 
 
+def detect_duration(file_path: str) -> float | None:
+    """Длительность медиафайла в секундах через ffprobe (None при сбое)."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(file_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            duration = float(result.stdout.strip())
+            if duration > 0:
+                return duration
+    except Exception as e:
+        logger.warning("Не удалось определить длительность (%s): %s", file_path, e)
+    return None
+
+
 def detect_fps(file_path: str) -> int:
     """Определяет FPS видеофайла через ffprobe. Возвращает 25 по умолчанию."""
     try:

@@ -28,6 +28,8 @@ from backend.config import (
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
     NO_SPEECH_PROB_THRESHOLD,
+    OCR_TC_ANCHOR_INTERVAL,
+    OCR_TC_ANCHORS,
     OCR_TIMECODE,
     OCR_TIMECODE_REGION,
     OUTPUT_DIR,
@@ -63,8 +65,10 @@ from backend.models import ProjectStatusEnum
 from backend.store import ProjectStore
 from backend.turns import TECH_BREAK_TEXT, UNCLEAR_TEXT, build_turns
 from backend.utils import (
+    detect_duration,
     detect_fps,
     detect_start_timecode,
+    frames_to_tc,
     offset_tc,
     parse_filename_metadata,
     strip_extension,
@@ -1131,6 +1135,74 @@ def _fold_unnamed_speakers_into_tech(
     return new_segments, crew_ids
 
 
+def _build_tc_anchor_mapper(project_id: str, video_path, fps: int, start_frames: int,
+                            duration_s: float, warnings: list[str]):
+    """Кусочная коррекция ТК по OCR-якорям: (tc_fn, media_fn) или (None, None).
+
+    Free-run ТК плёнки бежит во время пауз записи между дублями — линейная
+    модель «старт + медиа-время» к середине файла дрейфует (ф4: +15 c).
+    ``tc_fn(media_s) -> "HH:MM:SS:00"`` считает ТК от ближайшего ПРЕДЫДУЩЕГО
+    якоря (ТК только убегает вперёд); ``media_fn(tc_frames) -> media_s`` —
+    обратный маппер (для vision-кадров). Любой сбой/нет дрейфа → (None, None),
+    остаётся линейная модель.
+    """
+    from backend.timecode_ocr import read_tc_anchors
+    start_tc_s = start_frames // fps
+    try:
+        anchors = read_tc_anchors(
+            str(video_path), fps, duration_s,
+            start_tc_s=start_tc_s,
+            region=OCR_TIMECODE_REGION,
+            interval_s=OCR_TC_ANCHOR_INTERVAL,
+        )
+    except Exception as e:
+        logger.warning("[%s] ТК-якоря: сбой (%s) — линейная модель", project_id[:8], e)
+        return None, None
+    if len(anchors) < 2:
+        logger.info("[%s] ТК-якоря: прочитано %d — коррекция невозможна, линейная модель",
+                    project_id[:8], len(anchors))
+        return None, None
+
+    drift = [round(t - m) - start_tc_s for m, t in anchors]
+    max_drift = max(drift)
+    if max_drift < 2:
+        logger.info("[%s] ТК-якоря: %d точек, дрейф ≤%d c — коррекция не требуется",
+                    project_id[:8], len(anchors), max_drift)
+        return None, None
+
+    jumps = [round(anchors[i][0]) for i in range(1, len(anchors))
+             if drift[i] - drift[i - 1] >= 2]
+    logger.info("[%s] ТК-якоря: %d точек, дрейф до +%d c, скачки ТК около медиа-секунд %s — "
+                "таймкоды скорректированы кусочно",
+                project_id[:8], len(anchors), max_drift, jumps)
+    warnings.append(
+        f"Таймкод плёнки прерывистый (free-run): к середине записи набежало +{max_drift} c. "
+        f"Таймкоды скорректированы по {len(anchors)} OCR-якорям."
+    )
+
+    def tc_fn(seconds: float) -> str:
+        base_m, base_t = anchors[0]
+        for m, t in anchors:
+            if m <= seconds:
+                base_m, base_t = m, t
+            else:
+                break
+        total = round(base_t * fps) + round((seconds - base_m) * fps)
+        return frames_to_tc(total - total % fps, fps)
+
+    def media_fn(tc_frames: int) -> float:
+        tc_sec = tc_frames / fps
+        base_m, base_t = anchors[0]
+        for m, t in anchors:
+            if t <= tc_sec:
+                base_m, base_t = m, t
+            else:
+                break
+        return max(0.0, base_m + (tc_sec - base_t))
+
+    return tc_fn, media_fn
+
+
 def _process_recognition_result(project_id: str, segments: list[dict], original_filename: str, video_path,
                                 extra_warnings: list[str] | None = None, passport: dict | None = None):
     """Обрабатывает результат распознавания v3 и сохраняет в projects_db."""
@@ -1188,6 +1260,17 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
 
     speaker_durations: dict[str, float] = {}
     start_frames = tc_to_frames(meta["start_tc"], fps)
+    media_duration_s = detect_duration(str(video_path)) if video_path.exists() else None
+
+    # Кусочная коррекция ТК по OCR-якорям (free-run ТК плёнки). Только когда
+    # стартовый ТК известен и есть видео; мягкая деградация до линейной модели.
+    tc_fn = media_fn = None
+    if (OCR_TC_ANCHORS and OCR_TIMECODE and media_duration_s
+            and meta["start_tc"] != "00:00:00:00" and video_path.exists()):
+        with _stage_timer(project_id, "ТК-якоря (OCR)"):
+            tc_fn, media_fn = _build_tc_anchor_mapper(
+                project_id, video_path, fps, start_frames, media_duration_s, warnings,
+            )
 
     # Длительности спикеров считаются по сырым ASR-сегментам (до склейки).
     # Технические моменты (реплики съёмочной группы) остаются в events, чтобы
@@ -1222,11 +1305,14 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
                 evts, start_frames, fps,
                 inline_tc_seconds=TURN_INLINE_TC_SECONDS,
                 tech_break_gap_seconds=TECH_BREAK_GAP_SECONDS,
+                tc_fn=tc_fn,
+                total_duration_s=media_duration_s,
             )
         # Legacy: один ASR-сегмент = один абзац
         return [
             {
-                "timecode": offset_tc(start_frames, ev["start_s"], fps),
+                "timecode": tc_fn(ev["start_s"]) if tc_fn is not None
+                else offset_tc(start_frames, ev["start_s"], fps),
                 "speaker": ev["speaker"],
                 "text": ev["text"],
             }
@@ -1365,6 +1451,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         from backend.tech_vision import annotate_tech_markers
         raw_segments = annotate_tech_markers(
             raw_segments, str(video_path), fps, start_frames,
+            media_s_fn=media_fn,
             heroes=meta.get("speakers") or [],
             description=meta.get("description", "") or "",
         )

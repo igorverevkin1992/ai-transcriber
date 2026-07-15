@@ -218,17 +218,20 @@ GEMINI_TIMEOUT_SECONDS = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "120"))
 TECH_MOMENT_DETECTION = os.getenv("TECH_MOMENT_DETECTION", "true").lower() in ("1", "true", "yes")
 # Агрессивный режим определения техмоментов: помимо команд группе/настройки
 # техники также помечает закадровую организационную болтовню (обращения к
-# посторонним по имени, «пойду умоюсь», «давай с тебя» и т.п.). Дефолт false —
-# консервативный режим (риск задеть реальные реплики). Требует GEMINI_API_KEY.
-TECH_MOMENT_AGGRESSIVE = os.getenv("TECH_MOMENT_AGGRESSIVE", "false").lower() in ("1", "true", "yes")
+# посторонним по имени, «пойду умоюсь», «давай с тебя»), репетиции и
+# обсуждение дублей. Дефолт true с ф4: человеческие эталоны стабильно
+# сворачивают репетиционно-организационную часть в маркеры; консервативный
+# режим оставлял её репликами. Откат: TECH_MOMENT_AGGRESSIVE=false.
+TECH_MOMENT_AGGRESSIVE = os.getenv("TECH_MOMENT_AGGRESSIVE", "true").lower() in ("1", "true", "yes")
 
 # Gemini-правка границ спикеров: pyannote изредка относит короткую реплику ЦЕЛИКОМ
 # не тому спикеру (ответ гостя в абзаце ведущего и наоборот). Отдельный проход
 # читает диалог с текущими метками + контекст (ведущий АЗК закадровый, гости =
 # имена героев, тема из паспорта) и переназначает ТОЛЬКО высокоуверенно
-# перепутанные реплики. Дефолт false (opt-in; вероятностная правка, риск задеть
-# верные реплики; требует GEMINI_API_KEY). Логика в correct_speaker_boundaries.
-SPEAKER_BOUNDARY_CORRECTION = os.getenv("SPEAKER_BOUNDARY_CORRECTION", "false").lower() in ("1", "true", "yes")
+# перепутанные реплики. Дефолт true с ф4 (эталон разделяет склейки
+# «вопрос—“Да.”—вопрос», которые диаризация слила в один абзац; без
+# GEMINI_API_KEY пасс мягко деградирует в no-op). Откат: env=false.
+SPEAKER_BOUNDARY_CORRECTION = os.getenv("SPEAKER_BOUNDARY_CORRECTION", "true").lower() in ("1", "true", "yes")
 
 # --- Видео-описания техмоментов (Gemini Vision) ---
 # Обогащать маркеры «(Технические моменты)» описанием происходящего в кадре:
@@ -251,6 +254,13 @@ OCR_TIMECODE = os.getenv("OCR_TIMECODE", "true").lower() in ("1", "true", "yes")
 # прежний дефолт 0.3,0.7 обрезал левый разряд центрального бокса. Пустая строка →
 # искать по всему кадру.
 OCR_TIMECODE_REGION = os.getenv("OCR_TIMECODE_REGION", "0.0,0.65,1.0,1.0")
+# Кусочная коррекция таймкодов по OCR-якорям. Free-run ТК плёнки бежит во время
+# пауз записи между дублями, из-за чего «стартовый ТК + медиа-время» дрейфует
+# (ф4: +15 c к интервью). Якоря — чтения выжженного ТК каждые ~ANCHOR_INTERVAL
+# секунд по всему файлу; сегменты корректируются от ближайшего предыдущего
+# якоря. Мягкая деградация: без easyocr/при сбое остаётся линейная модель.
+OCR_TC_ANCHORS = os.getenv("OCR_TC_ANCHORS", "true").lower() in ("1", "true", "yes")
+OCR_TC_ANCHOR_INTERVAL = float(os.getenv("OCR_TC_ANCHOR_INTERVAL", "120") or "120")
 
 # --- DOCX formatting ---
 # Тире между именем и аббревиатурой в легенде: «Имя – ОА» (en-dash, как f7/f8)

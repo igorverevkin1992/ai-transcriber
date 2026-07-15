@@ -112,6 +112,8 @@ def build_turns(
     *,
     inline_tc_seconds: float = 60.0,
     tech_break_gap_seconds: float = 30.0,
+    tc_fn=None,
+    total_duration_s: float | None = None,
 ) -> list[dict]:
     """Склеивает события [{speaker, text, start_s, end_s}] в реплики.
 
@@ -119,6 +121,12 @@ def build_turns(
     плюс ремарки технических пауз. В середине склейки регистр понижается
     только у безопасных служебных слов (``_LOWERCASE_CONTINUATION``) — имена
     собственные в середине реплики заглавную сохраняют.
+
+    ``tc_fn`` — необязательный маппер «секунды медиа → строка ТК» (кусочная
+    коррекция по OCR-якорям для free-run ТК плёнки); None → линейная модель
+    ``offset_tc(start_frames, s)``. ``total_duration_s`` — длительность медиа:
+    если запись продолжается ≥ ``tech_break_gap_seconds`` после последней
+    реплики, в конец добавляется маркер техмоментов (эталонная конвенция).
     """
     out: list[dict] = []
     events = sorted(events, key=lambda e: e["start_s"])
@@ -126,6 +134,8 @@ def build_turns(
         return out
 
     def tc(seconds: float) -> str:
+        if tc_fn is not None:
+            return tc_fn(seconds)
         return offset_tc(start_frames, seconds, fps)
 
     cur: dict | None = None
@@ -156,7 +166,7 @@ def build_turns(
     # эталоны открываются ремаркой с таймкодом начала записи.
     if events[0]["start_s"] >= tech_break_gap_seconds:
         out.append({
-            "timecode": offset_tc(start_frames, 0.0, fps),
+            "timecode": tc(0.0),
             "speaker": events[0]["speaker"],
             "text": TECH_BREAK_TEXT,
         })
@@ -229,4 +239,15 @@ def build_turns(
         cur["parts"].append(part)
 
     close_turn()
+
+    # Запись продолжается заметно дольше последней реплики — эталоны закрывают
+    # документ хвостовым маркером (съёмка перебивок/планов после интервью).
+    if (total_duration_s is not None and prev_end is not None
+            and total_duration_s - prev_end >= tech_break_gap_seconds
+            and not (out and out[-1]["text"] == TECH_BREAK_TEXT)):
+        out.append({
+            "timecode": tc(prev_end),
+            "speaker": events[-1]["speaker"],
+            "text": TECH_BREAK_TEXT,
+        })
     return out

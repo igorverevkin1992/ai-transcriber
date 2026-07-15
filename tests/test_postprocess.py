@@ -864,3 +864,38 @@ class TestGeminiClientTimeout:
         assert isinstance(client, FakeClient)
         assert captured["api_key"] == "test-key"
         assert captured["http_options"] == {"timeout": pp.GEMINI_TIMEOUT_SECONDS * 1000}
+
+
+class TestSingingAndRehearsalPrompts:
+    def test_singing_in_both_prompts(self):
+        import backend.postprocess as pp
+        for prompt in (pp._TECH_MOMENT_PROMPT, pp._TECH_MOMENT_PROMPT_AGGRESSIVE):
+            assert "Happy birthday" in prompt
+            assert "ПЕНИЕ" in prompt
+
+    def test_rehearsal_and_wrapup_in_aggressive(self):
+        import backend.postprocess as pp
+        assert "дубл" in pp._TECH_MOMENT_PROMPT_AGGRESSIVE
+        assert "Так, ну всё" in pp._TECH_MOMENT_PROMPT_AGGRESSIVE
+        assert "Так, ну всё" not in pp._TECH_MOMENT_PROMPT
+
+    def test_stray_latin_word_rule_in_polish(self, monkeypatch):
+        import backend.postprocess as pp
+        prompts = []
+        monkeypatch.setattr(pp, "_gemini_call", lambda p, **kw: prompts.append(p) or "ок")
+        pp.gemini_polish("текст")
+        assert prompts and "many разных судеб" in prompts[0]
+
+    def test_flag_defaults_flipped(self, monkeypatch):
+        # Дефолты с ф4: агрессивные техмоменты и правка границ включены.
+        import importlib
+
+        import backend.config as config
+        monkeypatch.delenv("TECH_MOMENT_AGGRESSIVE", raising=False)
+        monkeypatch.delenv("SPEAKER_BOUNDARY_CORRECTION", raising=False)
+        fresh = importlib.reload(config)
+        try:
+            assert fresh.TECH_MOMENT_AGGRESSIVE is True
+            assert fresh.SPEAKER_BOUNDARY_CORRECTION is True
+        finally:
+            importlib.reload(config)

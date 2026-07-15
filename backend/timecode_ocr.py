@@ -371,6 +371,153 @@ def _ocr_frames(reader, pairs: list[tuple[int, str]]) -> list[tuple[int, list[st
     return samples
 
 
+def _extract_frame_at(video_path: str, second: float, region) -> str | None:
+    """Один кадр на произвольной секунде через input-seek (``-ss`` до ``-i``).
+
+    В отличие от ``_extract_frames`` (последовательное декодирование от нуля —
+    для точек в конце длинного файла это чтение почти всего файла), seek по
+    ключевым кадрам делает извлечение любой точки быстрым.
+    """
+    vf = None
+    if region:
+        left, top, right, bottom = region
+        vf = (
+            f"crop=iw*{right - left:.4f}:ih*{bottom - top:.4f}:"
+            f"iw*{left:.4f}:ih*{top:.4f},scale=iw*3:ih*3"
+        )
+    out_path = str(TEMP_DIR / f"tcanchor_{uuid.uuid4().hex}.png")
+    cmd = ["ffmpeg", "-v", "quiet", "-y", "-ss", f"{second:.3f}", "-i", video_path,
+           "-frames:v", "1", "-an"]
+    if vf:
+        cmd += ["-vf", vf]
+    cmd.append(out_path)
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=60)
+        if result.returncode != 0 or not Path(out_path).exists():
+            return None
+    except Exception as e:
+        logger.warning("[OCR ТК] не удалось извлечь кадр на %.1f c: %s", second, e)
+        return None
+    return out_path
+
+
+def _read_tc_at(reader, video_path: str, second: float, fps: int, region) -> int | None:
+    """Абсолютные СЕКУНДЫ выжженного ТК на медиа-секунде ``second`` (или None).
+
+    OCR-ит 3 кадра (t, t+1, t+2 c); чтение принято, когда ≥2 кадра дают
+    согласованный ТК (кандидаты приводятся к «подразумеваемому ТК на секунде
+    t» вычитанием смещения кадра — так мисриды не согласуются и отсеиваются).
+    """
+    pairs: list[tuple[int, str]] = []
+    try:
+        for k in (0, 1, 2):
+            path = _extract_frame_at(video_path, second + k, region)
+            if path is not None:
+                pairs.append((k, path))
+        if len(pairs) < 2:
+            return None
+        implied: list[set[int]] = []
+        for k, texts in _ocr_frames(reader, pairs):
+            tc_seconds: set[int] = set()
+            joined = " ".join(texts)
+            for candidate_text in (*texts, joined, joined.replace(" ", "")):
+                tc_seconds |= _candidates_from_text(candidate_text, fps)
+            for recovered in _deletion_variants(joined):
+                tc_seconds |= _candidates_from_text(recovered, fps)
+            implied.append({sec - k for sec in tc_seconds if sec - k >= 0})
+    finally:
+        for _, f in pairs:
+            try:
+                Path(f).unlink()
+            except OSError:
+                pass
+    counts = Counter(sec for frame_set in implied for sec in frame_set)
+    if not counts:
+        return None
+    best, votes = counts.most_common(1)[0]
+    return best if votes >= 2 else None
+
+
+def read_tc_anchors(
+    video_path: str,
+    fps: int,
+    duration_s: float,
+    *,
+    start_tc_s: int,
+    region: str | None = None,
+    interval_s: float = 120.0,
+    max_anchors: int = 20,
+    bisect_depth: int = 4,
+) -> list[tuple[float, int]]:
+    """Якорные чтения выжженного ТК по всему файлу для кусочной коррекции.
+
+    Free-run ТК плёнки бежит во время пауз записи между дублями, поэтому
+    «стартовый ТК + медиа-время» дрейфует (ф4: +15 c к середине файла).
+    Возвращает [(media_second, tc_seconds)] по возрастанию, включая стартовый
+    якорь (0.0, start_tc_s). Соседние якоря с расхождением offset ≥ 2 c
+    уточняются бисекцией (до ``bisect_depth`` уровней), чтобы локализовать
+    скачок; сбойные точки просто пропускаются. Якоря с offset МЕНЬШЕ
+    предыдущего отбрасываются как мисриды (free-run ТК назад не ходит).
+    """
+    reader = _get_reader()
+    if reader is None or fps <= 0 or duration_s <= 0:
+        return []
+    reg = _parse_region(region if region is not None else OCR_TIMECODE_REGION)
+
+    points: list[float] = []
+    t = interval_s
+    while t < duration_s - 5 and len(points) < max_anchors:
+        points.append(t)
+        t += interval_s
+
+    anchors: list[tuple[float, int]] = [(0.0, start_tc_s)]
+    for sec in points:
+        tc_s = _read_tc_at(reader, video_path, sec, fps, reg)
+        if tc_s is not None:
+            anchors.append((sec, tc_s))
+            logger.info("[OCR ТК] якорь %.0f c: ТК %s (offset %+d c)",
+                        sec, frames_to_tc(tc_s * fps, fps),
+                        tc_s - start_tc_s - round(sec))
+
+    # Монотонность: offset (ТК − медиа) у free-run только растёт. Падение
+    # offset — мисрид; выбрасываем такой якорь.
+    filtered: list[tuple[float, int]] = []
+    prev_offset = None
+    for media_s, tc_s in anchors:
+        offset = tc_s - media_s
+        if prev_offset is not None and offset < prev_offset - 1.0:
+            logger.info("[OCR ТК] якорь %.0f c отброшен: offset упал (%+.0f → %+.0f c)",
+                        media_s, prev_offset - start_tc_s, offset - start_tc_s)
+            continue
+        filtered.append((media_s, tc_s))
+        prev_offset = offset
+    anchors = filtered
+
+    # Бисекция: локализуем скачок ТК между соседними якорями с разным offset.
+    stack = [(anchors[i], anchors[i + 1], 0) for i in range(len(anchors) - 1)]
+    while stack:
+        (m0, t0), (m1, t1), depth = stack.pop()
+        if depth >= bisect_depth or m1 - m0 < 12:
+            continue
+        if (t1 - m1) - (t0 - m0) < 2:
+            continue
+        mid = (m0 + m1) / 2
+        tc_mid = _read_tc_at(reader, video_path, mid, fps, reg)
+        if tc_mid is None:
+            continue
+        offset_mid = tc_mid - mid
+        if offset_mid < (t0 - m0) - 1.0 or offset_mid > (t1 - m1) + 1.0:
+            continue  # мисрид: offset вне рамок соседей
+        anchors.append((mid, tc_mid))
+        logger.info("[OCR ТК] якорь-бисекция %.0f c: ТК %s", mid,
+                    frames_to_tc(tc_mid * fps, fps))
+        stack.append(((m0, t0), (mid, tc_mid), depth + 1))
+        stack.append(((mid, tc_mid), (m1, t1), depth + 1))
+
+    anchors.sort()
+    return anchors
+
+
 def detect_burned_in_timecode(
     video_path: str,
     fps: int,

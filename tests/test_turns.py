@@ -345,3 +345,57 @@ class TestParentheticalRegexSafety:
         assert _FULL_PARENTHETICAL_RE.match("(пауза)…")
         assert not _FULL_PARENTHETICAL_RE.match("(пауза) и потом")
         assert not _FULL_PARENTHETICAL_RE.match("обычный текст")
+
+
+class TestTailTechMarker:
+    def _ev(self, speaker, text, start_s, end_s):
+        return {"speaker": speaker, "text": text, "start_s": start_s, "end_s": end_s}
+
+    def test_tail_marker_when_recording_continues(self):
+        from backend.turns import TECH_BREAK_TEXT, build_turns
+        out = build_turns(
+            [self._ev("0", "Финальная реплика.", 0.0, 5.0)],
+            0, 25, tech_break_gap_seconds=30.0, total_duration_s=60.0,
+        )
+        assert out[-1]["text"] == TECH_BREAK_TEXT
+        assert out[-1]["timecode"] == "00:00:05:00"  # конец последней речи
+
+    def test_no_tail_marker_below_threshold(self):
+        from backend.turns import TECH_BREAK_TEXT, build_turns
+        out = build_turns(
+            [self._ev("0", "Финальная реплика.", 0.0, 5.0)],
+            0, 25, tech_break_gap_seconds=30.0, total_duration_s=20.0,
+        )
+        assert out[-1]["text"] != TECH_BREAK_TEXT
+
+    def test_no_duration_no_marker(self):
+        from backend.turns import TECH_BREAK_TEXT, build_turns
+        out = build_turns(
+            [self._ev("0", "Финальная реплика.", 0.0, 5.0)],
+            0, 25, tech_break_gap_seconds=30.0,
+        )
+        assert all(s["text"] != TECH_BREAK_TEXT for s in out)
+
+
+class TestTcFnOverride:
+    def test_tc_fn_used_for_all_timecodes(self):
+        from backend.turns import TECH_BREAK_TEXT, build_turns
+        calls = []
+
+        def fake_tc(seconds):
+            calls.append(seconds)
+            return f"TC@{seconds:.0f}"
+
+        events = [
+            {"speaker": "0", "text": "Первая.", "start_s": 40.0, "end_s": 42.0},
+        ]
+        out = build_turns(events, 0, 25, tech_break_gap_seconds=30.0, tc_fn=fake_tc)
+        # Стартовый маркер (речь позже порога) и реплика — оба через tc_fn.
+        assert out[0]["text"] == TECH_BREAK_TEXT and out[0]["timecode"] == "TC@0"
+        assert out[1]["timecode"] == "TC@40"
+
+    def test_none_tc_fn_keeps_linear(self):
+        from backend.turns import build_turns
+        events = [{"speaker": "0", "text": "Реплика.", "start_s": 2.0, "end_s": 3.0}]
+        out = build_turns(events, 25 * 3600, 25)
+        assert out[0]["timecode"] == "01:00:02:00"
