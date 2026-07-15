@@ -899,3 +899,21 @@ class TestSingingAndRehearsalPrompts:
             assert fresh.SPEAKER_BOUNDARY_CORRECTION is True
         finally:
             importlib.reload(config)
+
+
+class TestF4PromptNudges:
+    def test_glued_interjection_case_in_boundary_prompt(self, monkeypatch):
+        import backend.postprocess as pp
+        prompts = []
+        monkeypatch.setattr(pp, "_gemini_call",
+                            lambda p, **kw: prompts.append(p) or "[]")
+        pp.correct_speaker_boundaries(
+            [{"speaker": "0", "text": "Вопрос?"}, {"speaker": "1", "text": "Ответ."}],
+            speaker_labels={"0": "АЗК", "1": "Гость"}, interviewer_id="0",
+        )
+        assert prompts and "Когда же ещё с таким праздником" in prompts[0]
+
+    def test_staged_greeting_kept_in_aggressive(self):
+        import backend.postprocess as pp
+        assert "Hello, Марина" in pp._TECH_MOMENT_PROMPT_AGGRESSIVE
+        assert "ПОСТАНОВОЧНЫЕ" in pp._TECH_MOMENT_PROMPT_AGGRESSIVE

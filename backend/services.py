@@ -39,7 +39,10 @@ from backend.config import (
     SQLITE_DB_PATH,
     STRICT_DIARIZATION,
     TECH_BREAK_GAP_SECONDS,
+    TECH_MARKER_SCENE_SPLIT,
     TECH_MOMENT_VISION,
+    TECH_SCENE_MIN_SPAN,
+    TECH_SCENE_THRESHOLD,
     TEMP_DIR,
     TRANSCRIPT_GLOSSARY,
     TURN_INLINE_TC_SECONDS,
@@ -1335,11 +1338,21 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     interviewer_id = None
     if INTERVIEWER_AUTODETECT and len(speaker_durations) >= 2:
         sequence = build_speaker_sequence(speech_events)
+        # Доля «вопросных» событий на спикера — сигнал для 1-на-1, где
+        # чередование симметрично и роли по нему не различить.
+        q_counts: dict[str, list[int]] = {}
+        for ev in speech_events:
+            stats = q_counts.setdefault(ev["speaker"], [0, 0])
+            stats[0] += 1
+            if "?" in ev["text"]:
+                stats[1] += 1
+        question_shares = {sp: hits / n for sp, (n, hits) in q_counts.items() if n}
         interviewer_id = detect_interviewer(
             sequence, speaker_durations,
             min_distinct_guests=INTERVIEWER_MIN_DISTINCT_GUESTS,
             majority_ratio=INTERVIEWER_MAJORITY_RATIO,
             label_single_guest=INTERVIEWER_LABEL_SINGLE_GUEST,
+            question_shares=question_shares,
         )
         if interviewer_id is not None:
             logger.info("[%s] Интервьюер определён автоматически: %s → %s",
@@ -1448,7 +1461,14 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     # Видео-описания техмоментов: «(Технические моменты. Съемка …)». Мягкая
     # деградация внутри annotate_tech_markers — задача не падает.
     if TECH_MOMENT_VISION and video_path.exists():
-        from backend.tech_vision import annotate_tech_markers
+        from backend.tech_vision import annotate_tech_markers, split_markers_by_scenes
+        if TECH_MARKER_SCENE_SPLIT:
+            with _stage_timer(project_id, "смены плана в техмоментах"):
+                raw_segments = split_markers_by_scenes(
+                    raw_segments, str(video_path), fps, start_frames,
+                    tc_fn=tc_fn, media_s_fn=media_fn,
+                    threshold=TECH_SCENE_THRESHOLD, min_span_s=TECH_SCENE_MIN_SPAN,
+                )
         raw_segments = annotate_tech_markers(
             raw_segments, str(video_path), fps, start_frames,
             media_s_fn=media_fn,

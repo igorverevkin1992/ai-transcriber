@@ -40,10 +40,43 @@ class TestDetectInterviewer:
         durations = {"A": 5.0, "B": 20.0}
         assert detect_interviewer(seq, durations) is None
 
-    def test_two_person_labels_shorter_when_enabled(self):
+    def test_two_person_none_without_question_shares(self):
+        # Только длительности недостаточно: без сигнала «кто спрашивает»
+        # пометка в 1-на-1 не ставится (прежний min-duration-гесс был опасен).
         seq = ["A", "B", "A", "B"]
         durations = {"A": 5.0, "B": 20.0}
-        assert detect_interviewer(seq, durations, label_single_guest=True) == "A"
+        assert detect_interviewer(seq, durations, label_single_guest=True) is None
+
+    def test_two_person_question_asker_and_shorter_wins(self):
+        # ф4: ведущая задаёт вопросы и говорит меньше → АЗК.
+        seq = ["A", "B", "A", "B"]
+        durations = {"A": 60.0, "B": 400.0}
+        shares = {"A": 0.9, "B": 0.1}
+        assert detect_interviewer(seq, durations, label_single_guest=True,
+                                  question_shares=shares) == "A"
+
+    def test_two_person_conflicting_signals_none(self):
+        # Спрашивает чаще, но говорит БОЛЬШЕ — сигналы противоречат → None.
+        seq = ["A", "B", "A", "B"]
+        durations = {"A": 400.0, "B": 60.0}
+        shares = {"A": 0.9, "B": 0.1}
+        assert detect_interviewer(seq, durations, label_single_guest=True,
+                                  question_shares=shares) is None
+
+    def test_two_person_similar_question_shares_none(self):
+        # Оба спрашивают примерно одинаково (беседа) → нет уверенности.
+        seq = ["A", "B", "A", "B"]
+        durations = {"A": 100.0, "B": 200.0}
+        shares = {"A": 0.5, "B": 0.4}
+        assert detect_interviewer(seq, durations, label_single_guest=True,
+                                  question_shares=shares) is None
+
+    def test_two_person_disabled_flag_none(self):
+        seq = ["A", "B", "A", "B"]
+        durations = {"A": 5.0, "B": 20.0}
+        shares = {"A": 0.9, "B": 0.0}
+        assert detect_interviewer(seq, durations, label_single_guest=False,
+                                  question_shares=shares) is None
 
     def test_round_robin_no_clear_interviewer(self):
         seq = ["A", "B", "C", "A", "B", "C", "A", "B", "C"]

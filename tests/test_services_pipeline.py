@@ -806,3 +806,82 @@ class TestTcAnchorMapper:
         assert services._build_tc_anchor_mapper(
             "testtcmap", Path("/nope.wmv"), 25, 0, 600.0, [],
         ) == (None, None)
+
+
+class TestOneOnOneInterviewer:
+    def test_filename_name_goes_to_guest(self, fresh_store, monkeypatch):
+        """ф4: в 1-на-1 ведущая (вопросы, короче) → АЗК, имя из файла → гостье."""
+        store, _, _ = fresh_store
+        monkeypatch.setattr(services, "INTERVIEWER_LABEL_SINGLE_GUEST", True)
+        store.create("oo1", {"id": "oo1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        segs = []
+        t = 0
+        for k in range(5):
+            segs.append(_seg("0", f"Вопрос номер {k}?", t, t + 2000))
+            t += 2000
+            segs.append(_seg("1", "Длинный содержательный ответ гостьи про работу и жизнь.", t, t + 20000))
+            t += 20000
+        services._process_recognition_result("oo1", segs, "Ковальская Марина_f4.mp4", Path("/nope.mp4"))
+        speakers = store["oo1"]["result"]["speakers"]
+        assert speakers["0"]["suggested_name"] == "АЗК"
+        assert speakers["1"]["suggested_name"] == "Ковальская Марина"
+
+    def test_no_questions_no_inversion_risk(self, fresh_store, monkeypatch):
+        """Без вопросного сигнала пометки нет — поведение прежнее (нумерация/имя по появлению)."""
+        store, _, _ = fresh_store
+        monkeypatch.setattr(services, "INTERVIEWER_LABEL_SINGLE_GUEST", True)
+        store.create("oo2", {"id": "oo2", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        segs = [
+            _seg("0", "Реплика первая.", 0, 2000),
+            _seg("1", "Реплика вторая длинная существенно.", 2000, 22000),
+            _seg("0", "Реплика третья.", 22000, 24000),
+        ]
+        services._process_recognition_result("oo2", segs, "Иванов_f1.mp4", Path("/nope.mp4"))
+        speakers = store["oo2"]["result"]["speakers"]
+        assert "АЗК" not in {v["suggested_name"] for v in speakers.values()}
+
+
+class TestSceneSplitMarkers:
+    def _segs(self):
+        return [
+            {"timecode": "00:00:00:00", "speaker": "0", "text": "(Технические моменты)"},
+            {"timecode": "00:01:40:00", "speaker": "0", "text": "Реплика после паузы."},
+        ]
+
+    def test_long_marker_split_at_cuts(self, monkeypatch):
+        import backend.tech_vision as tv
+        monkeypatch.setattr(tv, "_detect_scene_cuts",
+                            lambda vp, s, d, th: [20.0, 24.0, 60.0])  # 24 отсеется (< 8 c от 20)
+        out = tv.split_markers_by_scenes(self._segs(), "v.wmv", 25, 0)
+        texts_tc = [(s["timecode"], s["text"]) for s in out]
+        assert ("00:00:20:00", "(Технические моменты)") in texts_tc
+        assert ("00:01:00:00", "(Технические моменты)") in texts_tc
+        assert not any(tc == "00:00:24:00" for tc, _ in texts_tc)
+        assert out[0]["timecode"] == "00:00:00:00"  # исходный маркер на месте
+        assert out[-1]["text"] == "Реплика после паузы."
+
+    def test_short_marker_untouched(self, monkeypatch):
+        import backend.tech_vision as tv
+        segs = [
+            {"timecode": "00:00:00:00", "speaker": "0", "text": "(Технические моменты)"},
+            {"timecode": "00:00:10:00", "speaker": "0", "text": "Реплика."},  # 10 c < min_span 25
+        ]
+        monkeypatch.setattr(tv, "_detect_scene_cuts",
+                            lambda *a: (_ for _ in ()).throw(AssertionError("не должен вызываться")))
+        assert tv.split_markers_by_scenes(segs, "v.wmv", 25, 0) == segs
+
+    def test_tc_fn_used_for_new_markers(self, monkeypatch):
+        import backend.tech_vision as tv
+        monkeypatch.setattr(tv, "_detect_scene_cuts", lambda vp, s, d, th: [30.0])
+        out = tv.split_markers_by_scenes(
+            self._segs(), "v.wmv", 25, 0, tc_fn=lambda sec: f"TC@{sec:.0f}",
+        )
+        assert any(s["timecode"] == "TC@30" for s in out)
+
+    def test_ffmpeg_failure_soft(self, monkeypatch):
+        import backend.tech_vision as tv
+        def boom(*a):
+            raise RuntimeError("no ffmpeg")
+        monkeypatch.setattr(tv, "_detect_scene_cuts", boom)
+        segs = self._segs()
+        assert tv.split_markers_by_scenes(segs, "v.wmv", 25, 0) == segs

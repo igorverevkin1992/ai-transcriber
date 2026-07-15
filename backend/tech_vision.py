@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 from backend.config import (
@@ -21,7 +22,7 @@ from backend.config import (
     TECH_VISION_MIN_GAP_SECONDS,
     logger,
 )
-from backend.utils import tc_to_frames
+from backend.utils import offset_tc, tc_to_frames
 
 _MARKER_PREFIX = "(Технические моменты"
 _MAX_DESC_CHARS = 80
@@ -72,6 +73,94 @@ def _marker_intervals(
         if len(out) >= max_markers:
             break
     return out
+
+
+def _detect_scene_cuts(video_path: str, start_s: float, dur_s: float,
+                       threshold: float) -> list[float]:
+    """Абсолютные медиа-секунды смен плана внутри [start_s, start_s + dur_s].
+
+    ffmpeg декодирует только нужный кусок (input-seek + ``-t``); ``showinfo``
+    печатает pts_time отобранных фильтром ``scene`` кадров в stderr. pts после
+    ``-ss`` отсчитывается от нуля куска — прибавляем start_s.
+    """
+    cmd = [
+        "ffmpeg", "-v", "info", "-nostats",
+        "-ss", f"{max(0.0, start_s):.3f}", "-t", f"{dur_s:.3f}", "-i", video_path,
+        "-vf", f"select='gt(scene,{threshold})',showinfo", "-an", "-f", "null", "-",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except Exception as e:
+        logger.warning("[Сцены ТМ] ffmpeg не отработал (%.0f c): %s", start_s, e)
+        return []
+    return [start_s + float(m.group(1))
+            for m in re.finditer(r"pts_time:\s*([0-9.]+)", result.stderr)]
+
+
+def split_markers_by_scenes(
+    segments: list[dict],
+    video_path: str,
+    fps: int,
+    start_frames: int,
+    *,
+    tc_fn=None,
+    media_s_fn=None,
+    threshold: float = 0.30,
+    min_span_s: float = 25.0,
+    min_sub_s: float = 8.0,
+) -> list[dict]:
+    """Разрезать длинные интервалы техмоментов по сменам плана в видеоряде.
+
+    Эталонные монтажные листы ставят маркер на КАЖДЫЙ дубль/смену плана
+    (~17 маркеров в репетиционной части ф4), а аудио границ дублей не слышит —
+    их видно только по видеоряду. Для каждого маркера с интервалом ≥
+    ``min_span_s`` детектируются смены плана (ffmpeg scene), и на каждой
+    вставляется дополнительный «голый» маркер (позже vision опишет каждый кусок
+    отдельно). Куски короче ``min_sub_s`` не плодятся. Никогда не бросает.
+    """
+    try:
+        intervals = _marker_intervals(
+            segments, fps, start_frames,
+            min_gap_s=min_span_s, max_markers=len(segments) or 1,
+            media_s_fn=media_s_fn,
+        )
+        if not intervals:
+            return segments
+
+        def tc_of(seconds: float) -> str:
+            if tc_fn is not None:
+                return tc_fn(seconds)
+            return offset_tc(start_frames, seconds, fps)
+
+        extra: dict[int, list[dict]] = {}
+        total_new = 0
+        for idx, start_s, end_s in intervals:
+            cuts = _detect_scene_cuts(video_path, start_s, end_s - start_s, threshold)
+            kept: list[float] = []
+            prev = start_s
+            for cut in sorted(cuts):
+                if cut - prev >= min_sub_s and end_s - cut >= min_sub_s:
+                    kept.append(cut)
+                    prev = cut
+            if kept:
+                base = segments[idx]
+                extra[idx] = [
+                    {**base, "timecode": tc_of(cut)} for cut in kept
+                ]
+                total_new += len(kept)
+        if not extra:
+            return segments
+
+        out: list[dict] = []
+        for i, seg in enumerate(segments):
+            out.append(seg)
+            out.extend(extra.get(i, []))
+        logger.info("[Сцены ТМ] длинных интервалов: %d, добавлено маркеров по сменам плана: %d",
+                    len(intervals), total_new)
+        return out
+    except Exception as e:
+        logger.warning("[Сцены ТМ] сбой разрезания по сценам: %s — маркеры без изменений", e)
+        return segments
 
 
 def _frame_seconds(intervals: list[tuple[int, float, float]]) -> dict[int, list[float]]:

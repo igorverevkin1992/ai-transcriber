@@ -165,9 +165,12 @@ GLOSSARY_REPLACEMENTS = os.getenv("GLOSSARY_REPLACEMENTS", "").strip()
 # исключаем из легенды (см. docx_export.is_legend_excluded_name).
 INTERVIEWER_AUTODETECT = os.getenv("INTERVIEWER_AUTODETECT", "true").lower() in ("1", "true", "yes")
 INTERVIEWER_LABEL = os.getenv("INTERVIEWER_LABEL", "АЗК")
-# В интервью «один на один» (2 спикера) однозначно определить интервьюера нельзя.
-# По умолчанию не помечаем, чтобы не ошибиться.
-INTERVIEWER_LABEL_SINGLE_GUEST = os.getenv("INTERVIEWER_LABEL_SINGLE_GUEST", "false").lower() in ("1", "true", "yes")
+# В интервью «один на один» (2 спикера) чередование ролей не различает, поэтому
+# интервьюер помечается только когда сходятся ДВА независимых сигнала: он
+# заметно чаще задаёт вопросы И говорит меньше гостя (см. detect_interviewer).
+# Дефолт true с ф4: без пометки имя из файла уходило ведущей, а гость становился
+# «Спикер 2». При противоречии сигналов пометки нет. Откат: env=false.
+INTERVIEWER_LABEL_SINGLE_GUEST = os.getenv("INTERVIEWER_LABEL_SINGLE_GUEST", "true").lower() in ("1", "true", "yes")
 INTERVIEWER_MIN_DISTINCT_GUESTS = int(os.getenv("INTERVIEWER_MIN_DISTINCT_GUESTS", "2"))
 INTERVIEWER_MAJORITY_RATIO = float(os.getenv("INTERVIEWER_MAJORITY_RATIO", "0.5"))
 
@@ -244,6 +247,14 @@ TECH_MOMENT_VISION = os.getenv("TECH_MOMENT_VISION", "false").lower() in ("1", "
 TECH_VISION_MAX_MARKERS = int(os.getenv("TECH_VISION_MAX_MARKERS", "30") or "30")
 # Маркеры короче этого интервала (сек) не описываются — кадр малоинформативен.
 TECH_VISION_MIN_GAP_SECONDS = float(os.getenv("TECH_VISION_MIN_GAP_SECONDS", "3") or "3")
+# Разрезать длинные интервалы техмоментов по сменам плана в видеоряде (ffmpeg
+# scene detection): эталоны ставят маркер на каждый дубль, а аудио границ дублей
+# не слышит. Работает только при TECH_MOMENT_VISION=true (без описаний
+# одинаковые маркеры подряд бессмысленны). THRESHOLD — чувствительность смены
+# плана (0-1); MIN_SPAN — резать только интервалы длиннее этого (сек).
+TECH_MARKER_SCENE_SPLIT = os.getenv("TECH_MARKER_SCENE_SPLIT", "true").lower() in ("1", "true", "yes")
+TECH_SCENE_THRESHOLD = float(os.getenv("TECH_SCENE_THRESHOLD", "0.30") or "0.30")
+TECH_SCENE_MIN_SPAN = float(os.getenv("TECH_SCENE_MIN_SPAN", "25") or "25")
 
 # --- OCR выжженного в кадр таймкода ---
 # Когда стартовый ТК не задан ни в имени файла, ни в метаданных контейнера —

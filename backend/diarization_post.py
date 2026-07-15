@@ -128,12 +128,19 @@ def detect_interviewer(
     min_distinct_guests: int = 2,
     majority_ratio: float = 0.5,
     label_single_guest: bool = False,
+    question_shares: dict[str, float] | None = None,
 ) -> str | None:
     """Определить интервьюера (АЗК) по чередованию реплик.
 
     Эвристика: интервьюер чередуется с РАЗНЫМИ гостями, а гость — почти только с
     интервьюером. Кандидат = спикер с наибольшим числом различных соседей в
     последовательности реплик.
+
+    Для интервью 1-на-1 (ровно 2 спикера) чередование симметрично и не различает
+    роли — там решают два НЕЗАВИСИМЫХ сигнала (``question_shares`` — доля
+    событий спикера с «?»): интервьюер задаёт вопросы И говорит меньше гостя.
+    Оба должны сойтись, иначе None (ф4: имя из файла уходило ведущей, а гость
+    становился «Спикер 2»).
 
     Возвращает speaker_id интервьюера или ``None``, если уверенности нет (тогда
     вызывающий код откатывается к обычной нумерации/именам).
@@ -153,13 +160,19 @@ def detect_interviewer(
     # Число реплик у каждого спикера (интервьюер обычно вставляет много коротких).
     turn_count = {s: sequence.count(s) for s in speakers}
 
-    # Особый случай: ровно 2 спикера (интервью один на один) — однозначно
-    # определить интервьюера нельзя.
+    # Особый случай: ровно 2 спикера (интервью один на один). Только когда оба
+    # сигнала согласны: кандидат заметно чаще спрашивает И говорит меньше.
     if total == 2:
-        if not label_single_guest:
+        if not label_single_guest or not question_shares:
             return None
-        # Помечаем АЗК того, кто говорит меньше (интервьюер обычно короче).
-        return min(speakers, key=lambda s: durations.get(s, 0.0))
+        a, b = sorted(speakers, key=lambda s: question_shares.get(s, 0.0), reverse=True)
+        cand_share = question_shares.get(a, 0.0)
+        other_share = question_shares.get(b, 0.0)
+        if (cand_share >= 0.4
+                and cand_share >= 2 * other_share
+                and durations.get(a, 0.0) <= 0.9 * durations.get(b, 0.0)):
+            return a
+        return None
 
     ranked = sorted(speakers, key=lambda s: len(neighbors[s]), reverse=True)
     top = ranked[0]
