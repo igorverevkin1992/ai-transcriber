@@ -430,3 +430,24 @@ class TestLeadingMarkerRestamp:
         events = [{"speaker": "0", "text": "Реплика.", "start_s": 5.0, "end_s": 7.0}]
         out = build_turns(events, 0, 25)
         assert out[0]["timecode"] == "00:00:05:00"
+
+
+class TestLeadGapSeconds:
+    def test_lead_marker_with_soft_threshold(self):
+        from backend.turns import TECH_BREAK_TEXT, build_turns
+        events = [{"speaker": "0", "text": "Первая реплика.", "start_s": 20.0, "end_s": 22.0}]
+        out = build_turns(events, 0, 25, tech_break_gap_seconds=30.0, lead_gap_seconds=15.0)
+        assert out[0]["text"] == TECH_BREAK_TEXT
+        assert out[0]["timecode"] == "00:00:00:00"
+
+    def test_no_lead_marker_below_soft_threshold(self):
+        from backend.turns import TECH_BREAK_TEXT, build_turns
+        events = [{"speaker": "0", "text": "Первая реплика.", "start_s": 10.0, "end_s": 12.0}]
+        out = build_turns(events, 0, 25, tech_break_gap_seconds=30.0, lead_gap_seconds=15.0)
+        assert out[0]["text"] != TECH_BREAK_TEXT
+
+    def test_default_keeps_gap_threshold(self):
+        from backend.turns import TECH_BREAK_TEXT, build_turns
+        events = [{"speaker": "0", "text": "Первая реплика.", "start_s": 20.0, "end_s": 22.0}]
+        out = build_turns(events, 0, 25, tech_break_gap_seconds=30.0)
+        assert out[0]["text"] != TECH_BREAK_TEXT  # 20 < 30, lead не задан

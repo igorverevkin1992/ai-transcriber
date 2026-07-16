@@ -143,6 +143,12 @@ TECH_BREAK_GAP_SECONDS = float(os.getenv("TECH_BREAK_GAP_SECONDS", "30"))
 TECH_BREAK_DOT = os.getenv("TECH_BREAK_DOT", "true").lower() in ("1", "true", "yes")
 
 # --- Whisper tuning ---
+# Порог ЛИДИРУЮЩЕГО маркера техмоментов: маркер в начале документа, если первая
+# реплика начинается ≥ этого числа секунд от старта записи. Меньше общего
+# TECH_BREAK_GAP_SECONDS (30): эталоны отмечают и короткий стартовый футаж
+# (ф4: вход в комнату, 25 c). Откат к прежнему поведению: env=30.
+TECH_BREAK_LEAD_SECONDS = float(os.getenv("TECH_BREAK_LEAD_SECONDS", "15") or "15")
+
 # beam_size: выше = точнее, но медленнее (рекомендуется 5-10)
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 # Подсказка декодеру: контекст и стиль; имена спикеров из имени файла
@@ -253,7 +259,10 @@ TECH_VISION_MIN_GAP_SECONDS = float(os.getenv("TECH_VISION_MIN_GAP_SECONDS", "3"
 # одинаковые маркеры подряд бессмысленны). THRESHOLD — чувствительность смены
 # плана (0-1); MIN_SPAN — резать только интервалы длиннее этого (сек).
 TECH_MARKER_SCENE_SPLIT = os.getenv("TECH_MARKER_SCENE_SPLIT", "true").lower() in ("1", "true", "yes")
-TECH_SCENE_THRESHOLD = float(os.getenv("TECH_SCENE_THRESHOLD", "0.30") or "0.30")
+# 0.22: склейки между дублями в статичной студийной сцене (тот же план, та же
+# комната) дают scene-score мягче межсценовых переходов — 0.30 их пропускал
+# (ф4: блок дублей Happy birthday 6→1). Ложный лишний маркер безвреден.
+TECH_SCENE_THRESHOLD = float(os.getenv("TECH_SCENE_THRESHOLD", "0.22") or "0.22")
 TECH_SCENE_MIN_SPAN = float(os.getenv("TECH_SCENE_MIN_SPAN", "25") or "25")
 
 # --- OCR выжженного в кадр таймкода ---
@@ -284,6 +293,9 @@ LEGEND_TRAILING_DOT = os.getenv("LEGEND_TRAILING_DOT", "true").lower() in ("1", 
 # гостя (при >1 госте). true = текущее поведение; false — единый блок легенды
 # сверху, без повторов (как в бадминтонном эталоне).
 SECTION_DIVIDERS_ENABLED = os.getenv("SECTION_DIVIDERS_ENABLED", "true").lower() in ("1", "true", "yes")
+# Пустой абзац между подряд идущими маркерами техмоментов: эталон визуально
+# делит репетиционную часть на блоки-дубли (ф4).
+TECH_BLOCK_EMPTY_LINE = os.getenv("TECH_BLOCK_EMPTY_LINE", "true").lower() in ("1", "true", "yes")
 # Титульная строка документа (имя файла ПРОПИСНЫМИ) перед легендой. Конвенция
 # f7/f8 (default true); эталон ф13 начинается сразу с легенды → false.
 DOC_TITLE_ENABLED = os.getenv("DOC_TITLE_ENABLED", "true").lower() in ("1", "true", "yes")

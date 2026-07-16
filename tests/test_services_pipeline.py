@@ -946,3 +946,23 @@ class TestHfOfflineHint:
         with caplog.at_level(logging.INFO):
             services._make_diarize_pipeline(FakePipeline, "hf_x", "cpu")
         assert not [r for r in caplog.records if "HF_HUB_OFFLINE" in r.getMessage()]
+
+
+class TestFoldedSpeechCollection:
+    def test_collects_only_folded(self):
+        from backend.turns import TECH_BREAK_TEXT
+        segs = [
+            _seg("0", "Happy birthday to you", 10000, 12000),
+            _seg("0", "Обычная реплика.", 20000, 22000),
+        ]
+        pre = services._texts_by_start_ms(segs)
+        # постобработка свернула первый сегмент в маркер
+        segs[0]["text"] = TECH_BREAK_TEXT
+        folded = services._collect_folded_speech(segs, pre)
+        assert folded == [(10.0, "Happy birthday to you")]
+
+    def test_pause_marker_without_original_skipped(self):
+        from backend.turns import TECH_BREAK_TEXT
+        segs = [_seg("0", TECH_BREAK_TEXT, 5000, 6000)]
+        pre = services._texts_by_start_ms(segs)
+        assert services._collect_folded_speech(segs, pre) == []

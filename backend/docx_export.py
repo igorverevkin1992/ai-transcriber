@@ -16,6 +16,7 @@ from backend.config import (
     LEGEND_DASH,
     LEGEND_TRAILING_DOT,
     SECTION_DIVIDERS_ENABLED,
+    TECH_BLOCK_EMPTY_LINE,
 )
 from backend.turns import UNCLEAR_TEXT
 from backend.utils import strip_extension
@@ -517,11 +518,20 @@ def generate_docx(
     emit_sections = SECTION_DIVIDERS_ENABLED and len(guest_ids) > 1
     seen_section_guests: set[str] = set()
 
+    prev_was_tech_marker = False
     for seg in segments:
         speaker_id = seg["speaker"]
         abbr = abbr_map.get(speaker_id, "")
         display_name = abbr or final_map.get(speaker_id, f"Спикер {speaker_id}")
         text = seg["text"]
+        is_tech_marker = bool(PARENTHETICAL_RE.fullmatch(text)) and text.startswith("(Технические моменты")
+
+        # Эталон визуально делит репетиционную часть на блоки-дубли: между
+        # подряд идущими маркерами техмоментов — пустой абзац-разделитель.
+        if TECH_BLOCK_EMPTY_LINE and is_tech_marker and prev_was_tech_marker:
+            blank = doc.add_paragraph()
+            _configure_paragraph(blank)
+        prev_was_tech_marker = is_tech_marker
 
         if (emit_sections and speaker_id in guest_ids
                 and speaker_id not in seen_section_guests

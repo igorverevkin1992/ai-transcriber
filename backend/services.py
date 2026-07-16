@@ -39,6 +39,7 @@ from backend.config import (
     SQLITE_DB_PATH,
     STRICT_DIARIZATION,
     TECH_BREAK_GAP_SECONDS,
+    TECH_BREAK_LEAD_SECONDS,
     TECH_MARKER_SCENE_SPLIT,
     TECH_MOMENT_VISION,
     TECH_SCENE_MIN_SPAN,
@@ -1153,6 +1154,40 @@ def _fold_unnamed_speakers_into_tech(
     return new_segments, crew_ids
 
 
+def _texts_by_start_ms(segments: list[dict]) -> dict[int, str]:
+    """Снапшот исходных текстов по start_ms ПЕРЕД постобработкой.
+
+    Ключ — start_ms первого слова (тайминг постобработка не меняет), поэтому
+    снапшот выживает при любых заменах текста внутри сегментов.
+    """
+    out: dict[int, str] = {}
+    for seg in segments:
+        words = seg.get("words") or []
+        if words and "start_ms" in words[0]:
+            out[words[0]["start_ms"]] = str(seg.get("text", "")).strip()
+    return out
+
+
+def _collect_folded_speech(segments: list[dict], pre_texts_by_start: dict[int, str]) -> list[tuple[float, str]]:
+    """Исходные тексты сегментов, свёрнутых постобработкой в техмоменты.
+
+    [(media_seconds, исходный_текст)] — контекст для vision-описаний: модель
+    узнаёт, что в паузе ПЕЛИ или обсуждали дубль, и не выдумывает происходящее
+    по одному кадру (ф4: «фотограф» вместо исполнения Happy birthday).
+    """
+    out: list[tuple[float, str]] = []
+    for seg in segments:
+        if str(seg.get("text", "")).strip() != TECH_BREAK_TEXT:
+            continue
+        words = seg.get("words") or []
+        if not words or "start_ms" not in words[0]:
+            continue
+        orig = pre_texts_by_start.get(words[0]["start_ms"], "")
+        if orig and orig != TECH_BREAK_TEXT:
+            out.append((words[0]["start_ms"] / 1000.0, orig))
+    return out
+
+
 def _merge_close_markers(segments: list[dict], fps: int, max_gap_s: float = 3.0) -> list[dict]:
     """Сливает подряд идущие маркеры техмоментов с разницей ТК ≤ ``max_gap_s``.
 
@@ -1248,7 +1283,8 @@ def _build_tc_anchor_mapper(project_id: str, video_path, fps: int, start_frames:
 
 
 def _process_recognition_result(project_id: str, segments: list[dict], original_filename: str, video_path,
-                                extra_warnings: list[str] | None = None, passport: dict | None = None):
+                                extra_warnings: list[str] | None = None, passport: dict | None = None,
+                                folded_speech: list[tuple[float, str]] | None = None):
     """Обрабатывает результат распознавания v3 и сохраняет в projects_db."""
     meta = parse_filename_metadata(original_filename)
     # Паспорт съёмки приоритетнее имени файла: достоверные имена героев, их число
@@ -1349,6 +1385,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
                 evts, start_frames, fps,
                 inline_tc_seconds=TURN_INLINE_TC_SECONDS,
                 tech_break_gap_seconds=TECH_BREAK_GAP_SECONDS,
+                lead_gap_seconds=TECH_BREAK_LEAD_SECONDS,
                 tc_fn=tc_fn,
                 total_duration_s=media_duration_s,
             )
@@ -1515,6 +1552,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             media_s_fn=media_fn,
             heroes=meta.get("speakers") or [],
             description=meta.get("description", "") or "",
+            folded_speech=folded_speech,
         )
 
     # Пары «голый + обогащённый» маркеры в 1-2 c друг от друга — шум после
@@ -1583,11 +1621,13 @@ def process_video_task(project_id: str, disk_url: str):
         from backend.postprocess import postprocess_segments
         logger.info("[%s] Постобработка текста...", project_id[:8])
         pp_warnings: list[str] = []
+        pre_texts_by_start = _texts_by_start_ms(segments)
         segments = postprocess_segments(segments, warnings=pp_warnings)
+        folded_speech = _collect_folded_speech(segments, pre_texts_by_start)
 
         # 5. ОБРАБОТКА РЕЗУЛЬТАТА
         _process_recognition_result(project_id, segments, original_filename, local_video_path,
-                                    extra_warnings=pp_warnings)
+                                    extra_warnings=pp_warnings, folded_speech=folded_speech)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
         transcribe_duration.labels(engine="speechkit").observe(time.time() - task_start)
 
@@ -1702,13 +1742,16 @@ def process_uploaded_file_task(
         pp_warnings: list[str] = []
         crew_names = (passport_data or {}).get("crew") or None
         with _stage_timer(project_id, "постобработка"):
+            pre_texts_by_start = _texts_by_start_ms(segments)
             segments = postprocess_segments(
                 segments, warnings=pp_warnings, crew_names=crew_names,
                 description=(passport_data or {}).get("description") or None,
             )
+            folded_speech = _collect_folded_speech(segments, pre_texts_by_start)
 
             _process_recognition_result(project_id, segments, original_filename, local_video_path,
-                                        extra_warnings=pp_warnings, passport=passport_data)
+                                        extra_warnings=pp_warnings, passport=passport_data,
+                                        folded_speech=folded_speech)
         _set_stage(project_id, None, None)
         projects_db.update_status(project_id, ProjectStatusEnum.COMPLETED)
         transcribe_duration.labels(engine=engine).observe(time.time() - task_start)

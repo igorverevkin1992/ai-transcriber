@@ -112,6 +112,7 @@ def build_turns(
     *,
     inline_tc_seconds: float = 60.0,
     tech_break_gap_seconds: float = 30.0,
+    lead_gap_seconds: float | None = None,
     tc_fn=None,
     total_duration_s: float | None = None,
 ) -> list[dict]:
@@ -163,8 +164,11 @@ def build_turns(
         return closed
 
     # Речь начинается заметно позже стартового таймкода файла —
-    # эталоны открываются ремаркой с таймкодом начала записи.
-    if events[0]["start_s"] >= tech_break_gap_seconds:
+    # эталоны открываются ремаркой с таймкодом начала записи. Порог мягче
+    # межрепликового (lead_gap_seconds): эталоны отмечают и короткий стартовый
+    # футаж (ф4: 25 c входа в комнату < 30 c общего гэпа).
+    lead_gap = lead_gap_seconds if lead_gap_seconds is not None else tech_break_gap_seconds
+    if events[0]["start_s"] >= lead_gap:
         out.append({
             "timecode": tc(0.0),
             "speaker": events[0]["speaker"],

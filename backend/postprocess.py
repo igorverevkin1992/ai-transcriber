@@ -759,6 +759,32 @@ def _merge_adjacent_same_speaker(segments: list[dict]) -> list[dict]:
     return out
 
 
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+
+
+def _tail_question_candidates(indexed: list[tuple[int, dict]]) -> set[int]:
+    """Номера событий с «пограничным вопросом» — кандидаты на split_after.
+
+    Событие из ≥2 предложений, чьё ПОСЛЕДНЕЕ предложение заканчивается «?»,
+    а следующее событие — другой спикер. Обе ф4-склейки такие: вопрос АЗК в
+    хвосте ответа гостьи и переспрос гостьи в хвосте вопроса АЗК. Gemini-пасс
+    находил их недетерминированно; пометка делает проверку обязательной.
+    """
+    out: set[int] = set()
+    for n in range(len(indexed) - 1):
+        _, seg = indexed[n]
+        text = seg.get("text", "").strip()
+        if not text.endswith("?"):
+            continue
+        sentences = [s for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+        if len(sentences) < 2:
+            continue
+        _, nxt = indexed[n + 1]
+        if str(nxt.get("speaker")) != str(seg.get("speaker")):
+            out.add(n)
+    return out
+
+
 def correct_speaker_boundaries(
     segments: list[dict],
     *,
@@ -790,11 +816,13 @@ def correct_speaker_boundaries(
         return segments  # один говорящий — переназначать нечего
 
     n_to_idx = {n: idx for n, (idx, _) in enumerate(indexed)}
+    tail_question_ns = _tail_question_candidates(indexed)
     lines = []
     for n, (_, seg) in enumerate(indexed):
         sid = str(seg.get("speaker"))
         label = speaker_labels.get(sid, sid)
-        lines.append(f"{n}\t[{sid}: {label}] {seg['text'].strip()}")
+        mark = "  ⚠ПРОВЕРЬ-ХВОСТ" if n in tail_question_ns else ""
+        lines.append(f"{n}\t[{sid}: {label}] {seg['text'].strip()}{mark}")
     transcript = "\n".join(lines)[:_BOUNDARY_MAX_CHARS]
 
     roles = []
@@ -835,6 +863,14 @@ def correct_speaker_boundaries(
         "вопрос ведущего гостю, который на него отвечает. Наоборот: если вопрос "
         "по теме помечен гостем, а следом идёт его же длинный ответ — вопрос "
         "почти наверняка принадлежит интервьюеру, переназначь на интервьюера.\n"
+        "Фрагменты с пометкой «⚠ПРОВЕРЬ-ХВОСТ» — кандидаты на склейку: их "
+        "последнее предложение — вопрос, а дальше говорит другой. По КАЖДОМУ "
+        "такому фрагменту вынеси явное решение: хвост-вопрос принадлежит тому "
+        "же спикеру (ничего не делать) ИЛИ это чужой голос → split_after перед "
+        "хвостовым вопросом. Подсказка: хвост-вопрос обычно принадлежит тому, "
+        "кто ПРОДОЛЖАЕТ диалог — после ответа гостя это новый вопрос ведущего; "
+        "после вопроса ведущего это переспрос гостя («С поздравлением "
+        "Президента?»). Саму пометку ⚠ в расчёт номеров предложений не включай.\n"
         "Верни СТРОГО JSON-массив исправлений. Если исправлять нечего — верни []. "
         "Никакого текста кроме JSON.\n\n"
         f"Стенограмма:\n{transcript}"

@@ -962,3 +962,46 @@ class TestQuestionReassignGuard:
             interviewer_id="0",
         )
         assert prompts and "НИКОГДА не переназначай" in prompts[0]
+
+
+class TestTailQuestionCandidates:
+    def _idx(self, events):
+        return list(enumerate(events))
+
+    def test_multi_sentence_tail_question_marked(self):
+        import backend.postprocess as pp
+        events = [
+            {"speaker": "1", "text": "Я ответила спасибо, мы расстались. Когда же ещё поздравят при жизни?"},
+            {"speaker": "0", "text": "Расскажите про образ."},
+        ]
+        assert pp._tail_question_candidates(self._idx(events)) == {0}
+
+    def test_single_sentence_question_not_marked(self):
+        import backend.postprocess as pp
+        events = [
+            {"speaker": "0", "text": "Автографы люди не берут?"},
+            {"speaker": "1", "text": "Берут иногда."},
+        ]
+        assert pp._tail_question_candidates(self._idx(events)) == set()
+
+    def test_same_speaker_next_not_marked(self):
+        import backend.postprocess as pp
+        events = [
+            {"speaker": "1", "text": "Первая мысль. Вторая мысль под вопросом?"},
+            {"speaker": "1", "text": "Продолжение того же голоса."},
+        ]
+        assert pp._tail_question_candidates(self._idx(events)) == set()
+
+    def test_mark_reaches_prompt(self, monkeypatch):
+        import backend.postprocess as pp
+        prompts = []
+        monkeypatch.setattr(pp, "_gemini_call", lambda p, **kw: prompts.append(p) or "[]")
+        pp.correct_speaker_boundaries(
+            [
+                {"speaker": "1", "text": "Длинный ответ гостя. А это чей вопрос в хвосте?"},
+                {"speaker": "0", "text": "Следующий вопрос ведущего."},
+            ],
+            speaker_labels={"0": "АЗК", "1": "Гость"}, interviewer_id="0",
+        )
+        assert prompts and "⚠ПРОВЕРЬ-ХВОСТ" in prompts[0]
+        assert "По КАЖДОМУ" in prompts[0]

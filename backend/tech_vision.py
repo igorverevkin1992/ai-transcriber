@@ -244,6 +244,7 @@ def gemini_describe_frames(
     heroes: list[str] | None = None,
     description: str | None = None,
     speech_context: dict[int, tuple[str, str]] | None = None,
+    inside_speech: dict[int, str] | None = None,
 ) -> dict[int, str]:
     """Описать кадры маркеров через Gemini Vision.
 
@@ -251,10 +252,14 @@ def gemini_describe_frames(
     {id: описание}; сбой любого батча — просто пропуск его маркеров.
     ``speech_context`` — {id: (текст до, текст после)}: обрывки реплик вокруг
     паузы, чтобы модель могла отразить и аудио-контекст («герои говорят на
-    итальянском»), которого на кадрах не видно.
+    итальянском»), которого на кадрах не видно. ``inside_speech`` — {id: что
+    ЗВУЧАЛО внутри паузы (исходные тексты свёрнутых реплик)}: без него модель
+    по одному кадру выдумывала происходящее (ф4: «фотограф» вместо исполнения
+    Happy birthday).
     """
     results: dict[int, str] = {}
     speech_context = speech_context or {}
+    inside_speech = inside_speech or {}
     heroes_line = ""
     if heroes:
         heroes_line = (f"Известные участники съёмки: {', '.join(heroes)}. "
@@ -266,6 +271,9 @@ def gemini_describe_frames(
         contents: list = []
         for marker_id, images in chunk:
             contents.append(f"Кадры технической паузы №{marker_id}:")
+            inside = inside_speech.get(marker_id, "")
+            if inside:
+                contents.append(f"В паузе №{marker_id} звучало: «{inside}»")
             before, after = speech_context.get(marker_id, ("", ""))
             if before or after:
                 contents.append(
@@ -280,7 +288,11 @@ def gemini_describe_frames(
             "3–10 слов в стиле монтажного листа. Предпочитай форму «Съемка …»: "
             "«Съемка нарезки помидоров двумя поварами», «Съемка подготовки "
             "рабочей поверхности»; когда «Съемка» не подходит — отглагольное "
-            "существительное («Исполнение песни у микрофона»). Если из речи "
+            "существительное («Исполнение песни у микрофона»). Опирайся на то, "
+            "что ЗВУЧАЛО в паузе: если звучал текст песни — это исполнение "
+            "песни («Исполнение песни Happy birthday у микрофона»), если "
+            "обсуждали дубль — репетиция. НЕ выдумывай людей и действия, "
+            "которых не видно в кадре и не слышно в звучавшем. Если из речи "
             "вокруг паузы очевидно, что участники говорят на иностранном языке "
             "— отрази это («Герои говорят между собой на итальянском»). "
             'Верни СТРОГО JSON-объект вида {"<номер>": "описание"}. '
@@ -338,6 +350,7 @@ def annotate_tech_markers(
     heroes: list[str] | None = None,
     description: str | None = None,
     media_s_fn=None,
+    folded_speech: list[tuple[float, str]] | None = None,
 ) -> list[dict]:
     """Обогатить маркеры техмоментов описаниями кадров. Никогда не бросает."""
     tmp_files: list[str] = []
@@ -374,9 +387,20 @@ def annotate_tech_markers(
 
         if not images_by_marker:
             return segments
+        # «Что звучало в паузе»: свёрнутые исходные реплики интервала маркера.
+        interval_by_idx = {idx: (s, e) for idx, s, e in intervals}
+        inside_speech: dict[int, str] = {}
+        for idx in images_by_marker:
+            span = interval_by_idx.get(idx)
+            if span is None:
+                continue
+            texts = [t for sec, t in (folded_speech or []) if span[0] <= sec < span[1]]
+            if texts:
+                inside_speech[idx] = " ".join(texts)[:200]
         descriptions = gemini_describe_frames(
             sorted(images_by_marker.items()), heroes=heroes, description=description,
             speech_context={idx: _speech_context(segments, idx) for idx in images_by_marker},
+            inside_speech=inside_speech,
         )
         logger.info("[Vision ТМ] описано %d из %d маркеров (интервалов ≥%.0f c: %d)",
                     len(descriptions), total_markers, TECH_VISION_MIN_GAP_SECONDS,

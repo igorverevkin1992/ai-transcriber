@@ -212,3 +212,42 @@ class TestPromptPolish:
         before, after = tv._speech_context(segs, 2)
         assert before == "Реплика."
         assert after == "Дальше."
+
+
+class TestInsideSpeechContext:
+    def test_folded_texts_reach_prompt(self, monkeypatch, tmp_path):
+        png = tmp_path / "frame.png"
+        png.write_bytes(b"fakepng")
+        segs = [
+            _seg("00:00:00:00", TM),
+            _seg("00:01:00:00", "Реплика после паузы."),
+        ]
+        batches = []
+
+        def fake_generate(contents):
+            batches.append(contents)
+            return '{"0": "исполнение песни"}'
+
+        monkeypatch.setattr(
+            "backend.timecode_ocr._extract_frames",
+            lambda path, idxs, region: [(idxs[0], str(png))],
+        )
+        monkeypatch.setattr(tv, "_encode_jpeg", lambda p: (b"jpg", "image/jpeg"))
+        monkeypatch.setattr(tv, "_vision_generate", fake_generate)
+        monkeypatch.setattr(tv, "_image_part", lambda data, mime: data)
+        out = tv.annotate_tech_markers(
+            segs, "video.wmv", 25, 0,
+            folded_speech=[(10.0, "Happy birthday to you"), (30.0, "Ещё раз с поцелуем?")],
+        )
+        joined = " ".join(s for s in batches[0] if isinstance(s, str))
+        assert "Happy birthday to you" in joined and "Ещё раз с поцелуем?" in joined
+        assert "звучало" in joined
+        assert out[0]["text"] == "(Технические моменты. Исполнение песни)"
+
+    def test_no_folded_speech_no_context_line(self, monkeypatch):
+        batches = []
+        monkeypatch.setattr(tv, "_vision_generate", lambda c: batches.append(c) or "{}")
+        monkeypatch.setattr(tv, "_image_part", lambda data, mime: data)
+        gemini_describe_frames([(0, [(b"x", "image/jpeg")])])
+        joined = " ".join(s for s in batches[0] if isinstance(s, str))
+        assert "звучало:" not in joined
