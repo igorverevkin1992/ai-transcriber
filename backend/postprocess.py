@@ -937,37 +937,125 @@ def correct_speaker_boundaries(
             out[idx]["speaker"] = new_sid
             reassigned += 1
 
-    split_count = 0
-    if splits:
-        rebuilt: list[dict] = []
-        for i, seg in enumerate(out):
-            if i in splits:
-                k, tail_sid = splits[i]
-                sentences = _split_sentences(seg.get("text", ""))
-                if 1 <= k < len(sentences):
-                    head = " ".join(sentences[:k]).strip()
-                    tail = " ".join(sentences[k:]).strip()
-                    if head and tail:
-                        seg_head = {**seg, "text": head}
-                        seg_tail = {**seg, "text": tail, "speaker": tail_sid}
-                        # События несут start_s/end_s — точку разреза
-                        # интерполируем по доле длины текста.
-                        if "start_s" in seg and "end_s" in seg:
-                            frac = len(head) / max(1, len(seg["text"]))
-                            cut = seg["start_s"] + (seg["end_s"] - seg["start_s"]) * frac
-                            seg_head["end_s"] = cut
-                            seg_tail["start_s"] = cut
-                        rebuilt.extend([seg_head, seg_tail])
-                        split_count += 1
-                        continue
-            rebuilt.append(seg)
-        out = rebuilt
+    out, split_count = _apply_event_splits(out, splits)
+
+    # Прицельный до-пасс по хвост-вопросам: общий пасс находит их
+    # недетерминированно (ф4: «Когда же ещё…» разрезался через раз даже с
+    # ⚠-пометкой). Маленький вызов только по кандидатам стабильнее.
+    out, extra_splits = _recheck_tail_questions(out, speaker_labels)
+    split_count += extra_splits
 
     logger.info("Gemini-правка границ: переназначено реплик: %d, разрезано склеек: %d",
                 reassigned, split_count)
     if not reassigned and not split_count:
         return segments
     return _merge_adjacent_same_speaker(out) if merge_adjacent else out
+
+
+def _apply_event_splits(events: list[dict], splits: dict[int, tuple[int, str]]) -> tuple[list[dict], int]:
+    """Разрезает события по {индекс → (split_after K, tail_speaker)}.
+
+    Точка разреза по времени интерполируется долей длины текста. Невалидные
+    K пропускаются. Возвращает (новый список, число разрезов).
+    """
+    if not splits:
+        return events, 0
+    rebuilt: list[dict] = []
+    split_count = 0
+    for i, seg in enumerate(events):
+        if i in splits:
+            k, tail_sid = splits[i]
+            sentences = _split_sentences(seg.get("text", ""))
+            if 1 <= k < len(sentences):
+                head = " ".join(sentences[:k]).strip()
+                tail = " ".join(sentences[k:]).strip()
+                if head and tail:
+                    seg_head = {**seg, "text": head}
+                    seg_tail = {**seg, "text": tail, "speaker": tail_sid}
+                    if "start_s" in seg and "end_s" in seg:
+                        frac = len(head) / max(1, len(seg["text"]))
+                        cut = seg["start_s"] + (seg["end_s"] - seg["start_s"]) * frac
+                        seg_head["end_s"] = cut
+                        seg_tail["start_s"] = cut
+                    rebuilt.extend([seg_head, seg_tail])
+                    split_count += 1
+                    continue
+        rebuilt.append(seg)
+    return rebuilt, split_count
+
+
+def _recheck_tail_questions(events: list[dict], speaker_labels: dict[str, str]) -> tuple[list[dict], int]:
+    """Отдельный маленький Gemini-вызов по оставшимся хвост-вопросам.
+
+    Для каждого кандидата (реплика из ≥2 предложений с «?»-хвостом, следом
+    другой спикер) спрашивается ровно одно: хвост произнёс тот же голос (same)
+    или следующий говорящий (next). Направление фиксировано — хвост может уйти
+    только СЛЕДУЮЩЕМУ спикеру, что исключает произвольные переназначения.
+    Мягкая деградация: любой сбой → события без изменений.
+    """
+    indexed = [(i, seg) for i, seg in enumerate(events) if not _is_marker_text(seg.get("text", ""))]
+    cand_ns = sorted(_tail_question_candidates(indexed))
+    if not cand_ns:
+        return events, 0
+
+    blocks = []
+    for n in cand_ns:
+        _, seg = indexed[n]
+        _, nxt = indexed[n + 1]
+        sid = str(seg.get("speaker"))
+        nsid = str(nxt.get("speaker"))
+        sentences = _split_sentences(seg.get("text", ""))
+        head_tail = " ".join(sentences[:-1])[-120:]
+        blocks.append(
+            f'Кандидат {n}: [{speaker_labels.get(sid, sid)}] «…{head_tail}» '
+            f'+ хвост-вопрос «{sentences[-1]}»; следом говорит '
+            f'[{speaker_labels.get(nsid, nsid)}]: «{str(nxt.get("text", ""))[:120]}»'
+        )
+    prompt = (
+        "Телеинтервью. В каждом кандидате ниже реплика заканчивается ВОПРОСОМ, "
+        "а следом говорит другой человек. Диаризация могла приклеить чужой "
+        "вопрос к хвосту реплики. Для КАЖДОГО кандидата реши: хвост-вопрос "
+        "произнёс ТОТ ЖЕ голос (same) или СЛЕДУЮЩИЙ говорящий (next)?\n"
+        "Подсказки: новый вопрос/шутка ведущего после длинного ответа гостя → "
+        "next; переспрос-уточнение гостя после вопроса ведущего → next; "
+        "риторический вопрос как естественное завершение собственной мысли "
+        "(«…я могу её понять как человека, понимаете?») → same.\n"
+        'Верни СТРОГО JSON-массив [{"id": N, "tail": "same"|"next"}]. '
+        "Никакого текста кроме JSON.\n\n" + "\n".join(blocks)
+    )
+    try:
+        result = _gemini_call(prompt, model=GEMINI_MODEL_SMART)
+    except GeminiPolishError:
+        return events, 0
+    if not result:
+        return events, 0
+    match = re.search(r"\[.*\]", result, re.DOTALL)
+    if not match:
+        return events, 0
+    try:
+        data = json.loads(match.group(0))
+    except (ValueError, TypeError):
+        return events, 0
+    if not isinstance(data, list):
+        return events, 0
+
+    cand_set = set(cand_ns)
+    splits: dict[int, tuple[int, str]] = {}
+    for item in data:
+        if not isinstance(item, dict) or item.get("tail") != "next":
+            continue
+        n = item.get("id")
+        if not isinstance(n, int) or n not in cand_set:
+            continue
+        idx, seg = indexed[n]
+        _, nxt = indexed[n + 1]
+        sentences = _split_sentences(seg.get("text", ""))
+        if len(sentences) >= 2:
+            splits[idx] = (len(sentences) - 1, str(nxt.get("speaker")))
+    out, n_split = _apply_event_splits(events, splits)
+    if n_split:
+        logger.info("Хвост-вопросы: прицельный до-пасс разрезал склеек: %d", n_split)
+    return out, n_split
 
 
 def postprocess_segments(

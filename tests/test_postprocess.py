@@ -1005,3 +1005,63 @@ class TestTailQuestionCandidates:
         )
         assert prompts and "⚠ПРОВЕРЬ-ХВОСТ" in prompts[0]
         assert "По КАЖДОМУ" in prompts[0]
+
+
+class TestTailQuestionRecheck:
+    EVENTS = [
+        {"speaker": "1", "text": "Я ответила спасибо, мы расстались. Когда же ещё с таким праздником поздравят при жизни?",
+         "start_s": 0.0, "end_s": 10.0},
+        {"speaker": "0", "text": "Расскажите, вы разделяете это ощущение?", "start_s": 11.0, "end_s": 13.0},
+    ]
+
+    def test_next_verdict_splits_tail_to_next_speaker(self, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "_gemini_call",
+                            lambda p, **kw: '[{"id": 0, "tail": "next"}]')
+        out, n = pp._recheck_tail_questions([dict(e) for e in self.EVENTS], {"0": "АЗК", "1": "КМ"})
+        assert n == 1
+        texts = [(s["speaker"], s["text"]) for s in out]
+        assert ("1", "Я ответила спасибо, мы расстались.") in texts
+        assert ("0", "Когда же ещё с таким праздником поздравят при жизни?") in texts
+
+    def test_same_verdict_keeps(self, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "_gemini_call",
+                            lambda p, **kw: '[{"id": 0, "tail": "same"}]')
+        events = [dict(e) for e in self.EVENTS]
+        out, n = pp._recheck_tail_questions(events, {})
+        assert n == 0 and out == events
+
+    def test_no_candidates_no_call(self, monkeypatch):
+        import backend.postprocess as pp
+        def boom(p, **kw):
+            raise AssertionError("не должен вызываться")
+        monkeypatch.setattr(pp, "_gemini_call", boom)
+        events = [{"speaker": "0", "text": "Просто реплика.", "start_s": 0, "end_s": 1}]
+        out, n = pp._recheck_tail_questions(events, {})
+        assert n == 0
+
+    def test_gemini_failure_soft(self, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "_gemini_call", lambda p, **kw: None)
+        events = [dict(e) for e in self.EVENTS]
+        out, n = pp._recheck_tail_questions(events, {})
+        assert n == 0 and out == events
+
+    def test_recheck_result_survives_when_main_pass_empty(self, monkeypatch):
+        # Главный пасс вернул [], но до-пасс разрезал — результат не должен
+        # откатиться к исходному списку.
+        import backend.postprocess as pp
+        calls = {"n": 0}
+
+        def fake_call(p, **kw):
+            calls["n"] += 1
+            return "[]" if calls["n"] == 1 else '[{"id": 0, "tail": "next"}]'
+
+        monkeypatch.setattr(pp, "_gemini_call", fake_call)
+        out = pp.correct_speaker_boundaries(
+            [dict(e) for e in self.EVENTS],
+            speaker_labels={"0": "АЗК", "1": "КМ"}, interviewer_id="0",
+            merge_adjacent=False,
+        )
+        assert any(s["speaker"] == "0" and s["text"].startswith("Когда же ещё") for s in out)
