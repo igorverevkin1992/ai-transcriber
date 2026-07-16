@@ -171,6 +171,10 @@ GLOSSARY_REPLACEMENTS = os.getenv("GLOSSARY_REPLACEMENTS", "").strip()
 # исключаем из легенды (см. docx_export.is_legend_excluded_name).
 INTERVIEWER_AUTODETECT = os.getenv("INTERVIEWER_AUTODETECT", "true").lower() in ("1", "true", "yes")
 INTERVIEWER_LABEL = os.getenv("INTERVIEWER_LABEL", "АЗК")
+# Именовать интервьюера по прямому обращению из диалога («Яна, …» → «Яна»
+# вместо АЗК): ф14-эталон именует ведущую в кадре по имени; АЗК остаётся для
+# безымянных закадровых (ф4: имя ведущей в аудио не звучит — там АЗК).
+INTERVIEWER_NAME_FROM_DIALOGUE = os.getenv("INTERVIEWER_NAME_FROM_DIALOGUE", "true").lower() in ("1", "true", "yes")
 # В интервью «один на один» (2 спикера) чередование ролей не различает, поэтому
 # интервьюер помечается только когда сходятся ДВА независимых сигнала: он
 # заметно чаще задаёт вопросы И говорит меньше гостя (см. detect_interviewer).
@@ -289,6 +293,9 @@ LEGEND_DASH = os.getenv("LEGEND_DASH", "–")
 # Точка в конце строки легенды/разделителя: «Имя – ОА.» (true, как f7/f8) или
 # «Имя — ОА» без точки (false).
 LEGEND_TRAILING_DOT = os.getenv("LEGEND_TRAILING_DOT", "true").lower() in ("1", "true", "yes")
+# Легенда «списком» (ф14): строки завершаются запятой, последняя — точкой
+# («БАТЫРШИНА ЯНА – БЯ,» / «КАНАЕВА СВЕТЛАНА – КС.»). false — прежний стиль.
+LEGEND_LIST_STYLE = os.getenv("LEGEND_LIST_STYLE", "false").lower() in ("1", "true", "yes")
 # Вставлять ли внутренние разделители-легенды перед первой репликой каждого
 # гостя (при >1 госте). true = текущее поведение; false — единый блок легенды
 # сверху, без повторов (как в бадминтонном эталоне).

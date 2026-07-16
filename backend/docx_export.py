@@ -14,6 +14,7 @@ from backend.config import (
     DOCX_AUTHOR,
     DOCX_TEMPLATE_PATH,
     LEGEND_DASH,
+    LEGEND_LIST_STYLE,
     LEGEND_TRAILING_DOT,
     SECTION_DIVIDERS_ENABLED,
     TECH_BLOCK_EMPTY_LINE,
@@ -485,15 +486,16 @@ def generate_docx(
     ordered_ids = [sid for sid in appearance_order if sid in speakers_info]
     ordered_ids += [sid for sid in speakers_info if sid not in appearance_order]
 
-    for speaker_id in ordered_ids:
+    legend_ids = [sid for sid in ordered_ids
+                  if sid in speakers_in_segments and sid not in exclude]
+    for pos, speaker_id in enumerate(legend_ids):
         info = speakers_info[speaker_id]
-        if speaker_id not in speakers_in_segments:
-            continue
-        if speaker_id in exclude:
-            continue
         name = final_map.get(speaker_id, info.get("suggested_name", f"Спикер {speaker_id}"))
         abbr = abbr_map.get(speaker_id, "")
         legend_text = _legend_line(name, abbr)
+        if LEGEND_LIST_STYLE:
+            # Легенда списком (ф14): запятая после строки, точка после последней.
+            legend_text = legend_text.rstrip(".,") + ("." if pos == len(legend_ids) - 1 else ",")
         legend_para = doc.add_paragraph()
         _configure_paragraph(legend_para, caps=True)
         _add_run(legend_para, legend_text, caps=True)

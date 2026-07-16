@@ -19,6 +19,40 @@ _VOCATIVE_RE = re.compile(
 )
 _SENTENCE_END = ".?!…"
 
+# Одиночное имя-обращение («Светлана, …», «…, Ян, …»). Капитализированных
+# НЕ-имён в этой позиции много — стоп-лист вводных/местоимений/междометий.
+_SINGLE_NAME_RE = re.compile(r"(?<![А-ЯЁа-яё-])([А-ЯЁ][а-яё]+)(?![а-яё-])")
+_NAME_STOPWORDS = {
+    "господи", "боже", "ой", "ну", "вот", "ладно", "хорошо", "спасибо",
+    "слушай", "слушайте", "знаете", "знаешь", "понимаете", "понимаешь",
+    "скажите", "скажи", "смотрите", "смотри", "простите", "извините",
+    "здравствуйте", "привет", "давай", "давайте", "подожди", "подождите",
+    "он", "она", "оно", "они", "мы", "вы", "ты", "я", "это", "тут", "там",
+    "мама", "папа", "мам", "пап", "сынок", "дочка", "девочки", "ребята",
+    "друзья", "коллеги", "секунду", "минутку", "стоп", "всё", "все", "да",
+    "нет", "конечно", "наверное", "например", "кстати", "правда", "честно",
+}
+
+
+# Слово сразу после «Имя, …» — маркер АППОЗИТИВА (пояснения), а не обращения:
+# «Лена Николаевна, дочка Веры Ефремовны, вышла…» (ф14). Родство/роли.
+_APPOSITIVE_WORDS = {
+    "дочка", "дочь", "сын", "сынок", "мама", "мать", "отец", "папа",
+    "жена", "муж", "брат", "сестра", "бабушка", "дедушка", "внучка", "внук",
+    "тренер", "ученица", "ученик", "подруга", "друг", "коллега", "директор",
+    "руководитель", "наставник", "педагог", "врач", "автор", "ведущая",
+    "ведущий", "актриса", "актёр", "певица", "певец", "чемпионка", "чемпион",
+}
+
+
+def _is_appositive(text: str, end_pos: int) -> bool:
+    """Похоже ли «Имя, слово…» на пояснение в 3-м лице, а не на обращение."""
+    tail = text[end_pos:].lstrip()
+    if not tail.startswith(","):
+        return False
+    next_word = tail[1:].strip().split()[:1]
+    return bool(next_word) and next_word[0].strip(".,!?…").lower() in _APPOSITIVE_WORDS
+
 
 def _find_vocatives(text: str) -> list[str]:
     """Прямые обращения «Имя Отчество», выделенные запятой (без дублей, по порядку).
@@ -27,7 +61,7 @@ def _find_vocatives(text: str) -> list[str]:
     или по запятой перед именем и концу предложения после («…, как играл, Олег
     Александрович?»). Это отсекает упоминания третьих лиц в 3-м лице («…а Галина
     Васильевна как опытный тренер нас рассудит»), из-за которых имя уходило не
-    тому спикеру.
+    тому спикеру. Аппозитивы («Имя, дочка …, вышла») отсекаются отдельно.
     """
     seen: list[str] = []
     seen_set: set[str] = set()
@@ -35,13 +69,128 @@ def _find_vocatives(text: str) -> list[str]:
         after = text[m.end():].lstrip()[:1]
         before = text[:m.start()].rstrip()[-1:]
         is_address = after == "," or (before == "," and after in _SENTENCE_END)
-        if not is_address:
+        if not is_address or _is_appositive(text, m.end()):
             continue
         name = f"{m.group(1)} {m.group(2)}"
         if name not in seen_set:
             seen_set.add(name)
             seen.append(name)
     return seen
+
+
+# Глагольные окончания: капитализированное слово в НАЧАЛЕ предложения с
+# запятой после — часто глагол («Сыграем, а…», «Спрошу, пожалуй»), не имя.
+_VERBLIKE_ENDINGS = ("те", "ем", "ём", "ешь", "ишь", "ет", "ит", "ут", "ют", "у", "ю")
+
+
+def _find_single_name_vocatives(text: str) -> list[str]:
+    """Одиночные имена-обращения, выделенные запятой (без дублей, по порядку).
+
+    Правила позиции те же, что у «Имя Отчество»: запятая сразу ПОСЛЕ имени
+    («Светлана, мы сейчас…») или запятая перед именем и конец предложения /
+    запятая после («…я переехала, Ян, уже…»). Стоп-лист отсекает вводные и
+    местоимения; в начале предложения дополнительно отсекаются глагольные
+    формы по окончанию. Короткие усечённые формы («Ян») тоже проходят.
+    """
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for m in _SINGLE_NAME_RE.finditer(text):
+        word = m.group(1)
+        if word.lower() in _NAME_STOPWORDS or len(word) < 2:
+            continue
+        after = text[m.end():].lstrip()[:1]
+        before = text[:m.start()].rstrip()[-1:]
+        sentence_initial = before in ("", *_SENTENCE_END)
+        is_address = (after == "," and (before == "," or sentence_initial)) or \
+                     (before == "," and (after in _SENTENCE_END or after == ","))
+        if not is_address or _is_appositive(text, m.end()):
+            continue
+        if sentence_initial and word.lower().endswith(_VERBLIKE_ENDINGS):
+            continue
+        if word not in seen_set:
+            seen_set.add(word)
+            seen.append(word)
+    return seen
+
+
+def _name_matches(candidate: str, occurrence: str) -> bool:
+    """Совпадение имени с учётом усечённых форм («Ян» ~ «Яна», «Свет» ~ «Света»)."""
+    c = candidate.lower()
+    o = occurrence.lower()
+    if c == o:
+        return True
+    shorter, longer = (c, o) if len(c) <= len(o) else (o, c)
+    return len(shorter) >= 2 and longer.startswith(shorter) and len(longer) - len(shorter) <= 2
+
+
+def is_direct_address(segments: list[dict], name: str, speaker_id: str) -> bool:
+    """Есть ли в диалоге ПРЯМОЕ обращение по имени ``name`` к спикеру ``speaker_id``.
+
+    Обращение = вокатив (запятая-выделение, «Имя Отчество» или одиночное имя)
+    в реплике ДРУГОГО спикера, после которой ``speaker_id`` говорит следующим.
+    Валидирует результат Gemini-вывода имён: имя, встречающееся только в 3-м
+    лице («Лена Николаевна, дочка Веры Ефремовны, вышла…» — ф14), не проходит.
+    """
+    sid = str(speaker_id)
+    first_word = name.split()[0] if name.split() else name
+    for i, seg in enumerate(segments):
+        cur = str(seg.get("speaker"))
+        if cur == sid:
+            continue
+        text = seg.get("text", "")
+        vocatives = _find_vocatives(text) + _find_single_name_vocatives(text)
+        if not any(_name_matches(name, v) or _name_matches(first_word, v.split()[0])
+                   for v in vocatives):
+            continue
+        # Адресат — следующий ОТЛИЧНЫЙ говорящий.
+        for j in range(i + 1, len(segments)):
+            nxt = str(segments[j].get("speaker"))
+            if nxt == cur:
+                continue
+            if nxt == sid:
+                return True
+            break
+    return False
+
+
+def infer_name_for_speaker(segments: list[dict], speaker_id: str) -> str | None:
+    """Детерминированно вывести имя спикера по обращениям к нему в диалоге.
+
+    Самая частая (и самая полная при равенстве) форма вокатива из чужих реплик,
+    после которых ``speaker_id`` отвечает. Используется для именования
+    ИНТЕРВЬЮЕРА (ф14: гостья обращается «Яна, …» — эталон именует ведущую),
+    которого гостевой вывод имён по построению не покрывает.
+    """
+    sid = str(speaker_id)
+    votes: Counter[str] = Counter()
+    for i, seg in enumerate(segments):
+        cur = str(seg.get("speaker"))
+        if cur == sid:
+            continue
+        text = seg.get("text", "")
+        names = _find_vocatives(text) + _find_single_name_vocatives(text)
+        if not names:
+            continue
+        for j in range(i + 1, len(segments)):
+            nxt = str(segments[j].get("speaker"))
+            if nxt == cur:
+                continue
+            if nxt == sid:
+                for n in names:
+                    votes[n] += 1
+            break
+    if not votes:
+        return None
+    # Сливаем усечённые формы в самую длинную («Ян» + «Яна» → «Яна»).
+    merged: Counter[str] = Counter()
+    for name, cnt in votes.items():
+        canon = name
+        for other in votes:
+            if other != name and _name_matches(name, other) and len(other) > len(canon):
+                canon = other
+        merged[canon] += cnt
+    best, _ = max(merged.items(), key=lambda kv: (kv[1], len(kv[0])))
+    return best
 
 
 def infer_speaker_names_by_vocative(
@@ -64,7 +213,10 @@ def infer_speaker_names_by_vocative(
 
     votes: dict[tuple[str, str], int] = {}
     for i, seg in enumerate(segments):
-        names = _find_vocatives(seg.get("text", ""))
+        text = seg.get("text", "")
+        # «Имя Отчество» приоритетнее; одиночные имена («Светлана, …») тоже
+        # засчитываются — ф14-эталон именует спикеров по имени без отчества.
+        names = _find_vocatives(text) or _find_single_name_vocatives(text)
         if not names:
             continue
         cur = str(seg["speaker"])

@@ -414,7 +414,9 @@ def gemini_polish(text: str, context: str | None = None) -> str:
         "4. Названия (фильмы, песни, театры, каналы) бери в кавычки-ёлочки «».\n"
         "5. Знаки препинания расставляй по смыслу. Тире — с пробелами: "
         "«слово – слово». Дефисы внутри слов без пробелов: «что -то» → «что-то».\n"
-        "6. НЕ меняй порядок слов и НЕ переформулируй.\n"
+        "6. НЕ меняй порядок слов и НЕ переформулируй. НИКОГДА не оформляй "
+        "текст как диалог с тире «—» между фразами, даже если кажется, что "
+        "говорят разные люди — разметкой голосов занимается другой этап.\n"
         "7. НЕ меняй первую букву фрагмента: фрагмент может начинаться "
         "с середины предложения.\n"
         "8. Если текст содержит разделитель ---SEGMENT_BREAK---, "
@@ -581,10 +583,11 @@ def detect_technical_segments(
 
 # --- Авто-определение имён гостей через Gemini ---
 
-# Принимаем только имя-отчество (2 слова, второе — патроним): высокая точность
-# под текущий кейс. Прочее (одно слово, фамилия, мусор) отбрасываем.
+# Имя-отчество (2 слова, второе — патроним) ЛИБО одиночное имя (ф14: эталон
+# именует спикеров «Яна»/«Светлана» — в диалоге отчества не звучат). Точность
+# страхует детерминированная валидация прямого обращения (is_direct_address).
 _NAME_PATRONYMIC_RE = re.compile(
-    r"^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]*(?:ович|евич|инична|ична|евна|овна|ьич|ич)$"
+    r"^[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]*(?:ович|евич|инична|ична|евна|овна|ьич|ич))?$"
 )
 # Ограничение размера транскрипта в промпте (символы): большинство интервью
 # умещаются; обрезка идёт с конца.
@@ -627,11 +630,13 @@ def gemini_infer_speaker_names(
         "Это стенограмма телеинтервью на русском языке. Каждая реплика помечена "
         "ID говорящего в квадратных скобках, например [0], [1].\n"
         f"{interviewer_line}"
-        "Определи имя и отчество говорящих ПО ТОМУ, КАК К НИМ ОБРАЩАЮТСЯ по "
-        "имени-отчеству в репликах (именно прямое обращение, а не упоминание "
-        f"третьих лиц). Нужны имена для ID: {', '.join(sorted(guest_set))}.\n"
-        "Верни СТРОГО JSON-объект вида {\"<id>\": \"Имя Отчество\"}. Если для "
-        "говорящего нельзя уверенно определить имя-отчество — поставь null. "
+        "Определи имена говорящих ПО ТОМУ, КАК К НИМ ОБРАЩАЮТСЯ в репликах — "
+        "именно ПРЯМОЕ обращение («Светлана, …», «Олег Александрович, …»), а НЕ "
+        "упоминание третьих лиц («…Лена Николаевна, дочка тренера, вышла…» — "
+        "это НЕ обращение, такое имя не бери). Имя может быть с отчеством или "
+        f"одиночным. Нужны имена для ID: {', '.join(sorted(guest_set))}.\n"
+        "Верни СТРОГО JSON-объект вида {\"<id>\": \"Имя [Отчество]\"}. Если для "
+        "говорящего нет уверенного прямого обращения — поставь null. "
         "Никакого текста кроме JSON.\n\n"
         f"Стенограмма:\n{transcript}"
     )
@@ -846,12 +851,18 @@ def correct_speaker_boundaries(
         "монолог по теме — гость; реплика, продолжающая предложение предыдущего "
         "говорящего, принадлежит ЕМУ. Исправляй ТОЛЬКО когда уверен; сомневаешься "
         "— не трогай.\n"
-        "Два вида исправлений:\n"
+        "Три вида исправлений:\n"
         '1) вся реплика не того спикера: {"id": НОМЕР, "speaker": "<id>"};\n'
         "2) внутри реплики после какого-то предложения говорящий СМЕНИЛСЯ "
         "(склейка двух голосов): {\"id\": НОМЕР, \"split_after\": K, "
         '"tail_speaker": "<id>"} — после K-го предложения (счёт с 1) хвост '
-        "принадлежит tail_speaker. Пример: реплика гостя «…хранить буррату "
+        "принадлежит tail_speaker;\n"
+        "3) внутри реплики ДИАЛОГ — несколько смен голоса (вопрос—ответ—вопрос, "
+        'иногда оформленный тире «—»): {"id": НОМЕР, "cuts": [{"after": K1, '
+        '"speaker": "<id>"}, {"after": K2, "speaker": "<id>"}]} — после K-го '
+        "предложения говорит указанный спикер. Короткие ответы («Нет.», «Да.», "
+        "«После второй.») между вопросами — почти всегда другой голос.\n"
+        "Пример для (2): реплика гостя «…хранить буррату "
         "тёплой. Кстати, вы говорили про моцареллу.» — последнее предложение "
         "начинает НОВУЮ мысль другого голоса → split_after на границе. "
         "Типичная склейка: короткая реакция или риторический вопрос ВЕДУЩЕГО, "
@@ -904,7 +915,7 @@ def correct_speaker_boundaries(
     reassigned = 0
     indexed_texts = [seg["text"].strip() for _, seg in indexed]
     indexed_speakers = [str(seg.get("speaker")) for _, seg in indexed]
-    splits: dict[int, tuple[int, str]] = {}  # idx → (split_after, tail_speaker)
+    splits: dict[int, list[tuple[int, str]]] = {}  # idx → [(after K, speaker), …]
     for item in data:
         if not isinstance(item, dict):
             continue
@@ -912,12 +923,27 @@ def correct_speaker_boundaries(
         if not isinstance(n, int) or n not in n_to_idx:
             continue
         idx = n_to_idx[n]
+        if "cuts" in item:
+            # Диалоговая цепочка: несколько смен голоса внутри одного события.
+            cuts = item.get("cuts")
+            if isinstance(cuts, list):
+                parsed = []
+                for cut in cuts:
+                    if not isinstance(cut, dict):
+                        continue
+                    k = cut.get("after")
+                    sid = str(cut.get("speaker"))
+                    if isinstance(k, int) and k >= 1 and sid in valid_ids:
+                        parsed.append((k, sid))
+                if parsed:
+                    splits.setdefault(idx, []).extend(parsed)
+            continue
         if "split_after" in item:
             k = item.get("split_after")
             tail_sid = str(item.get("tail_speaker"))
             if (isinstance(k, int) and k >= 1 and tail_sid in valid_ids
                     and tail_sid != str(out[idx].get("speaker"))):
-                splits[idx] = (k, tail_sid)
+                splits.setdefault(idx, []).append((k, tail_sid))
             continue
         new_sid = str(item.get("speaker"))
         if new_sid not in valid_ids:
@@ -952,33 +978,50 @@ def correct_speaker_boundaries(
     return _merge_adjacent_same_speaker(out) if merge_adjacent else out
 
 
-def _apply_event_splits(events: list[dict], splits: dict[int, tuple[int, str]]) -> tuple[list[dict], int]:
-    """Разрезает события по {индекс → (split_after K, tail_speaker)}.
+def _apply_event_splits(events: list[dict],
+                        splits: dict[int, list[tuple[int, str]]]) -> tuple[list[dict], int]:
+    """Разрезает события по {индекс → [(after K, speaker), …]} (мульти-разрезы).
 
-    Точка разреза по времени интерполируется долей длины текста. Невалидные
-    K пропускаются. Возвращает (новый список, число разрезов).
+    Несколько точек на одно событие — диалоговая цепочка «вопрос—ответ—вопрос»
+    внутри одного ASR-события (ф14). Точки по времени интерполируются долей
+    длины текста, невалидные K пропускаются. Возвращает (список, число разрезов).
     """
     if not splits:
         return events, 0
     rebuilt: list[dict] = []
     split_count = 0
     for i, seg in enumerate(events):
-        if i in splits:
-            k, tail_sid = splits[i]
+        cuts = splits.get(i)
+        if cuts:
             sentences = _split_sentences(seg.get("text", ""))
-            if 1 <= k < len(sentences):
-                head = " ".join(sentences[:k]).strip()
-                tail = " ".join(sentences[k:]).strip()
-                if head and tail:
-                    seg_head = {**seg, "text": head}
-                    seg_tail = {**seg, "text": tail, "speaker": tail_sid}
+            valid = sorted({k for k, _ in cuts if 1 <= k < len(sentences)})
+            cut_speaker = {k: sid for k, sid in cuts}
+            if valid:
+                bounds = [0, *valid, len(sentences)]
+                total_len = max(1, len(seg.get("text", "")))
+                pieces: list[dict] = []
+                cum_frac = 0.0
+                prev_speaker = seg.get("speaker")
+                ok = True
+                for pi in range(len(bounds) - 1):
+                    part = " ".join(sentences[bounds[pi]:bounds[pi + 1]]).strip()
+                    if not part:
+                        ok = False
+                        break
+                    speaker = prev_speaker if pi == 0 else cut_speaker[bounds[pi]]
+                    piece = {**seg, "text": part, "speaker": speaker}
                     if "start_s" in seg and "end_s" in seg:
-                        frac = len(head) / max(1, len(seg["text"]))
-                        cut = seg["start_s"] + (seg["end_s"] - seg["start_s"]) * frac
-                        seg_head["end_s"] = cut
-                        seg_tail["start_s"] = cut
-                    rebuilt.extend([seg_head, seg_tail])
-                    split_count += 1
+                        span = seg["end_s"] - seg["start_s"]
+                        frac = len(part) / total_len
+                        piece["start_s"] = seg["start_s"] + span * cum_frac
+                        piece["end_s"] = seg["start_s"] + span * min(1.0, cum_frac + frac)
+                        cum_frac += frac
+                    pieces.append(piece)
+                if ok and len(pieces) >= 2:
+                    if "end_s" in seg:
+                        pieces[-1]["end_s"] = seg["end_s"]
+                    rebuilt.extend(pieces)
+                    split_count += len(pieces) - 1
                     continue
         rebuilt.append(seg)
     return rebuilt, split_count
@@ -1040,7 +1083,7 @@ def _recheck_tail_questions(events: list[dict], speaker_labels: dict[str, str]) 
         return events, 0
 
     cand_set = set(cand_ns)
-    splits: dict[int, tuple[int, str]] = {}
+    splits: dict[int, list[tuple[int, str]]] = {}
     for item in data:
         if not isinstance(item, dict) or item.get("tail") != "next":
             continue
@@ -1051,7 +1094,7 @@ def _recheck_tail_questions(events: list[dict], speaker_labels: dict[str, str]) 
         _, nxt = indexed[n + 1]
         sentences = _split_sentences(seg.get("text", ""))
         if len(sentences) >= 2:
-            splits[idx] = (len(sentences) - 1, str(nxt.get("speaker")))
+            splits[idx] = [(len(sentences) - 1, str(nxt.get("speaker")))]
     out, n_split = _apply_event_splits(events, splits)
     if n_split:
         logger.info("Хвост-вопросы: прицельный до-пасс разрезал склеек: %d", n_split)

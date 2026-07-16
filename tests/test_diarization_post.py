@@ -165,3 +165,52 @@ class TestInferSpeakerNamesByVocative:
         ]
         res = infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1", "2"])
         assert res == {"1": "Олег Александрович", "2": "Галина Васильевна"}
+
+
+class TestDirectAddressValidation:
+    SEGS = [
+        {"speaker": "0", "text": "Светлана, мы сейчас находимся в знаковом месте. Как вам было отпускать дочь?"},
+        {"speaker": "1", "text": "Я не могу сказать, что легко. Лена Николаевна, дочка Веры Ефремовны, вышла к ней тогда."},
+        {"speaker": "0", "text": "Понимаю."},
+        {"speaker": "1", "text": "Такой сложный вопрос, Яна, задаёшь."},
+        {"speaker": "0", "text": "Спасибо."},
+    ]
+
+    def test_direct_address_validates(self):
+        from backend.diarization_post import is_direct_address
+        assert is_direct_address(self.SEGS, "Светлана", "1") is True
+
+    def test_third_person_mention_rejected(self):
+        from backend.diarization_post import is_direct_address
+        # «Лена Николаевна, дочка…» — упоминание, за ним говорит "0", не "1";
+        # и даже для "0" это часть повествования, но адресация формально к "0" —
+        # ключевой кейс: имя НЕ должно валидироваться для гостьи "1".
+        assert is_direct_address(self.SEGS, "Лена Николаевна", "1") is False
+
+    def test_interviewer_addressed_by_name(self):
+        from backend.diarization_post import infer_name_for_speaker
+        assert infer_name_for_speaker(self.SEGS, "0") == "Яна"
+
+    def test_truncated_form_merges(self):
+        from backend.diarization_post import infer_name_for_speaker
+        segs = [
+            {"speaker": "1", "text": "Я переехала, Ян, уже после Олимпиады."},
+            {"speaker": "0", "text": "После первой?"},
+            {"speaker": "1", "text": "Такой вопрос, Яна, задаёшь."},
+            {"speaker": "0", "text": "Ну да."},
+        ]
+        assert infer_name_for_speaker(segs, "0") == "Яна"
+
+    def test_stopwords_not_names(self):
+        from backend.diarization_post import _find_single_name_vocatives
+        assert _find_single_name_vocatives("Знаете, даже не думала. Господи, как страшно.") == []
+        assert _find_single_name_vocatives("Светлана, мы начинаем.") == ["Светлана"]
+
+    def test_single_vocative_feeds_fallback_heuristic(self):
+        from backend.diarization_post import infer_speaker_names_by_vocative
+        segs = [
+            {"speaker": "0", "text": "Светлана, расскажите про Омск."},
+            {"speaker": "1", "text": "Мы жили там до переезда."},
+        ]
+        out = infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1"])
+        assert out == {"1": "Светлана"}

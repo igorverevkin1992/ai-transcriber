@@ -25,10 +25,12 @@ class TestGeminiInferSpeakerNames:
         assert res == {"1": "Олег Александрович", "2": "Галина Васильевна"}
 
     def test_rejects_non_patronymic(self, monkeypatch):
-        # «Олег» — одно слово; «Иванов Иван» — второе слово не отчество → отброшены.
+        # «Олег» — одиночное имя, теперь ПРИНИМАЕТСЯ (ф14: «Яна»/«Светлана» без
+        # отчества; точность страхует валидация прямого обращения в services).
+        # «Иванов Иван» — второе слово не отчество → по-прежнему отброшено.
         monkeypatch.setattr(pp, "_gemini_call", lambda prompt, **kw: '{"1": "Олег", "2": "Иванов Иван"}')
         segs = [self._seg("1", "a"), self._seg("2", "b")]
-        assert gemini_infer_speaker_names(segs, interviewer_id=None, guest_ids=["1", "2"]) is None
+        assert gemini_infer_speaker_names(segs, interviewer_id=None, guest_ids=["1", "2"]) == {"1": "Олег"}
 
     def test_only_guest_ids(self, monkeypatch):
         monkeypatch.setattr(
@@ -1065,3 +1067,49 @@ class TestTailQuestionRecheck:
             merge_adjacent=False,
         )
         assert any(s["speaker"] == "0" and s["text"].startswith("Когда же ещё") for s in out)
+
+
+class TestMultiCutSplits:
+    def test_dialog_chain_cut_into_three(self, monkeypatch):
+        import backend.postprocess as pp
+        events = [
+            {"speaker": "0", "text": "Вы переехали после Олимпиады. После первой Олимпиады? После второй. Понятно, наездами жили?",
+             "start_s": 0.0, "end_s": 12.0},
+            {"speaker": "1", "text": "Да, так и жили.", "start_s": 13.0, "end_s": 15.0},
+        ]
+        monkeypatch.setattr(pp, "_gemini_call", lambda p, **kw:
+                            '[{"id": 0, "cuts": [{"after": 2, "speaker": "1"}, {"after": 3, "speaker": "0"}]}]')
+        out = pp.correct_speaker_boundaries(
+            events, speaker_labels={"0": "БЯ", "1": "КС"}, interviewer_id="0",
+            merge_adjacent=False,
+        )
+        texts = [(s["speaker"], s["text"]) for s in out]
+        assert ("0", "Вы переехали после Олимпиады. После первой Олимпиады?") in texts
+        assert ("1", "После второй.") in texts
+        assert ("0", "Понятно, наездами жили?") in texts
+        # тайминги монотонны
+        times = [(s["start_s"], s["end_s"]) for s in out if "start_s" in s]
+        assert all(a[1] <= b[0] + 1e-6 for a, b in zip(times, times[1:]))
+
+    def test_invalid_cut_indexes_skipped(self):
+        import backend.postprocess as pp
+        events = [{"speaker": "0", "text": "Одно предложение.", "start_s": 0.0, "end_s": 1.0}]
+        out, n = pp._apply_event_splits(events, {0: [(5, "1")]})
+        assert n == 0 and out == events
+
+    def test_cuts_protocol_in_prompt(self, monkeypatch):
+        import backend.postprocess as pp
+        prompts = []
+        monkeypatch.setattr(pp, "_gemini_call", lambda p, **kw: prompts.append(p) or "[]")
+        pp.correct_speaker_boundaries(
+            [{"speaker": "0", "text": "Раз."}, {"speaker": "1", "text": "Два."}],
+            speaker_labels={"0": "А", "1": "Б"}, interviewer_id=None,
+        )
+        assert prompts and '"cuts"' in prompts[0]
+
+    def test_no_dash_dialog_rule_in_polish(self, monkeypatch):
+        import backend.postprocess as pp
+        prompts = []
+        monkeypatch.setattr(pp, "_gemini_call", lambda p, **kw: prompts.append(p) or "ок")
+        pp.gemini_polish("текст")
+        assert prompts and "НИКОГДА не оформляй" in prompts[0]

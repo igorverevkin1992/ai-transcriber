@@ -919,3 +919,40 @@ class TestLegendExcludedNames:
         assert not is_legend_excluded_name("Антипенко")
         assert not is_legend_excluded_name("Интервьюер")
         assert not is_legend_excluded_name("Денис")
+
+
+class TestLegendListStyle:
+    def _project(self):
+        return {
+            "original_filename": "интервью_ф14.wmv",
+            "result": {
+                "speakers": {
+                    "0": {"duration_sec": 50.0, "suggested_name": "Батыршина Яна"},
+                    "1": {"duration_sec": 100.0, "suggested_name": "Канаева Светлана"},
+                },
+                "segments": [
+                    {"timecode": "21:24:22:00", "speaker": "0", "text": "Вопрос."},
+                    {"timecode": "21:24:54:00", "speaker": "1", "text": "Ответ."},
+                ],
+            },
+        }
+
+    def test_list_style_comma_and_period(self, tmp_path, monkeypatch):
+        import backend.docx_export as dx
+        monkeypatch.setattr(dx, "LEGEND_LIST_STYLE", True)
+        out = str(tmp_path / "l1.docx")
+        dx.generate_docx(self._project(), {"0": "Батыршина Яна", "1": "Канаева Светлана"},
+                         {"0": "БЯ", "1": "КС"}, out)
+        from docx import Document
+        texts = [p.text for p in Document(out).paragraphs if "–" in p.text]
+        assert texts[0].endswith(",")
+        assert texts[1].endswith(".")
+
+    def test_default_style_unchanged(self, tmp_path):
+        import backend.docx_export as dx
+        out = str(tmp_path / "l2.docx")
+        dx.generate_docx(self._project(), {"0": "Батыршина Яна", "1": "Канаева Светлана"},
+                         {"0": "БЯ", "1": "КС"}, out)
+        from docx import Document
+        texts = [p.text for p in Document(out).paragraphs if "–" in p.text]
+        assert not any(t.endswith(",") for t in texts)

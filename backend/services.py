@@ -25,6 +25,7 @@ from backend.config import (
     INTERVIEWER_LABEL_SINGLE_GUEST,
     INTERVIEWER_MAJORITY_RATIO,
     INTERVIEWER_MIN_DISTINCT_GUESTS,
+    INTERVIEWER_NAME_FROM_DIALOGUE,
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
     NO_SPEECH_PROB_THRESHOLD,
@@ -1403,10 +1404,13 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     raw_segments = _assemble_turns(events)
 
     from backend.diarization_post import (
+        _name_matches,
         build_speaker_sequence,
         detect_interviewer,
         first_appearance_order,
+        infer_name_for_speaker,
         infer_speaker_names_by_vocative,
+        is_direct_address,
     )
 
     detected_speakers = {}
@@ -1445,16 +1449,28 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             project_id[:8], len(file_names), expected_guests,
         )
     guest_names = {voice_id: file_names[i] for i, voice_id in enumerate(guest_order) if i < len(file_names)}
+    filename_named = set(guest_names)
 
-    # Гостям без имени из имени файла определяем имя-отчество по диалогу (как
-    # интервьюер обращается к ним). Имена из имени файла приоритетнее — заполняем
-    # только пустые. Gemini → фолбэк-эвристика. Интервьюер не именуется.
+    # Гостям без имени из имени файла определяем имя по диалогу (как к ним
+    # обращаются). Имена из имени файла/паспорта приоритетнее — заполняем
+    # только пустые. Gemini → фолбэк-эвристика; результат Gemini проходит
+    # детерминированную валидацию ПРЯМОГО обращения (ф14: «Лена Николаевна»
+    # из упоминания в 3-м лице отсекается).
     unnamed_guests = [g for g in guest_order if g not in guest_names]
     if SPEAKER_NAME_AUTODETECT and unnamed_guests:
         from backend.postprocess import gemini_infer_speaker_names
         inferred = gemini_infer_speaker_names(
             raw_segments, interviewer_id=interviewer_id, guest_ids=unnamed_guests
-        )
+        ) or {}
+        validated = {}
+        for vid, name in inferred.items():
+            if is_direct_address(raw_segments, name, vid):
+                validated[vid] = name
+            else:
+                logger.info("[%s] Имя «%s» для спикера %s отклонено: в диалоге нет "
+                            "прямого обращения (упоминание 3-го лица?)",
+                            project_id[:8], name, vid)
+        inferred = validated
         if not inferred:
             inferred = infer_speaker_names_by_vocative(
                 raw_segments, interviewer_id=interviewer_id, guest_ids=unnamed_guests
@@ -1466,6 +1482,42 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             logger.info("[%s] Имена гостей из диалога: %s", project_id[:8],
                         {v: inferred[v] for v in unnamed_guests if v in inferred})
 
+    # Конфликт «имя из ФАЙЛА vs прямое обращение в диалоге»: файл бывает назван
+    # по герою ПЕРЕДАЧИ, а не по спикеру (ф14: «Канаева Евгения» в имени файла,
+    # а гостью в кадре зовут «Светлана»). Паспортные имена авторитетны и не
+    # оспариваются. Совпадение хотя бы одного слова имени — не конфликт.
+    passport_named = bool(passport and passport.get("speakers"))
+    if SPEAKER_NAME_AUTODETECT and not passport_named:
+        for vid in filename_named:
+            file_name = guest_names.get(vid, "")
+            dialogue_name = infer_name_for_speaker(raw_segments, vid)
+            if not dialogue_name or not file_name:
+                continue
+            overlaps = any(
+                _name_matches(dialogue_name.split()[0], word)
+                for word in file_name.split()
+            )
+            if not overlaps:
+                warnings.append(
+                    f"Имя из имени файла «{file_name}» не совпадает с обращением "
+                    f"в диалоге «{dialogue_name}» — использовано имя из диалога. "
+                    "Если это ошибка, задайте имена героев паспортом съёмки."
+                )
+                logger.info("[%s] Имя файла «%s» ↔ обращение «%s»: выбран диалог",
+                            project_id[:8], file_name, dialogue_name)
+                guest_names[vid] = dialogue_name
+
+    # Именование интервьюера из диалога (ф14: гостья обращается «Яна, …» —
+    # эталон именует ведущую по имени, АЗК остаётся для безымянных за кадром).
+    interviewer_display = INTERVIEWER_LABEL
+    if (interviewer_id is not None and INTERVIEWER_NAME_FROM_DIALOGUE
+            and SPEAKER_NAME_AUTODETECT):
+        dialogue_name = infer_name_for_speaker(raw_segments, interviewer_id)
+        if dialogue_name:
+            interviewer_display = dialogue_name
+            logger.info("[%s] Интервьюер именован из диалога: %s",
+                        project_id[:8], dialogue_name)
+
     # Gemini-правка границ на уровне СЫРЫХ ASR-событий (гранулярность ≈
     # предложение): чинит и целиком перепутанные реплики, и — главное —
     # разрезает склейки мульти-спикерных реплик, которые правка на уровне
@@ -1476,7 +1528,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         speaker_labels = {}
         for vid in speaker_durations:
             if vid == interviewer_id:
-                speaker_labels[vid] = INTERVIEWER_LABEL
+                speaker_labels[vid] = interviewer_display
             elif vid in guest_names:
                 speaker_labels[vid] = guest_names[vid]
             else:
@@ -1492,7 +1544,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
 
     for voice_id, dur in speaker_durations.items():
         if voice_id == interviewer_id:
-            suggested = INTERVIEWER_LABEL
+            suggested = interviewer_display
         elif voice_id in guest_names:
             suggested = guest_names[voice_id]
         else:
