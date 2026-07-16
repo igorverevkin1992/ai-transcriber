@@ -556,6 +556,9 @@ def _get_assign_word_speakers():
     return assign_word_speakers
 
 
+_hf_offline_hint_shown = False
+
+
 def _make_diarize_pipeline(cls, hf_token, device):
     """Создать DiarizationPipeline, подобрав имя аргумента для HF-токена и
     закрепив модель диаризации.
@@ -566,6 +569,18 @@ def _make_diarize_pipeline(cls, hf_token, device):
     задаём `DIARIZATION_MODEL` (по умолчанию `3.1`). Определяем имена аргументов
     по сигнатуре, с запасным перебором обоих вариантов токена.
     """
+    global _hf_offline_hint_shown
+    if not os.getenv("HF_HUB_OFFLINE") and not _hf_offline_hint_shown:
+        # За недоступным прокси huggingface_hub на каждой загрузке пайплайна
+        # тратит до ~1.5 мин на freshness-проверки с ретраями (безвредно, но
+        # медленно и шумно). Подсказываем оффлайн-режим один раз за процесс.
+        _hf_offline_hint_shown = True
+        logger.info(
+            "Подсказка: когда модели уже скачаны, HF_HUB_OFFLINE=1 в .env "
+            "убирает сетевые проверки huggingface.co при загрузке пайплайна "
+            "(таймауты/ретраи за прокси) — загрузка станет мгновенной. "
+            "Уберите переменную при смене модели (нужен один онлайн-прогон)."
+        )
     try:
         params = inspect.signature(cls.__init__).parameters
     except (ValueError, TypeError):

@@ -916,3 +916,33 @@ class TestMergeCloseMarkers:
             {"timecode": "06:48:26:00", "speaker": "0", "text": self.TM_RICH},
         ]
         assert len(services._merge_close_markers(segs, 25)) == 3
+
+
+class TestHfOfflineHint:
+    def test_hint_logged_once(self, monkeypatch, caplog):
+        import logging
+
+        class FakePipeline:
+            def __init__(self, model_name=None, token=None, device="cpu"):
+                pass
+
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        monkeypatch.setattr(services, "_hf_offline_hint_shown", False)
+        with caplog.at_level(logging.INFO):
+            services._make_diarize_pipeline(FakePipeline, "hf_x", "cpu")
+            services._make_diarize_pipeline(FakePipeline, "hf_x", "cpu")
+        hints = [r for r in caplog.records if "HF_HUB_OFFLINE" in r.getMessage()]
+        assert len(hints) == 1
+
+    def test_no_hint_when_offline_set(self, monkeypatch, caplog):
+        import logging
+
+        class FakePipeline:
+            def __init__(self, model_name=None, token=None, device="cpu"):
+                pass
+
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+        monkeypatch.setattr(services, "_hf_offline_hint_shown", False)
+        with caplog.at_level(logging.INFO):
+            services._make_diarize_pipeline(FakePipeline, "hf_x", "cpu")
+        assert not [r for r in caplog.records if "HF_HUB_OFFLINE" in r.getMessage()]
