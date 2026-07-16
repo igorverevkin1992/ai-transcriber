@@ -1138,6 +1138,32 @@ def _fold_unnamed_speakers_into_tech(
     return new_segments, crew_ids
 
 
+def _merge_close_markers(segments: list[dict], fps: int, max_gap_s: float = 3.0) -> list[dict]:
+    """Сливает подряд идущие маркеры техмоментов с разницей ТК ≤ ``max_gap_s``.
+
+    После сцен-сплита и vision-обогащения рядом могут оказаться «голый» и
+    обогащённый маркеры в 1-2 c друг от друга — шумовая пара. Оставляется один:
+    самый ранний ТК и самый информативный (длинный) текст.
+    """
+    out: list[dict] = []
+    for seg in segments:
+        text = str(seg.get("text", ""))
+        is_marker = text.startswith("(Технические моменты")
+        if (is_marker and out
+                and str(out[-1].get("text", "")).startswith("(Технические моменты")):
+            prev = out[-1]
+            gap_s = abs(
+                tc_to_frames(str(seg.get("timecode", "")), fps)
+                - tc_to_frames(str(prev.get("timecode", "")), fps)
+            ) / max(1, fps)
+            if gap_s <= max_gap_s:
+                if len(text) > len(str(prev.get("text", ""))):
+                    out[-1] = {**prev, "text": text}
+                continue
+        out.append(seg)
+    return out
+
+
 def _build_tc_anchor_mapper(project_id: str, video_path, fps: int, start_frames: int,
                             duration_s: float, warnings: list[str]):
     """Кусочная коррекция ТК по OCR-якорям: (tc_fn, media_fn) или (None, None).
@@ -1475,6 +1501,10 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             heroes=meta.get("speakers") or [],
             description=meta.get("description", "") or "",
         )
+
+    # Пары «голый + обогащённый» маркеры в 1-2 c друг от друга — шум после
+    # сцен-сплита/vision; сливаем в один (ранний ТК, информативный текст).
+    raw_segments = _merge_close_markers(raw_segments, fps)
 
     projects_db.set_result(
         project_id,

@@ -399,3 +399,34 @@ class TestTcFnOverride:
         events = [{"speaker": "0", "text": "Реплика.", "start_s": 2.0, "end_s": 3.0}]
         out = build_turns(events, 25 * 3600, 25)
         assert out[0]["timecode"] == "01:00:02:00"
+
+
+class TestLeadingMarkerRestamp:
+    def test_first_folded_marker_restamped_to_zero(self):
+        from backend.turns import TECH_BREAK_TEXT, build_turns
+        events = [
+            {"speaker": "0", "text": TECH_BREAK_TEXT, "start_s": 25.0, "end_s": 26.0},
+            {"speaker": "0", "text": "Первая реплика.", "start_s": 40.0, "end_s": 42.0},
+        ]
+        out = build_turns(events, 25 * 3600, 25, tech_break_gap_seconds=30.0)
+        assert out[0]["text"] == TECH_BREAK_TEXT
+        assert out[0]["timecode"] == "01:00:00:00"  # старт записи, не 01:00:25
+
+    def test_leading_gap_marker_not_duplicated(self):
+        # Первое событие-маркер ПОЗЖЕ порога: лидирующий маркер уже стоит на
+        # tc(0), свёрнутый дедупится — рестамп не создаёт второго.
+        from backend.turns import TECH_BREAK_TEXT, build_turns
+        events = [
+            {"speaker": "0", "text": TECH_BREAK_TEXT, "start_s": 45.0, "end_s": 46.0},
+            {"speaker": "0", "text": "Реплика.", "start_s": 50.0, "end_s": 52.0},
+        ]
+        out = build_turns(events, 0, 25, tech_break_gap_seconds=30.0)
+        markers = [s for s in out if s["text"] == TECH_BREAK_TEXT]
+        assert len(markers) == 1
+        assert markers[0]["timecode"] == "00:00:00:00"
+
+    def test_first_speech_event_unchanged(self):
+        from backend.turns import build_turns
+        events = [{"speaker": "0", "text": "Реплика.", "start_s": 5.0, "end_s": 7.0}]
+        out = build_turns(events, 0, 25)
+        assert out[0]["timecode"] == "00:00:05:00"

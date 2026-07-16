@@ -917,3 +917,48 @@ class TestF4PromptNudges:
         import backend.postprocess as pp
         assert "Hello, Марина" in pp._TECH_MOMENT_PROMPT_AGGRESSIVE
         assert "ПОСТАНОВОЧНЫЕ" in pp._TECH_MOMENT_PROMPT_AGGRESSIVE
+
+
+class TestQuestionReassignGuard:
+    def _events(self):
+        return [
+            {"speaker": "0", "text": "Какие-то яркие признания в любви случались?"},
+            {"speaker": "1", "text": "Бывает иногда, мне даже в соцсетях пишут, но я так понимаю, что не мне."},
+        ]
+
+    def test_question_to_answerer_rejected(self, monkeypatch):
+        import backend.postprocess as pp
+        # Модель предлагает отдать вопрос спикеру следующего длинного ответа.
+        monkeypatch.setattr(pp, "_gemini_call",
+                            lambda p, **kw: '[{"id": 0, "speaker": "1"}]')
+        out = pp.correct_speaker_boundaries(
+            self._events(), speaker_labels={"0": "АЗК", "1": "Гость"},
+            interviewer_id="0", merge_adjacent=False,
+        )
+        assert out[0]["speaker"] == "0"  # реассайн отклонён
+
+    def test_legit_reassign_passes(self, monkeypatch):
+        import backend.postprocess as pp
+        # Не вопрос — обычная реплика, переназначение легитимно.
+        events = [
+            {"speaker": "0", "text": "Да, конечно, я готова начать."},
+            {"speaker": "1", "text": "Отлично, тогда поехали дальше по плану интервью."},
+        ]
+        monkeypatch.setattr(pp, "_gemini_call",
+                            lambda p, **kw: '[{"id": 0, "speaker": "1"}]')
+        out = pp.correct_speaker_boundaries(
+            events, speaker_labels={"0": "АЗК", "1": "Гость"},
+            interviewer_id="0", merge_adjacent=False,
+        )
+        assert out[0]["speaker"] == "1"
+
+    def test_never_reassign_rule_in_prompt(self, monkeypatch):
+        import backend.postprocess as pp
+        prompts = []
+        monkeypatch.setattr(pp, "_gemini_call",
+                            lambda p, **kw: prompts.append(p) or "[]")
+        pp.correct_speaker_boundaries(
+            self._events(), speaker_labels={"0": "АЗК", "1": "Гость"},
+            interviewer_id="0",
+        )
+        assert prompts and "НИКОГДА не переназначай" in prompts[0]

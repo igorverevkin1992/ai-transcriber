@@ -830,6 +830,11 @@ def correct_speaker_boundaries(
         "приклеенный к КОНЦУ длинного ответа гостя («…я ответила спасибо, мы "
         "расстались. Когда же ещё с таким праздником поздравят при жизни?» — "
         "последняя фраза явно принадлежит интервьюеру) → split_after.\n"
+        "Вопрос, за которым сразу следует содержательный ответ ДРУГОГО голоса, "
+        "принадлежит СПРАШИВАЮЩЕМУ (обычно интервьюеру). НИКОГДА не переназначай "
+        "вопрос ведущего гостю, который на него отвечает. Наоборот: если вопрос "
+        "по теме помечен гостем, а следом идёт его же длинный ответ — вопрос "
+        "почти наверняка принадлежит интервьюеру, переназначь на интервьюера.\n"
         "Верни СТРОГО JSON-массив исправлений. Если исправлять нечего — верни []. "
         "Никакого текста кроме JSON.\n\n"
         f"Стенограмма:\n{transcript}"
@@ -861,6 +866,8 @@ def correct_speaker_boundaries(
 
     out = [dict(s) for s in segments]
     reassigned = 0
+    indexed_texts = [seg["text"].strip() for _, seg in indexed]
+    indexed_speakers = [str(seg.get("speaker")) for _, seg in indexed]
     splits: dict[int, tuple[int, str]] = {}  # idx → (split_after, tail_speaker)
     for item in data:
         if not isinstance(item, dict):
@@ -878,6 +885,17 @@ def correct_speaker_boundaries(
             continue
         new_sid = str(item.get("speaker"))
         if new_sid not in valid_ids:
+            continue
+        # Guard: переназначение ВОПРОСА автору следующего (длинного) ответа
+        # склеило бы вопрос внутрь его собственного ответа — логически
+        # невозможная конфигурация диалога, всегда ошибка модели (ф4-v3:
+        # «Какие-то яркие признания в любви случались?» ушёл гостье).
+        if (n + 1 < len(indexed_texts)
+                and indexed_texts[n].rstrip().endswith("?")
+                and new_sid == indexed_speakers[n + 1]
+                and len(indexed_texts[n + 1]) > len(indexed_texts[n])):
+            logger.info("Правка границ: реассайн вопроса №%d автору следующего "
+                        "ответа отклонён (склейка вопроса в собственный ответ)", n)
             continue
         if str(out[idx].get("speaker")) != new_sid:
             out[idx]["speaker"] = new_sid

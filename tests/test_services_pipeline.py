@@ -885,3 +885,34 @@ class TestSceneSplitMarkers:
         monkeypatch.setattr(tv, "_detect_scene_cuts", boom)
         segs = self._segs()
         assert tv.split_markers_by_scenes(segs, "v.wmv", 25, 0) == segs
+
+
+class TestMergeCloseMarkers:
+    TM = "(Технические моменты)"
+    TM_RICH = "(Технические моменты. Съемка подготовки к интервью на диване)"
+
+    def test_bare_plus_enriched_merged(self):
+        segs = [
+            {"timecode": "06:48:24:00", "speaker": "0", "text": self.TM},
+            {"timecode": "06:48:25:00", "speaker": "0", "text": self.TM_RICH},
+            {"timecode": "06:50:31:00", "speaker": "0", "text": "Реплика."},
+        ]
+        out = services._merge_close_markers(segs, 25)
+        assert len(out) == 2
+        assert out[0]["timecode"] == "06:48:24:00"  # ранний ТК
+        assert out[0]["text"] == self.TM_RICH       # информативный текст
+
+    def test_distant_markers_kept(self):
+        segs = [
+            {"timecode": "06:48:24:00", "speaker": "0", "text": self.TM},
+            {"timecode": "06:48:40:00", "speaker": "0", "text": self.TM_RICH},
+        ]
+        assert len(services._merge_close_markers(segs, 25)) == 2
+
+    def test_speech_between_markers_not_merged(self):
+        segs = [
+            {"timecode": "06:48:24:00", "speaker": "0", "text": self.TM},
+            {"timecode": "06:48:25:00", "speaker": "0", "text": "Реплика."},
+            {"timecode": "06:48:26:00", "speaker": "0", "text": self.TM_RICH},
+        ]
+        assert len(services._merge_close_markers(segs, 25)) == 3

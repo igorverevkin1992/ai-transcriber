@@ -191,8 +191,14 @@ def build_turns(
             close_turn()
             # Подряд идущие одинаковые ремарки не дублируем
             if not (out and out[-1]["text"] == ev["text"]):
+                # Файл открывается свёрнутым техмоментом (лидирующий маркер по
+                # гэпу не эмитился) — эталон отсчитывает паузу от СТАРТА записи,
+                # а не от первого её звука.
+                marker_start = ev["start_s"]
+                if not out and ev["text"].startswith(TECH_BREAK_TEXT[:21]):
+                    marker_start = 0.0
                 out.append({
-                    "timecode": tc(ev["start_s"]),
+                    "timecode": tc(marker_start),
                     "speaker": ev["speaker"],
                     "text": ev["text"],
                 })
