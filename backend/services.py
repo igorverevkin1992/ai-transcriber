@@ -1482,41 +1482,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             logger.info("[%s] Имена гостей из диалога: %s", project_id[:8],
                         {v: inferred[v] for v in unnamed_guests if v in inferred})
 
-    # Конфликт «имя из ФАЙЛА vs прямое обращение в диалоге»: файл бывает назван
-    # по герою ПЕРЕДАЧИ, а не по спикеру (ф14: «Канаева Евгения» в имени файла,
-    # а гостью в кадре зовут «Светлана»). Паспортные имена авторитетны и не
-    # оспариваются. Совпадение хотя бы одного слова имени — не конфликт.
-    passport_named = bool(passport and passport.get("speakers"))
-    if SPEAKER_NAME_AUTODETECT and not passport_named:
-        for vid in filename_named:
-            file_name = guest_names.get(vid, "")
-            dialogue_name = infer_name_for_speaker(raw_segments, vid)
-            if not dialogue_name or not file_name:
-                continue
-            overlaps = any(
-                _name_matches(dialogue_name.split()[0], word)
-                for word in file_name.split()
-            )
-            if not overlaps:
-                warnings.append(
-                    f"Имя из имени файла «{file_name}» не совпадает с обращением "
-                    f"в диалоге «{dialogue_name}» — использовано имя из диалога. "
-                    "Если это ошибка, задайте имена героев паспортом съёмки."
-                )
-                logger.info("[%s] Имя файла «%s» ↔ обращение «%s»: выбран диалог",
-                            project_id[:8], file_name, dialogue_name)
-                guest_names[vid] = dialogue_name
-
-    # Именование интервьюера из диалога (ф14: гостья обращается «Яна, …» —
-    # эталон именует ведущую по имени, АЗК остаётся для безымянных за кадром).
     interviewer_display = INTERVIEWER_LABEL
-    if (interviewer_id is not None and INTERVIEWER_NAME_FROM_DIALOGUE
-            and SPEAKER_NAME_AUTODETECT):
-        dialogue_name = infer_name_for_speaker(raw_segments, interviewer_id)
-        if dialogue_name:
-            interviewer_display = dialogue_name
-            logger.info("[%s] Интервьюер именован из диалога: %s",
-                        project_id[:8], dialogue_name)
 
     # Gemini-правка границ на уровне СЫРЫХ ASR-событий (гранулярность ≈
     # предложение): чинит и целиком перепутанные реплики, и — главное —
@@ -1541,6 +1507,49 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
         if corrected_events is not events:
             events = corrected_events
             raw_segments = _assemble_turns(events)
+
+    # Конфликт «имя из ФАЙЛА vs прямое обращение в диалоге»: файл бывает назван
+    # по герою ПЕРЕДАЧИ, а не по спикеру (ф14: «Канаева Евгения» в имени файла,
+    # а гостью в кадре зовут «Светлана»). Проверяется ПОСЛЕ правки границ — на
+    # разрезанных обменах адресация «вокатив → следующий говорящий» надёжна.
+    # Паспортные имена авторитетны: при противоречии только предупреждаем.
+    passport_named = bool(passport and passport.get("speakers"))
+    if SPEAKER_NAME_AUTODETECT:
+        for vid in filename_named:
+            file_name = guest_names.get(vid, "")
+            dialogue_name = infer_name_for_speaker(raw_segments, vid)
+            if not dialogue_name or not file_name:
+                continue
+            overlaps = any(
+                _name_matches(dialogue_name.split()[0], word)
+                for word in file_name.split()
+            )
+            if overlaps:
+                continue
+            if passport_named:
+                warnings.append(
+                    f"Имя героя «{file_name}» не встречается в обращениях диалога "
+                    f"(к спикеру обращаются «{dialogue_name}») — проверьте паспорт."
+                )
+                continue
+            warnings.append(
+                f"Имя из имени файла «{file_name}» не совпадает с обращением "
+                f"в диалоге «{dialogue_name}» — использовано имя из диалога. "
+                "Если это ошибка, задайте имена героев паспортом съёмки."
+            )
+            logger.info("[%s] Имя файла «%s» ↔ обращение «%s»: выбран диалог",
+                        project_id[:8], file_name, dialogue_name)
+            guest_names[vid] = dialogue_name
+
+    # Именование интервьюера из диалога (ф14: гостья обращается «Яна, …» —
+    # эталон именует ведущую по имени, АЗК остаётся для безымянных за кадром).
+    if (interviewer_id is not None and INTERVIEWER_NAME_FROM_DIALOGUE
+            and SPEAKER_NAME_AUTODETECT):
+        dialogue_name = infer_name_for_speaker(raw_segments, interviewer_id)
+        if dialogue_name:
+            interviewer_display = dialogue_name
+            logger.info("[%s] Интервьюер именован из диалога: %s",
+                        project_id[:8], dialogue_name)
 
     for voice_id, dur in speaker_durations.items():
         if voice_id == interviewer_id:

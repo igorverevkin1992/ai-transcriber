@@ -966,3 +966,44 @@ class TestFoldedSpeechCollection:
         segs = [_seg("0", TECH_BREAK_TEXT, 5000, 6000)]
         pre = services._texts_by_start_ms(segs)
         assert services._collect_folded_speech(segs, pre) == []
+
+
+class TestFilenameVsDialogueConflict:
+    def _f14_segs(self):
+        # Ведущая (0) названа по файлу героиней передачи; гостья (1) обращается
+        # к ней «Яна», ведущая к гостье — «Светлана».
+        return [
+            _seg("0", "Светлана, мы находимся в знаковом месте. Как вам было отпускать дочь на сборы в Москву?", 0, 8000),
+            _seg("1", "Я не могу сказать, что легко. Переживала, конечно.", 9000, 15000),
+            _seg("0", "Вы помните момент приглашения на эти сборы вообще?", 16000, 19000),
+            _seg("1", "Я переехала, Ян, уже после Олимпиады.", 20000, 24000),
+            _seg("0", "После первой Олимпиады было?", 25000, 27000),
+            _seg("1", "Такой сложный вопрос, Яна, задаешь.", 28000, 31000),
+        ]
+
+    def test_dialogue_beats_filename(self, fresh_store, monkeypatch):
+        store, _, _ = fresh_store
+        monkeypatch.setattr(services, "INTERVIEWER_LABEL_SINGLE_GUEST", False)
+        store.create("fd1", {"id": "fd1", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        services._process_recognition_result(
+            "fd1", self._f14_segs(), "Канаева Евгения_ф14.wmv", Path("/nope.mp4"),
+        )
+        speakers = store["fd1"]["result"]["speakers"]
+        names = {v["suggested_name"] for v in speakers.values()}
+        assert "Яна" in names
+        assert "Канаева Евгения" not in names
+        assert any("не совпадает с обращением" in w
+                   for w in store["fd1"]["result"]["warnings"])
+
+    def test_passport_name_warned_not_overridden(self, fresh_store, monkeypatch):
+        store, _, _ = fresh_store
+        monkeypatch.setattr(services, "INTERVIEWER_LABEL_SINGLE_GUEST", False)
+        store.create("fd2", {"id": "fd2", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        services._process_recognition_result(
+            "fd2", self._f14_segs(), "ф14.wmv", Path("/nope.mp4"),
+            passport={"speakers": ["Канаева Евгения"], "num_heroes": 1},
+        )
+        speakers = store["fd2"]["result"]["speakers"]
+        names = {v["suggested_name"] for v in speakers.values()}
+        assert "Канаева Евгения" in names  # паспорт не оспаривается
+        assert any("проверьте паспорт" in w for w in store["fd2"]["result"]["warnings"])

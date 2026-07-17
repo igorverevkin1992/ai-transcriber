@@ -214,3 +214,35 @@ class TestDirectAddressValidation:
         ]
         out = infer_speaker_names_by_vocative(segs, interviewer_id="0", guest_ids=["1"])
         assert out == {"1": "Светлана"}
+
+
+class TestFalseVocativeGuards:
+    def test_vvodnoe_stopword(self):
+        from backend.diarization_post import _find_single_name_vocatives
+        assert _find_single_name_vocatives("Естественно, большая нагрузка.") == []
+        assert _find_single_name_vocatives("Действительно, так и было.") == []
+
+    def test_self_use_rejects_candidate(self):
+        # «Особенно» — нет в стоп-листе, но спикер "0" употребляет его САМ →
+        # структурный фильтр отбрасывает; побеждает настоящее имя.
+        from backend.diarization_post import infer_name_for_speaker
+        segs = [
+            {"speaker": "1", "text": "Особенно, знаете, тяжело было. Я переехала, Ян, после Олимпиады."},
+            {"speaker": "0", "text": "Особенно в те годы это было сложно."},
+            {"speaker": "1", "text": "Такой вопрос, Яна, задаёшь."},
+            {"speaker": "0", "text": "Ну расскажите."},
+        ]
+        assert infer_name_for_speaker(segs, "0") == "Яна"
+
+    def test_real_f14_shape(self):
+        # Форма реального ф14: вводные у гостьи + два обращения к ведущей.
+        from backend.diarization_post import infer_name_for_speaker
+        segs = [
+            {"speaker": "С", "text": "Нет, я переехала, Ян, уже после Олимпиады."},
+            {"speaker": "КЕ", "text": "После первой Олимпиады?"},
+            {"speaker": "С", "text": "Естественно, в омской школе стало сложно."},
+            {"speaker": "КЕ", "text": "Понимаю. Естественно, это непросто."},
+            {"speaker": "С", "text": "Такой сложный вопрос, Яна, задаешь."},
+            {"speaker": "КЕ", "text": "Спасибо."},
+        ]
+        assert infer_name_for_speaker(segs, "КЕ") == "Яна"

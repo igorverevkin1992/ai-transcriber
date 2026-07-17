@@ -31,6 +31,15 @@ _NAME_STOPWORDS = {
     "мама", "папа", "мам", "пап", "сынок", "дочка", "девочки", "ребята",
     "друзья", "коллеги", "секунду", "минутку", "стоп", "всё", "все", "да",
     "нет", "конечно", "наверное", "например", "кстати", "правда", "честно",
+    # Вводные слова: капитализированные в начале предложения с запятой они
+    # неотличимы от вокатива по форме («Естественно, …» — ф14-регрессия).
+    "естественно", "действительно", "безусловно", "разумеется", "вообще",
+    "собственно", "откровенно", "серьёзно", "серьезно", "реально", "точно",
+    "правильно", "отлично", "здорово", "прекрасно", "замечательно", "именно",
+    "представляете", "представляешь", "помните", "помнишь", "видите", "видишь",
+    "согласитесь", "признаться", "пожалуй", "возможно", "видимо", "итак",
+    "короче", "словом", "напротив", "наоборот", "впрочем", "однако", "затем",
+    "потом", "далее", "главное", "кажется", "получается", "значит", "допустим",
 }
 
 
@@ -83,16 +92,18 @@ def _find_vocatives(text: str) -> list[str]:
 _VERBLIKE_ENDINGS = ("те", "ем", "ём", "ешь", "ишь", "ет", "ит", "ут", "ют", "у", "ю")
 
 
-def _find_single_name_vocatives(text: str) -> list[str]:
-    """Одиночные имена-обращения, выделенные запятой (без дублей, по порядку).
+def _iter_single_name_vocatives(text: str) -> list[tuple[str, bool]]:
+    """Одиночные имена-обращения: [(имя, в_начале_предложения)], без дублей.
 
     Правила позиции те же, что у «Имя Отчество»: запятая сразу ПОСЛЕ имени
     («Светлана, мы сейчас…») или запятая перед именем и конец предложения /
     запятая после («…я переехала, Ян, уже…»). Стоп-лист отсекает вводные и
     местоимения; в начале предложения дополнительно отсекаются глагольные
-    формы по окончанию. Короткие усечённые формы («Ян») тоже проходят.
+    формы по окончанию. Позиция В СЕРЕДИНЕ предложения (обе запятые) —
+    сильная улика; в начале — слабая (капитализированное слово с запятой
+    бывает глаголом/вводным, не пойманным списками).
     """
-    seen: list[str] = []
+    seen: list[tuple[str, bool]] = []
     seen_set: set[str] = set()
     for m in _SINGLE_NAME_RE.finditer(text):
         word = m.group(1)
@@ -109,8 +120,13 @@ def _find_single_name_vocatives(text: str) -> list[str]:
             continue
         if word not in seen_set:
             seen_set.add(word)
-            seen.append(word)
+            seen.append((word, sentence_initial))
     return seen
+
+
+def _find_single_name_vocatives(text: str) -> list[str]:
+    """Одиночные имена-обращения, выделенные запятой (без дублей, по порядку)."""
+    return [name for name, _ in _iter_single_name_vocatives(text)]
 
 
 def _name_matches(candidate: str, occurrence: str) -> bool:
@@ -153,32 +169,61 @@ def is_direct_address(segments: list[dict], name: str, speaker_id: str) -> bool:
     return False
 
 
+def _speaker_self_uses_word(segments: list[dict], speaker_id: str, word: str) -> bool:
+    """Употребляет ли спикер слово САМ в своих репликах (без учёта регистра).
+
+    Структурный фильтр ложных вокативов: вводные слова («Естественно, …»)
+    говорят ОБА собеседника, а своё имя в вокативной позиции человек не
+    произносит. Кандидат, встречающийся в речи самого спикера, — не имя.
+    """
+    sid = str(speaker_id)
+    pattern = re.compile(rf"(?<![а-яёА-ЯЁ]){re.escape(word)}(?![а-яёА-ЯЁ])", re.IGNORECASE)
+    return any(
+        str(seg.get("speaker")) == sid and pattern.search(seg.get("text", ""))
+        for seg in segments
+    )
+
+
 def infer_name_for_speaker(segments: list[dict], speaker_id: str) -> str | None:
     """Детерминированно вывести имя спикера по обращениям к нему в диалоге.
 
     Самая частая (и самая полная при равенстве) форма вокатива из чужих реплик,
-    после которых ``speaker_id`` отвечает. Используется для именования
-    ИНТЕРВЬЮЕРА (ф14: гостья обращается «Яна, …» — эталон именует ведущую),
-    которого гостевой вывод имён по построению не покрывает.
+    после которых ``speaker_id`` отвечает. Кандидаты, которые спикер употребляет
+    САМ («Естественно», «Знаете» — вводные), отбрасываются. Используется для
+    именования ИНТЕРВЬЮЕРА (ф14: гостья обращается «Яна, …» — эталон именует
+    ведущую), которого гостевой вывод имён по построению не покрывает.
     """
     sid = str(speaker_id)
+    all_speakers = {str(s.get("speaker")) for s in segments}
+    two_party = len(all_speakers) == 2
     votes: Counter[str] = Counter()
     for i, seg in enumerate(segments):
         cur = str(seg.get("speaker"))
         if cur == sid:
             continue
         text = seg.get("text", "")
-        names = _find_vocatives(text) + _find_single_name_vocatives(text)
-        if not names:
+        # Вес улики: «Имя Отчество» = 3, одиночное в середине предложения = 2,
+        # одиночное в начале = 1 (там чаще всего ложные срабатывания).
+        weighted = [(n, 3) for n in _find_vocatives(text)]
+        weighted += [(n, 1 if initial else 2)
+                     for n, initial in _iter_single_name_vocatives(text)]
+        if not weighted:
             continue
+        addressed_to_sid = False
         for j in range(i + 1, len(segments)):
             nxt = str(segments[j].get("speaker"))
             if nxt == cur:
                 continue
-            if nxt == sid:
-                for n in names:
-                    votes[n] += 1
+            addressed_to_sid = nxt == sid
             break
+        else:
+            # Конец диалога: следующего говорящего нет. При РОВНО двух
+            # участниках адресат обращения однозначен — другая сторона
+            # (ф14: «Такой сложный вопрос, Яна, задаёшь» — последняя реплика).
+            addressed_to_sid = two_party
+        if addressed_to_sid:
+            for n, w in weighted:
+                votes[n] += w
     if not votes:
         return None
     # Сливаем усечённые формы в самую длинную («Ян» + «Яна» → «Яна»).
@@ -189,8 +234,10 @@ def infer_name_for_speaker(segments: list[dict], speaker_id: str) -> str | None:
             if other != name and _name_matches(name, other) and len(other) > len(canon):
                 canon = other
         merged[canon] += cnt
-    best, _ = max(merged.items(), key=lambda kv: (kv[1], len(kv[0])))
-    return best
+    for best, _ in sorted(merged.items(), key=lambda kv: (-kv[1], -len(kv[0]))):
+        if not _speaker_self_uses_word(segments, sid, best.split()[0]):
+            return best
+    return None
 
 
 def infer_speaker_names_by_vocative(
