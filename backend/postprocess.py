@@ -506,6 +506,7 @@ def detect_technical_segments(
     segments: list[dict],
     warnings: list[str] | None = None,
     crew_names: list[str] | None = None,
+    description: str | None = None,
 ) -> list[dict]:
     """Консервативно помечает реплики съёмочной группы маркером тех. момента.
 
@@ -551,6 +552,17 @@ def detect_technical_segments(
             "\nИзвестные члены съёмочной группы (НЕ участники интервью): "
             f"{', '.join(crew)}. Их реплики и обращения к ним по имени помечай "
             "техническими моментами.\n"
+        )
+    if description and description.strip():
+        # Тема из паспорта «защищает» лайфы: живые сцены с героем — содержание
+        # сюжета, а не орг-болтовня, даже когда речь в них неформальна.
+        prompt += (
+            f"\nТема съёмки: {description.strip()}\n"
+            "ЛАЙФЫ — живые сцены с героем по теме съёмки (прогулка, показ "
+            "места, бытовые действия и разговоры героя с автором в кадре) — "
+            "это СОДЕРЖАНИЕ сюжета, НЕ технические моменты, даже если речь "
+            "неформальная («пойдёмте покажу», «вот здесь мы жили»). Помечай "
+            "только явную работу съёмочной группы и организацию процесса.\n"
         )
     failed = False
     total_flagged = 0
@@ -1149,7 +1161,8 @@ def postprocess_segments(
 
     # Консервативно сворачиваем крон-чаттер в маркер тех. момента ДО полировки.
     if TECH_MOMENT_DETECTION:
-        detect_technical_segments(segments, warnings=warnings, crew_names=crew_names)
+        detect_technical_segments(segments, warnings=warnings, crew_names=crew_names,
+                                  description=description)
 
     batch_texts = []
     batch_indices = []

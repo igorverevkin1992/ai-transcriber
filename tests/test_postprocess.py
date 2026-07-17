@@ -1113,3 +1113,44 @@ class TestMultiCutSplits:
         monkeypatch.setattr(pp, "_gemini_call", lambda p, **kw: prompts.append(p) or "ок")
         pp.gemini_polish("текст")
         assert prompts and "НИКОГДА не оформляй" in prompts[0]
+
+
+class TestLifeProtection:
+    def test_description_and_life_rule_in_tech_prompt(self, monkeypatch):
+        import backend.postprocess as pp
+        prompts = []
+        monkeypatch.setattr(pp, "_gemini_call", lambda p, **kw: prompts.append(p) or "НЕТ")
+        pp.detect_technical_segments(
+            [{"text": "Пойдёмте, покажу дом, где мы жили.", "words": []}],
+            description="интервью + лайфы: прогулка героя по родному городу",
+        )
+        assert prompts
+        assert "прогулка героя по родному городу" in prompts[0]
+        assert "ЛАЙФЫ" in prompts[0]
+        assert "НЕ технические моменты" in prompts[0]
+
+    def test_no_description_no_life_block(self, monkeypatch):
+        import backend.postprocess as pp
+        prompts = []
+        monkeypatch.setattr(pp, "_gemini_call", lambda p, **kw: prompts.append(p) or "НЕТ")
+        pp.detect_technical_segments([{"text": "Реплика.", "words": []}])
+        assert prompts and "ЛАЙФЫ" not in prompts[0]
+
+    def test_description_threaded_from_postprocess(self, monkeypatch):
+        import backend.postprocess as pp
+        seen = {}
+
+        def fake_detect(segments, warnings=None, crew_names=None, description=None):
+            seen["description"] = description
+            return segments
+
+        monkeypatch.setattr(pp, "GEMINI_API_KEY", "k")
+        monkeypatch.setattr(pp, "_gemini_ready", lambda: True)
+        monkeypatch.setattr(pp, "TECH_MOMENT_DETECTION", True)
+        monkeypatch.setattr(pp, "detect_technical_segments", fake_detect)
+        monkeypatch.setattr(pp, "gemini_polish", lambda text, **kw: text)
+        pp.postprocess_segments(
+            [{"text": "Реплика.", "words": []}],
+            description="интервью + лайфы",
+        )
+        assert seen["description"] == "интервью + лайфы"
