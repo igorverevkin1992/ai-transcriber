@@ -1708,9 +1708,15 @@ def process_video_task(project_id: str, disk_url: str):
                 pass
 
 
-def _load_passport(passport_path, project_id: str) -> dict | None:
+def _load_passport(passport_path, project_id: str,
+                   warnings: list[str] | None = None) -> dict | None:
     """Загрузить «паспорт съёмки» (.docx): детерминированный разбор формы →
-    Gemini-фолбэк. Возвращает {speakers, num_heroes, description} или None."""
+    Gemini-фолбэк. Возвращает {speakers, num_heroes, description} или None.
+
+    Результат разбора отражается в ``warnings`` (видимо в UI): раньше провал
+    парсинга жил только в серверном логе, и пользователь не знал, что паспорт
+    не применился («зачем я пишу героев, если программа их не использует?»).
+    """
     if not passport_path:
         return None
     pp = Path(passport_path)
@@ -1726,8 +1732,29 @@ def _load_passport(passport_path, project_id: str) -> dict | None:
     if data:
         logger.info("[%s] Паспорт съёмки: %d героев %s", project_id[:8],
                     data.get("num_heroes", 0), data.get("speakers", []))
+        if warnings is not None:
+            heroes = ", ".join(data.get("speakers", [])) or "—"
+            host = "есть" if data.get("has_host", True) else "нет"
+            crew = ", ".join(data.get("crew", []) or [])
+            summary = f"Паспорт применён: герои — {heroes}; закадровый ведущий — {host}"
+            if crew:
+                summary += f"; группа — {crew}"
+            warnings.append(summary + ".")
+            if not data.get("speakers"):
+                warnings.append(
+                    "В паспорте не распознано поле «Герои» — имена в легенду не "
+                    "переданы. Ожидаемые подписи: «Герои», «Имена героев», "
+                    "«Гости», «Участники» (значение после двоеточия или строками ниже)."
+                )
     else:
         logger.warning("[%s] Паспорт не распознан (%s)", project_id[:8], pp.name)
+        if warnings is not None:
+            warnings.append(
+                f"Паспорт «{pp.name}» НЕ распознан — имена героев и подсказки "
+                "диаризации не применены. Проверьте, что это текстовый .docx "
+                "(не скан) с полями «Герои», «Количество героев», «Ведущий», "
+                "«Съёмочная группа», «Что снято»."
+            )
     return data
 
 
@@ -1754,7 +1781,8 @@ def process_uploaded_file_task(
         _cleanup_old_projects()
         projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
         projects_db.update_field(project_id, "status_detail", None)
-        passport_data = _load_passport(passport_path, project_id)
+        pp_warnings: list[str] = []
+        passport_data = _load_passport(passport_path, project_id, warnings=pp_warnings)
 
         if local_video_path.exists():
             _check_disk_space(local_video_path.stat().st_size * 2)
@@ -1800,7 +1828,6 @@ def process_uploaded_file_task(
         from backend.postprocess import postprocess_segments
         logger.info("[%s] Постобработка текста...", project_id[:8])
         _set_stage(project_id, "Постобработка текста…", 85)
-        pp_warnings: list[str] = []
         crew_names = (passport_data or {}).get("crew") or None
         with _stage_timer(project_id, "постобработка"):
             pre_texts_by_start = _texts_by_start_ms(segments)

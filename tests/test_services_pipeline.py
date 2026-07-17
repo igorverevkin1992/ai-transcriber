@@ -1007,3 +1007,42 @@ class TestFilenameVsDialogueConflict:
         names = {v["suggested_name"] for v in speakers.values()}
         assert "Канаева Евгения" in names  # паспорт не оспаривается
         assert any("проверьте паспорт" in w for w in store["fd2"]["result"]["warnings"])
+
+
+class TestPassportFeedback:
+    def _passport_docx(self, tmp_path, lines):
+        from docx import Document as Doc
+        d = Doc()
+        for line in lines:
+            d.add_paragraph(line)
+        p = tmp_path / "passport.docx"
+        d.save(str(p))
+        return str(p)
+
+    def test_parsed_passport_reported(self, fresh_store, tmp_path):
+        warnings = []
+        data = services._load_passport(
+            self._passport_docx(tmp_path, ["Герои: Канаева Светлана", "Количество героев: 1", "Ведущий: да"]),
+            "pf1", warnings=warnings,
+        )
+        assert data and data["speakers"] == ["Канаева Светлана"]
+        assert any("Паспорт применён" in w and "Канаева Светлана" in w for w in warnings)
+
+    def test_heroes_missing_warned(self, fresh_store, tmp_path):
+        warnings = []
+        services._load_passport(
+            self._passport_docx(tmp_path, ["Что снято: интервью с мамой чемпионки", "Ведущий: да"]),
+            "pf2", warnings=warnings,
+        )
+        assert any("не распознано поле «Герои»" in w for w in warnings)
+
+    def test_unparseable_passport_warned(self, fresh_store, tmp_path, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "gemini_extract_passport", lambda text: None)
+        warnings = []
+        data = services._load_passport(
+            self._passport_docx(tmp_path, ["просто произвольный текст без полей"]),
+            "pf3", warnings=warnings,
+        )
+        assert data is None
+        assert any("НЕ распознан" in w for w in warnings)
