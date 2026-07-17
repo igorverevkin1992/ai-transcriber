@@ -162,3 +162,50 @@ class TestParsePassportEdgeCases:
         _make_table_passport(p, [("Герои", "Иванов")])
         text = read_passport_text(p)
         assert "Герои" in text and "Иванов" in text
+
+
+class TestParticipantsField:
+    def _docx(self, tmp_path, lines):
+        from docx import Document as Doc
+        d = Doc()
+        for line in lines:
+            d.add_paragraph(line)
+        p = tmp_path / "p.docx"
+        d.save(str(p))
+        return p
+
+    def test_participants_with_roles(self, tmp_path):
+        from backend.passport import parse_passport
+        data = parse_passport(self._docx(tmp_path, [
+            "Герой: Канаева Евгения",
+            "Снимаются: Батыршина Яна (ведущая), Канаева Светлана",
+            "Что снято: интервью с мамой героини",
+        ]))
+        assert data["speakers"] == ["Канаева Евгения"]
+        assert data["participants"] == ["Батыршина Яна", "Канаева Светлана"]
+        assert data["host_name"] == "Батыршина Яна"
+
+    def test_v_kadre_alias_and_multiline(self, tmp_path):
+        from backend.passport import parse_passport
+        data = parse_passport(self._docx(tmp_path, [
+            "В кадре:",
+            "Батыршина Яна (ведущая)",
+            "Канаева Светлана",
+        ]))
+        assert data["participants"] == ["Батыршина Яна", "Канаева Светлана"]
+        assert data["host_name"] == "Батыршина Яна"
+
+    def test_uchastniki_now_participants(self, tmp_path):
+        from backend.passport import parse_passport
+        data = parse_passport(self._docx(tmp_path, ["Участники: Иванов Иван"]))
+        assert data["participants"] == ["Иванов Иван"]
+        assert data["speakers"] == []
+
+    def test_no_participants_heroes_still_speakers(self, tmp_path):
+        from backend.passport import parse_passport
+        data = parse_passport(self._docx(tmp_path, [
+            "Герои: Ковальская Марина", "Количество героев: 1",
+        ]))
+        assert data["speakers"] == ["Ковальская Марина"]
+        assert data["participants"] == []
+        assert data["host_name"] is None

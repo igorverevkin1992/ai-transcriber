@@ -2,7 +2,12 @@
 
 После каждой съёмки ассистент заполняет форму в Word. Достоверные поля подаются в
 пайплайн как приоритетный источник `meta`:
-- **Герои** (гости в кадре) → имена гостей в легенде, число → хинт диаризации;
+- **Снимаются / В кадре** (участники ЭТОЙ съёмки, опционально с ролью в скобках:
+  «Батыршина Яна (ведущая), Канаева Светлана») → имена спикеров в легенде и
+  число голосов; участник с ролью ведущей — интервьюер (именуется, не АЗК);
+- **Герой** — про кого СЮЖЕТ (может вовсе не сниматься в этом файле — ф14);
+  при заполненном «Снимаются» уходит в контекст, не в легенду; без «Снимаются»
+  герои по-прежнему трактуются как спикеры кадра (обратная совместимость);
 - **Ведущий за кадром** → голосов = герои + 1 (ведущий помечается `АЗК`);
 - **Съёмочная группа** (оператор/инженер/продюсер/ассистенты) → их закадровая речь
   помечается `(Технические моменты)`, а не приписывается гостю;
@@ -17,6 +22,7 @@
 (`gemini_extract_passport`), передав сырой текст (`read_passport_text`).
 """
 
+import re
 from pathlib import Path
 
 from backend.config import logger
@@ -32,7 +38,12 @@ _FIELD_LABELS = [
     ("host_weak", ("автор", "корреспондент", "интервьюер")),
     ("crew", ("съёмочная группа", "съемочная группа", "группа", "оператор", "инженер",
               "продюсер", "ассистент", "режиссёр", "режиссер", "звукорежиссёр", "звукорежиссер")),
-    ("heroes", ("имена героев", "герои", "герой", "гость", "гости", "участники", "спикеры")),
+    # «Кто снимается В ЭТОМ файле» (спикеры кадра) — отдельно от «Героя» сюжета:
+    # герой передачи может вовсе не появляться в конкретной съёмке (ф14: сюжет
+    # про Евгению Канаеву, а в кадре — её мама и ведущая).
+    ("participants", ("снимаются", "снимается", "в кадре", "участники съёмки",
+                      "участники съемки", "участники", "спикеры", "говорят")),
+    ("heroes", ("имена героев", "герои", "герой", "гость", "гости")),
     ("description", ("что снято", "описание съёмки", "описание съемки", "описание",
                      "синопсис", "тема", "о чём", "о чем")),
     ("ignore", ("дата съёмки", "дата съемки", "дата", "локация", "место съёмки", "место")),
@@ -47,6 +58,11 @@ def _is_host_negative(value: str) -> bool:
 
 # Разделители списка имён внутри одного значения.
 _NAME_SPLIT = (";", ",", "\n", "•", " - ")
+
+# Роль участника в скобках/после тире: «Батыршина Яна (ведущая)». Роли,
+# означающие ведущего/интервьюера.
+_ROLE_RE = re.compile(r"\(([^)]*)\)\s*$|[—–]\s*([^—–()]+)$")
+_HOST_ROLE_RE = re.compile(r"ведущ|корреспондент|интервьюер|журналист", re.IGNORECASE)
 
 
 def _norm(s: str) -> str:
@@ -81,11 +97,22 @@ def _split_names(value: str) -> list[str]:
     return out
 
 
+def _split_role(raw: str) -> tuple[str, str]:
+    """«Батыршина Яна (ведущая)» → («Батыршина Яна», «ведущая»)."""
+    m = _ROLE_RE.search(raw)
+    if not m:
+        return raw.strip(), ""
+    role = (m.group(1) or m.group(2) or "").strip()
+    name = raw[:m.start()].strip(" \t.-–—")
+    return name or raw.strip(), role
+
+
 class _Fields:
     """Аккумулятор значений полей паспорта (поля группы/героев накапливаются)."""
 
     def __init__(self):
         self.heroes: list[str] = []
+        self.participants: list[tuple[str, str]] = []  # (имя, роль)
         self.crew: list[str] = []
         self.host_values: list[str] = []
         self.host_seen = False
@@ -97,6 +124,13 @@ class _Fields:
         value = (value or "").strip()
         if field == "heroes":
             self.heroes.extend(n for n in _split_names(value) if n not in self.heroes)
+        elif field == "participants":
+            existing = {n for n, _ in self.participants}
+            for raw in _split_names(value):
+                name, role = _split_role(raw)
+                if name and name not in existing:
+                    existing.add(name)
+                    self.participants.append((name, role))
         elif field == "crew":
             self.crew.extend(n for n in _split_names(value) if n not in self.crew)
         elif field == "host":
@@ -134,10 +168,19 @@ class _Fields:
         else:
             has_host = True  # дефолт: интервью обычно с закадровым ведущим
 
-        if not self.heroes and num <= 0 and not description and not self.crew:
+        if (not self.heroes and not self.participants and num <= 0
+                and not description and not self.crew):
             return None
+
+        participant_names = [n for n, _ in self.participants]
+        host_name = next(
+            (n for n, role in self.participants if role and _HOST_ROLE_RE.search(role)),
+            None,
+        )
         return {
             "speakers": self.heroes,
+            "participants": participant_names,
+            "host_name": host_name,
             "num_heroes": num,
             "has_host": has_host,
             "crew": self.crew,

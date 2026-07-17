@@ -687,13 +687,18 @@ def gemini_extract_passport(text: str) -> dict | None:
     prompt = (
         "Это «паспорт съёмки» — заполненная ассистентом форма о видеосъёмке "
         "интервью. Извлеки СТРОГО JSON-объект вида "
-        '{"heroes": ["Имя ..."], "num_heroes": N, "host": true, '
+        '{"heroes": ["Имя ..."], "participants": ["Имя ..."], '
+        '"host_name": "Имя или null", "num_heroes": N, "host": true, '
         '"crew": ["Имя ..."], "description": "..."}.\n'
-        "heroes — имена героев (гостей) в кадре; num_heroes — их число (целое); "
-        "host — есть ли закадровый ведущий/автор/корреспондент (true/false); "
-        "crew — имена съёмочной группы (оператор, инженер, продюсер, ассистенты), "
-        "НЕ гости; description — краткое описание/тема съёмки. Ведущего и группу в "
-        'heroes НЕ включай. Если поля нет — [] / 0 / true / "". '
+        "heroes — герои СЮЖЕТА (о ком передача; могут не сниматься в этом "
+        "файле); participants — кто РЕАЛЬНО снимается/говорит в кадре в этой "
+        "съёмке (поля «Снимаются», «В кадре», «Участники»); host_name — имя "
+        "участника-ведущего/корреспондента, если он в кадре и назван (иначе "
+        "null); num_heroes — число героев (целое); host — есть ли ведущий/"
+        "автор/корреспондент (true/false); crew — имена съёмочной группы "
+        "(оператор, инженер, продюсер, ассистенты), НЕ гости; description — "
+        "краткое описание/тема съёмки. Группу в participants НЕ включай. "
+        'Если поля нет — [] / null / 0 / true / "". '
         "Никакого текста кроме JSON.\n\n"
         f"Паспорт:\n{text[:_PASSPORT_MAX_CHARS]}"
     )
@@ -720,15 +725,18 @@ def gemini_extract_passport(text: str) -> dict | None:
         return [str(x).strip() for x in val if str(x).strip()]
 
     heroes = _names("heroes")
+    participants = _names("participants")
     crew = _names("crew")
+    host_name = str(data.get("host_name") or "").strip() or None
     num = data.get("num_heroes")
     num = int(num) if isinstance(num, (int, float)) and num > 0 else len(heroes)
     has_host = data.get("host")
     has_host = False if has_host is False else True  # дефолт True
     desc = str(data.get("description") or "").strip()
-    if not heroes and num <= 0 and not desc and not crew:
+    if not heroes and not participants and num <= 0 and not desc and not crew:
         return None
-    return {"speakers": heroes, "num_heroes": num, "has_host": has_host,
+    return {"speakers": heroes, "participants": participants,
+            "host_name": host_name, "num_heroes": num, "has_host": has_host,
             "crew": crew, "description": desc}
 
 

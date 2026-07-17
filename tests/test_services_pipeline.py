@@ -1034,7 +1034,7 @@ class TestPassportFeedback:
             self._passport_docx(tmp_path, ["Что снято: интервью с мамой чемпионки", "Ведущий: да"]),
             "pf2", warnings=warnings,
         )
-        assert any("не распознано поле «Герои»" in w for w in warnings)
+        assert any("не распознаны ни «Снимаются/В кадре»" in w for w in warnings)
 
     def test_unparseable_passport_warned(self, fresh_store, tmp_path, monkeypatch):
         import backend.postprocess as pp
@@ -1046,3 +1046,58 @@ class TestPassportFeedback:
         )
         assert data is None
         assert any("НЕ распознан" in w for w in warnings)
+
+
+class TestParticipantsMapping:
+    def _f14_segs(self):
+        return [
+            _seg("0", "Светлана, мы сейчас находимся в знаковом месте. Как вам было отпускать дочь?", 0, 8000),
+            _seg("1", "Я не могу сказать, что легко. Переживала, конечно.", 9000, 15000),
+            _seg("0", "Вы помните момент приглашения на сборы?", 16000, 19000),
+            _seg("1", "Я переехала, Ян, уже после Олимпиады.", 20000, 24000),
+            _seg("0", "После первой Олимпиады было?", 25000, 27000),
+            _seg("1", "Такой сложный вопрос, Яна, задаешь.", 28000, 31000),
+        ]
+
+    def test_participants_named_in_legend(self, fresh_store, monkeypatch):
+        store, _, _ = fresh_store
+        monkeypatch.setattr(services, "INTERVIEWER_LABEL_SINGLE_GUEST", False)
+        store.create("pm10", {"id": "pm10", "status": ProjectStatusEnum.TRANSCRIBING, "created_at": 1.0})
+        services._process_recognition_result(
+            "pm10", self._f14_segs(), "2026.06.29_ф14_Канаева Евгения.wmv", Path("/nope.mp4"),
+            passport={
+                "speakers": ["Канаева Евгения"],
+                "participants": ["Батыршина Яна", "Канаева Светлана"],
+                "host_name": "Батыршина Яна",
+                "num_heroes": 1, "has_host": True, "crew": [],
+                "description": "интервью с мамой героини",
+            },
+        )
+        result = store["pm10"]["result"]
+        names = {v["suggested_name"] for v in result["speakers"].values()}
+        assert names == {"Батыршина Яна", "Канаева Светлана"}
+        # Герой сюжета ушёл в контекст, не в легенду.
+        assert "Канаева Евгения" not in names
+        assert "Герой сюжета: Канаева Евгения" in result["meta"]["description"]
+
+    def test_mapper_uses_vocatives_then_host_role(self):
+        segs = [
+            {"speaker": "0", "text": "Светлана, расскажите."},
+            {"speaker": "1", "text": "Рассказываю подробно и обстоятельно."},
+        ]
+        mapping = services._map_participants_to_voices(
+            segs, ["Батыршина Яна", "Канаева Светлана"], "Батыршина Яна",
+            ["0", "1"], {"0": 0.9, "1": 0.0},
+        )
+        # «Светлана» — обращение к голосу 1; ведущая → голос 0 (вопросы).
+        assert mapping == {"1": "Канаева Светлана", "0": "Батыршина Яна"}
+
+    def test_mapper_fallback_appearance_order(self):
+        segs = [
+            {"speaker": "0", "text": "Первый без обращений."},
+            {"speaker": "1", "text": "Второй без обращений."},
+        ]
+        mapping = services._map_participants_to_voices(
+            segs, ["Иванов Иван", "Петров Пётр"], None, ["0", "1"], {},
+        )
+        assert mapping == {"0": "Иванов Иван", "1": "Петров Пётр"}

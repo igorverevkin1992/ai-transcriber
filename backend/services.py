@@ -26,6 +26,7 @@ from backend.config import (
     INTERVIEWER_MAJORITY_RATIO,
     INTERVIEWER_MIN_DISTINCT_GUESTS,
     INTERVIEWER_NAME_FROM_DIALOGUE,
+    LEGEND_LIST_STYLE,
     MAX_CONCURRENT_TASKS,
     MAX_FILE_SIZE_BYTES,
     NO_SPEECH_PROB_THRESHOLD,
@@ -946,6 +947,7 @@ def _transcribe_with_whisperx(
         # из числа имён оставляем прежний диапазон n..n+1 (имён может быть меньше,
         # чем реальных голосов: ведущий и т.п.).
         passport_heroes = (passport or {}).get("num_heroes", 0) or 0
+        n_participants = len((passport or {}).get("participants") or [])
         host_offset = 1 if (passport or {}).get("has_host", True) else 0
         exact_n = 0
         names_n = 0
@@ -955,7 +957,16 @@ def _transcribe_with_whisperx(
             exact_n = meta.get("num_speakers", 0) or 0
         if exact_n < 2 and DIARIZATION_NUM_SPEAKERS >= 2:
             exact_n = DIARIZATION_NUM_SPEAKERS
-        if passport_heroes >= 1:
+        if n_participants >= 1:
+            # «Снимаются» — точный список голосов ЭТОЙ съёмки (ведущая в кадре
+            # уже в списке); запас +1 на члена съёмочной группы.
+            lo = n_participants
+            hi = lo + 1
+            diarize_kwargs["min_speakers"] = lo
+            diarize_kwargs["max_speakers"] = hi
+            logger.info("[%s] Диаризация: хинт %d-%d спикеров из паспорта (участники кадра)",
+                        project_id[:8], lo, hi)
+        elif passport_heroes >= 1:
             # Паспорт приоритетнее: герои (гости) + закадровый ведущий (если есть);
             # запас +1 на члена съёмочной группы (он затем сворачивается в
             # техмоменты), поэтому диапазон, а не жёсткое min == max.
@@ -1189,6 +1200,54 @@ def _collect_folded_speech(segments: list[dict], pre_texts_by_start: dict[int, s
     return out
 
 
+def _map_participants_to_voices(
+    raw_segments: list[dict],
+    participants: list[str],
+    host_name: str | None,
+    appearance_order: list[str],
+    question_shares: dict[str, float],
+) -> dict[str, str]:
+    """Сопоставить паспортных участников («Снимаются») диаризованным голосам.
+
+    Приоритет улик: валидированное обращение из диалога («Яна» ↔ «Батыршина
+    Яна») → участник-ведущий к голосу с максимальной долей вопросов → остаток
+    по порядку первого появления. Возвращает {voice_id: полное имя}.
+    """
+    from backend.diarization_post import _name_matches, infer_name_for_speaker
+
+    remaining = list(participants)
+    mapping: dict[str, str] = {}
+
+    # 1) По обращениям в диалоге.
+    for vid in appearance_order:
+        if not remaining:
+            break
+        dlg = infer_name_for_speaker(raw_segments, vid)
+        if not dlg:
+            continue
+        for p in remaining:
+            if any(_name_matches(dlg.split()[0], word) for word in p.split()):
+                mapping[vid] = p
+                remaining.remove(p)
+                break
+
+    # 2) Участник-ведущий → голос, задающий вопросы.
+    if host_name and host_name in remaining:
+        unassigned = [v for v in appearance_order if v not in mapping]
+        if unassigned:
+            host_vid = max(unassigned, key=lambda v: question_shares.get(v, 0.0))
+            mapping[host_vid] = host_name
+            remaining.remove(host_name)
+
+    # 3) Остаток — по порядку появления.
+    for vid in appearance_order:
+        if not remaining:
+            break
+        if vid not in mapping:
+            mapping[vid] = remaining.pop(0)
+    return mapping
+
+
 def _merge_close_markers(segments: list[dict], fps: int, max_gap_s: float = 3.0) -> list[dict]:
     """Сливает подряд идущие маркеры техмоментов с разницей ТК ≤ ``max_gap_s``.
 
@@ -1288,19 +1347,31 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
                                 folded_speech: list[tuple[float, str]] | None = None):
     """Обрабатывает результат распознавания v3 и сохраняет в projects_db."""
     meta = parse_filename_metadata(original_filename)
-    # Паспорт съёмки приоритетнее имени файла: достоверные имена героев, их число
+    # Паспорт съёмки приоритетнее имени файла: достоверные имена, число голосов
     # и описание (контекст для Gemini-правки границ).
+    passport_participants = list((passport or {}).get("participants") or [])
+    passport_host_name = (passport or {}).get("host_name")
     if passport:
-        if passport.get("speakers"):
-            meta["speakers"] = passport["speakers"]
+        if passport_participants:
+            # «Снимаются/В кадре» — спикеры ЭТОГО файла (легенда). «Герой» — про
+            # кого сюжет: он может вовсе не сниматься здесь (ф14) → в контекст.
+            meta["speakers"] = passport_participants
+            hero_ctx = ", ".join(passport.get("speakers") or [])
+            desc = passport.get("description", "") or ""
+            if hero_ctx:
+                desc = f"Герой сюжета: {hero_ctx}. {desc}".strip()
+            meta["description"] = desc
+        else:
+            if passport.get("speakers"):
+                meta["speakers"] = passport["speakers"]
+            meta["description"] = passport.get("description", "") or ""
         if passport.get("num_heroes"):
             meta["num_heroes"] = passport["num_heroes"]
         if passport.get("crew"):
             meta["crew"] = passport["crew"]
-        meta["description"] = passport.get("description", "") or ""
-        logger.info("[%s] Паспорт съёмки: %d героев %s, группа: %s", project_id[:8],
-                    passport.get("num_heroes", 0), passport.get("speakers", []),
-                    passport.get("crew", []))
+        logger.info("[%s] Паспорт съёмки: герои %s, в кадре %s, группа: %s",
+                    project_id[:8], passport.get("speakers", []),
+                    passport_participants or "—", passport.get("crew", []))
     projects_db.update_field(project_id, "original_filename", original_filename, persist=True)
 
     if video_path.exists():
@@ -1416,19 +1487,20 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     detected_speakers = {}
     file_names = meta["speakers"]
 
+    # Доля «вопросных» событий на спикера: сигнал для 1-на-1 (чередование
+    # симметрично) и для привязки паспортного участника-ведущего к голосу.
+    q_counts: dict[str, list[int]] = {}
+    for ev in speech_events:
+        stats = q_counts.setdefault(ev["speaker"], [0, 0])
+        stats[0] += 1
+        if "?" in ev["text"]:
+            stats[1] += 1
+    question_shares = {sp: hits / n for sp, (n, hits) in q_counts.items() if n}
+
     # Автоопределение интервьюера (АЗК): он чередуется со всеми гостями.
     interviewer_id = None
     if INTERVIEWER_AUTODETECT and len(speaker_durations) >= 2:
         sequence = build_speaker_sequence(speech_events)
-        # Доля «вопросных» событий на спикера — сигнал для 1-на-1, где
-        # чередование симметрично и роли по нему не различить.
-        q_counts: dict[str, list[int]] = {}
-        for ev in speech_events:
-            stats = q_counts.setdefault(ev["speaker"], [0, 0])
-            stats[0] += 1
-            if "?" in ev["text"]:
-                stats[1] += 1
-        question_shares = {sp: hits / n for sp, (n, hits) in q_counts.items() if n}
         interviewer_id = detect_interviewer(
             sequence, speaker_durations,
             min_distinct_guests=INTERVIEWER_MIN_DISTINCT_GUESTS,
@@ -1441,14 +1513,19 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
                         project_id[:8], interviewer_id, INTERVIEWER_LABEL)
 
     # Имена из файла назначаем ГОСТЯМ по порядку появления (интервьюер исключён).
+    # При паспортных участниках слепой порядок не годится — их сопоставит
+    # выделенный маппинг после правки границ (по обращениям/роли/появлению).
     guest_order = [s for s in first_appearance_order(speech_events) if s != interviewer_id]
     expected_guests = len(speaker_durations) - (1 if interviewer_id is not None else 0)
-    if file_names and len(file_names) != expected_guests:
+    if not passport_participants and file_names and len(file_names) != expected_guests:
         logger.warning(
             "[%s] Несовпадение: %d имён в файле, %d гостей обнаружено — маппинг может быть неточным",
             project_id[:8], len(file_names), expected_guests,
         )
-    guest_names = {voice_id: file_names[i] for i, voice_id in enumerate(guest_order) if i < len(file_names)}
+    if passport_participants:
+        guest_names = {}
+    else:
+        guest_names = {voice_id: file_names[i] for i, voice_id in enumerate(guest_order) if i < len(file_names)}
     filename_named = set(guest_names)
 
     # Гостям без имени из имени файла определяем имя по диалогу (как к ним
@@ -1457,7 +1534,7 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
     # детерминированную валидацию ПРЯМОГО обращения (ф14: «Лена Николаевна»
     # из упоминания в 3-м лице отсекается).
     unnamed_guests = [g for g in guest_order if g not in guest_names]
-    if SPEAKER_NAME_AUTODETECT and unnamed_guests:
+    if SPEAKER_NAME_AUTODETECT and unnamed_guests and not passport_participants:
         from backend.postprocess import gemini_infer_speaker_names
         inferred = gemini_infer_speaker_names(
             raw_segments, interviewer_id=interviewer_id, guest_ids=unnamed_guests
@@ -1508,6 +1585,23 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
             events = corrected_events
             raw_segments = _assemble_turns(events)
 
+    # Паспортные УЧАСТНИКИ («Снимаются: Батыршина Яна (ведущая), Канаева
+    # Светлана») сопоставляются с голосами: 1) валидированное обращение из
+    # диалога ↔ слово имени («Яна» → «Батыршина Яна»); 2) участник-ведущий →
+    # голос с максимальной долей вопросов; 3) остаток — по порядку появления.
+    # Все участники (включая ведущую в кадре) попадают в легенду полными именами.
+    if passport_participants:
+        mapping = _map_participants_to_voices(
+            raw_segments, passport_participants, passport_host_name,
+            [s for s in first_appearance_order(speech_events)],
+            question_shares,
+        )
+        guest_names.update(mapping)
+        if interviewer_id is not None and interviewer_id in mapping:
+            interviewer_display = mapping[interviewer_id]
+        logger.info("[%s] Участники паспорта сопоставлены голосам: %s",
+                    project_id[:8], mapping)
+
     # Конфликт «имя из ФАЙЛА vs прямое обращение в диалоге»: файл бывает назван
     # по герою ПЕРЕДАЧИ, а не по спикеру (ф14: «Канаева Евгения» в имени файла,
     # а гостью в кадре зовут «Светлана»). Проверяется ПОСЛЕ правки границ — на
@@ -1543,8 +1637,10 @@ def _process_recognition_result(project_id: str, segments: list[dict], original_
 
     # Именование интервьюера из диалога (ф14: гостья обращается «Яна, …» —
     # эталон именует ведущую по имени, АЗК остаётся для безымянных за кадром).
+    # При паспортных участниках имя уже полное из маппинга выше.
     if (interviewer_id is not None and INTERVIEWER_NAME_FROM_DIALOGUE
-            and SPEAKER_NAME_AUTODETECT):
+            and SPEAKER_NAME_AUTODETECT and not passport_participants
+            and interviewer_id not in guest_names):
         dialogue_name = infer_name_for_speaker(raw_segments, interviewer_id)
         if dialogue_name:
             interviewer_display = dialogue_name
@@ -1734,17 +1830,26 @@ def _load_passport(passport_path, project_id: str,
                     data.get("num_heroes", 0), data.get("speakers", []))
         if warnings is not None:
             heroes = ", ".join(data.get("speakers", [])) or "—"
+            participants = ", ".join(data.get("participants", []) or [])
             host = "есть" if data.get("has_host", True) else "нет"
             crew = ", ".join(data.get("crew", []) or [])
-            summary = f"Паспорт применён: герои — {heroes}; закадровый ведущий — {host}"
+            if participants:
+                summary = (f"Паспорт применён: в кадре — {participants}"
+                           f"; герой сюжета — {heroes}")
+                if data.get("host_name"):
+                    summary += f"; ведущая(ий) — {data['host_name']}"
+            else:
+                summary = f"Паспорт применён: герои — {heroes}; закадровый ведущий — {host}"
             if crew:
                 summary += f"; группа — {crew}"
             warnings.append(summary + ".")
-            if not data.get("speakers"):
+            if not data.get("speakers") and not data.get("participants"):
                 warnings.append(
-                    "В паспорте не распознано поле «Герои» — имена в легенду не "
-                    "переданы. Ожидаемые подписи: «Герои», «Имена героев», "
-                    "«Гости», «Участники» (значение после двоеточия или строками ниже)."
+                    "В паспорте не распознаны ни «Снимаются/В кадре» (спикеры "
+                    "этой съёмки), ни «Герои» — имена в легенду не переданы. "
+                    "Ожидаемые подписи: «Снимаются», «В кадре», «Участники» "
+                    "(с ролью в скобках: «Батыршина Яна (ведущая)») либо "
+                    "«Герои»/«Гости» (значение после двоеточия или строками ниже)."
                 )
     else:
         logger.warning("[%s] Паспорт не распознан (%s)", project_id[:8], pp.name)
@@ -2155,7 +2260,13 @@ def compute_display_names_and_abbrs(name_map: dict) -> tuple[dict, dict]:
     файла: «Довлатова Алла» → «Д», конвенция f7/f8); при ``ABBR_TWO_LETTER`` —
     инициалы ПОКАЗЫВАЕМОЙ формы («Арнальди Федерико» → «АФ», конвенция ф13).
     """
-    display_map = {sid: _invert_name(n) for sid, n in name_map.items()}
+    # Стиль ф14 (легенда списком) сохраняет порядок «Фамилия Имя» как написано
+    # в паспорте: «БАТЫРШИНА ЯНА – БЯ» (с ABBR_TWO_LETTER инициалы отображаемой
+    # формы дают БЯ/КС, как в эталоне).
+    if LEGEND_LIST_STYLE:
+        display_map = dict(name_map)
+    else:
+        display_map = {sid: _invert_name(n) for sid, n in name_map.items()}
     abbr_map = _compute_smart_abbreviations(display_map if ABBR_TWO_LETTER else name_map)
     return display_map, abbr_map
 
