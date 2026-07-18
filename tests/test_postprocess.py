@@ -1154,3 +1154,79 @@ class TestLifeProtection:
             description="интервью + лайфы",
         )
         assert seen["description"] == "интервью + лайфы"
+
+
+class TestBoundaryWindows:
+    def _events(self, n, text="Реплика номер один в достаточно длинной форме?"):
+        return [{"speaker": str(i % 2), "text": f"{text} {i}", "start_s": float(i), "end_s": i + 0.9}
+                for i in range(n)]
+
+    def test_long_transcript_multiple_windows(self, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "_BOUNDARY_CHUNK_CHARS", 500)
+        prompts = []
+        monkeypatch.setattr(pp, "_gemini_call", lambda p, **kw: prompts.append(p) or "[]")
+        pp.correct_speaker_boundaries(
+            self._events(30), speaker_labels={"0": "А", "1": "Б"},
+            interviewer_id="0", merge_adjacent=False,
+        )
+        # Хвост-вопросы дают ещё один маленький вызов — окон минимум 2 и больше 1.
+        window_calls = [p for p in prompts if "Стенограмма (реплики" in p]
+        assert len(window_calls) >= 3
+        # Последняя реплика дошла до модели (обрезки 40k больше нет).
+        assert any("Реплика номер один в достаточно длинной форме? 29" in p for p in window_calls)
+
+    def test_context_line_corrections_ignored(self, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "_BOUNDARY_CHUNK_CHARS", 500)
+        calls = {"n": 0}
+
+        def fake_call(p, **kw):
+            calls["n"] += 1
+            # Каждое окно пытается «исправить» реплику 0 — принять её должно
+            # только первое окно (в остальных она контекст/вне диапазона).
+            return '[{"id": 0, "speaker": "1"}]'
+
+        monkeypatch.setattr(pp, "_gemini_call", fake_call)
+        out = pp.correct_speaker_boundaries(
+            self._events(30), speaker_labels={"0": "А", "1": "Б"},
+            interviewer_id="0", merge_adjacent=False,
+        )
+        reassigned = [s for s in out if s["speaker"] == "1" and s["text"].endswith(" 0")]
+        assert len(reassigned) == 1
+
+    def test_partial_window_failure_warns_but_applies(self, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "_BOUNDARY_CHUNK_CHARS", 500)
+        calls = {"n": 0}
+
+        def flaky(p, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise pp.GeminiPolishError("timeout")
+            return '[{"id": 5, "speaker": "1"}]' if "Стенограмма (реплики" in p else "[]"
+
+        monkeypatch.setattr(pp, "_gemini_call", flaky)
+        warnings = []
+        out = pp.correct_speaker_boundaries(
+            self._events(30), speaker_labels={"0": "А", "1": "Б"},
+            interviewer_id="0", warnings=warnings, merge_adjacent=False,
+        )
+        assert any("частично" in w for w in warnings)
+        assert any(s["speaker"] == "1" and s["text"].endswith(" 5") for s in out)
+
+    def test_all_windows_fail_soft(self, monkeypatch):
+        import backend.postprocess as pp
+
+        def boom(p, **kw):
+            raise pp.GeminiPolishError("timeout")
+
+        monkeypatch.setattr(pp, "_gemini_call", boom)
+        events = self._events(4)
+        warnings = []
+        out = pp.correct_speaker_boundaries(
+            events, speaker_labels={"0": "А", "1": "Б"},
+            interviewer_id="0", warnings=warnings, merge_adjacent=False,
+        )
+        assert out == events
+        assert any("не выполнена" in w for w in warnings)

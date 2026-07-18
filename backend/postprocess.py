@@ -754,7 +754,11 @@ def gemini_extract_passport(text: str) -> dict | None:
 
 # --- Gemini-правка границ спикеров ---
 
-_BOUNDARY_MAX_CHARS = 40000
+# Окно одного вызова (символы строк транскрипта) и строки контекста перед ним.
+# Раньше весь транскрипт шёл одним промптом до 40k: на 1.5-часовых файлах
+# медленная pro-модель не укладывалась в клиентский таймаут, а хвост обрезался.
+_BOUNDARY_CHUNK_CHARS = 12000
+_BOUNDARY_CTX_LINES = 2
 
 # Разрез текста на предложения (для split_after в правке границ).
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
@@ -848,7 +852,20 @@ def correct_speaker_boundaries(
         label = speaker_labels.get(sid, sid)
         mark = "  ⚠ПРОВЕРЬ-ХВОСТ" if n in tail_question_ns else ""
         lines.append(f"{n}\t[{sid}: {label}] {seg['text'].strip()}{mark}")
-    transcript = "\n".join(lines)[:_BOUNDARY_MAX_CHARS]
+
+    # Окна вместо одного гигантского запроса: на длинных файлах (1.5 ч) единый
+    # 40k-промпт упирался в таймаут клиента («The read operation timed out»),
+    # а хвост транскрипта вовсе обрезался. Каждое окно — свой вызов; перед
+    # окном даются 2 строки контекста (их не исправлять).
+    windows: list[tuple[int, int]] = []
+    win_start = 0
+    win_len = 0
+    for n, line in enumerate(lines):
+        if win_len and win_len + len(line) > _BOUNDARY_CHUNK_CHARS:
+            windows.append((win_start, n))
+            win_start, win_len = n, 0
+        win_len += len(line) + 1
+    windows.append((win_start, len(lines)))
 
     roles = []
     if interviewer_id is not None:
@@ -904,7 +921,6 @@ def correct_speaker_boundaries(
         "Президента?»). Саму пометку ⚠ в расчёт номеров предложений не включай.\n"
         "Верни СТРОГО JSON-массив исправлений. Если исправлять нечего — верни []. "
         "Никакого текста кроме JSON.\n\n"
-        f"Стенограмма:\n{transcript}"
     )
 
     def _fail(reason: str) -> list[dict]:
@@ -913,23 +929,56 @@ def correct_speaker_boundaries(
             warnings.append(f"Правка границ спикеров не выполнена ({reason}).")
         return segments
 
-    try:
-        result = _gemini_call(prompt, model=GEMINI_MODEL_SMART)
-    except GeminiPolishError as e:
-        return _fail(f"сбой Gemini: {e}")
-    if result is None:
-        return _fail("Gemini недоступен — ключ/прокси")
-    if not result:
-        return _fail("пустой ответ Gemini")
-    match = re.search(r"\[.*\]", result, re.DOTALL)
-    if not match:
-        return _fail("нераспознанный ответ Gemini")
-    try:
-        data = json.loads(match.group(0))
-    except (ValueError, TypeError):
-        return _fail("некорректный JSON в ответе Gemini")
-    if not isinstance(data, list):
-        return _fail("некорректный JSON в ответе Gemini")
+    data: list = []
+    failed_windows = 0
+    for win_start, win_end in windows:
+        ctx_start = max(0, win_start - _BOUNDARY_CTX_LINES)
+        chunk_lines = lines[ctx_start:win_end]
+        ctx_note = ""
+        if ctx_start < win_start:
+            ctx_note = (f"Строки с номерами меньше {win_start} даны только как "
+                        "КОНТЕКСТ — их не исправляй.\n")
+        chunk_prompt = (
+            prompt + ctx_note
+            + f"Стенограмма (реплики {win_start}–{win_end - 1}):\n"
+            + "\n".join(chunk_lines)
+        )
+        try:
+            result = _gemini_call(chunk_prompt, model=GEMINI_MODEL_SMART)
+        except GeminiPolishError:
+            failed_windows += 1
+            continue
+        if not result:
+            failed_windows += 1
+            continue
+        match = re.search(r"\[.*\]", result, re.DOTALL)
+        if not match:
+            failed_windows += 1
+            continue
+        try:
+            chunk_data = json.loads(match.group(0))
+        except (ValueError, TypeError):
+            failed_windows += 1
+            continue
+        if not isinstance(chunk_data, list):
+            failed_windows += 1
+            continue
+        # Правки контекстных строк (из соседнего окна) отбрасываем.
+        for item in chunk_data:
+            if isinstance(item, dict) and isinstance(item.get("id"), int) \
+                    and win_start <= item["id"] < win_end:
+                data.append(item)
+
+    if failed_windows == len(windows):
+        return _fail("сбой Gemini во всех окнах (таймаут/недоступен)")
+    if failed_windows:
+        logger.warning("Правка границ: %d из %d окон не обработаны (сбой Gemini)",
+                       failed_windows, len(windows))
+        if warnings is not None:
+            warnings.append(
+                f"Правка границ спикеров выполнена частично: {failed_windows} из "
+                f"{len(windows)} окон пропущено из-за сбоя Gemini."
+            )
 
     out = [dict(s) for s in segments]
     reassigned = 0
