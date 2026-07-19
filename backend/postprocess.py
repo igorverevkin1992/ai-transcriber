@@ -9,6 +9,9 @@ from backend.config import (
     GEMINI_MODEL_SMART,
     GEMINI_TIMEOUT_SECONDS,
     GLOSSARY_REPLACEMENTS,
+    LOCAL_LLM_API_KEY,
+    LOCAL_LLM_BASE_URL,
+    LOCAL_LLM_MODEL,
     TECH_MOMENT_AGGRESSIVE,
     TECH_MOMENT_DETECTION,
     TRANSCRIPT_GLOSSARY,
@@ -246,13 +249,41 @@ def _clean_gemini_response(result: str) -> str:
     return result.strip()
 
 
-def _gemini_ready() -> bool:
-    """Доступен ли Gemini-клиент (лениво создаёт и кэширует).
+# Qwen3 и другие «думающие» локальные модели заворачивают рассуждения в
+# <think>…</think> — из ответа их надо вырезать.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
+
+def _local_llm_call(prompt: str, model: str | None = None) -> str:
+    """Один вызов локальной OpenAI-совместимой LLM (Ollama/llama.cpp/vLLM)."""
+    import requests
+    resp = requests.post(
+        f"{LOCAL_LLM_BASE_URL}/chat/completions",
+        json={
+            "model": model or LOCAL_LLM_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "stream": False,
+        },
+        headers={"Authorization": f"Bearer {LOCAL_LLM_API_KEY}"},
+        timeout=GEMINI_TIMEOUT_SECONDS,
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"] or ""
+    return _THINK_BLOCK_RE.sub("", content).strip()
+
+
+def _gemini_ready() -> bool:
+    """Доступен ли LLM-бэкенд (лениво создаёт и кэширует облачный клиент).
+
+    При заданном ``LOCAL_LLM_BASE_URL`` бэкенд считается доступным всегда
+    (сбои конкретных вызовов обрабатываются ретраями в ``_gemini_call``).
     False = ключ не задан / пакет отсутствует / клиент не создался (прокси и
     т.п.) — в этом случае все смысловые пассы деградируют, и вызывающий код
     обязан сделать это ВИДИМЫМ (warning в UI/лог), а не молчать.
     """
+    if LOCAL_LLM_BASE_URL:
+        return True
     global _gemini_client
     if _gemini_client is None:
         with _gemini_lock:
@@ -324,6 +355,25 @@ def _gemini_call(prompt: str, model: str | None = None) -> str | None:
     ``GeminiPolishError``.
     """
     if not _gemini_ready():
+        return None
+
+    # Локальная LLM: один и тот же чат-эндпоинт для всех пассов, ретраи те же.
+    if LOCAL_LLM_BASE_URL:
+        for attempt in range(GEMINI_MAX_RETRIES):
+            try:
+                result = _clean_gemini_response(_local_llm_call(prompt))
+                gemini_calls.labels(outcome="success").inc()
+                return result
+            except Exception as e:
+                if attempt < GEMINI_MAX_RETRIES - 1:
+                    delay = GEMINI_BACKOFF[attempt]
+                    logger.warning("Локальная LLM ошибка (попытка %d/%d): %s. Retry через %dс",
+                                   attempt + 1, GEMINI_MAX_RETRIES, e, delay)
+                    time.sleep(delay)
+                    continue
+                gemini_calls.labels(outcome="error").inc()
+                logger.warning("Локальная LLM окончательная ошибка: %s", e)
+                raise GeminiPolishError(str(e)) from e
         return None
 
     use_model = model or GEMINI_MODEL

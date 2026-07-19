@@ -221,6 +221,22 @@ GEMINI_MODEL_SMART = os.getenv("GEMINI_MODEL_SMART", "").strip() or GEMINI_MODEL
 # Проверка доступности Gemini при старте сервера (один тестовый вызов): сбой
 # ключа/прокси виден сразу в логе, а не как молчаливая деградация пассов.
 GEMINI_HEALTHCHECK = os.getenv("GEMINI_HEALTHCHECK", "true").lower() in ("1", "true", "yes")
+# --- Локальная LLM вместо облачного Gemini (нулевая стоимость API) ---
+# OpenAI-совместимый эндпоинт: Ollama (http://localhost:11434/v1), llama.cpp
+# (--api), vLLM, LM Studio. Если задан LOCAL_LLM_BASE_URL — ВСЕ смысловые пассы
+# (полировка, техмоменты, правка границ, имена, паспорт) идут в него;
+# GEMINI_API_KEY не нужен. Рекомендуемые модели: qwen3:14b/32b, gemma3:12b/27b
+# (русский + JSON). На CPU-only машине локальная LLM МЕДЛЕННАЯ — практично
+# только с GPU. GEMINI_MODEL_SMART в локальном режиме игнорируется (одна модель
+# на все пассы).
+LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "").strip().rstrip("/")
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "qwen3:14b")
+# Мультимодальная локальная модель для vision-описаний техмоментов (например
+# qwen2.5vl:7b, gemma3:12b). Пусто → vision-описания в локальном режиме мягко
+# отключаются (маркеры остаются «голыми»).
+LOCAL_LLM_VISION_MODEL = os.getenv("LOCAL_LLM_VISION_MODEL", "").strip()
+LOCAL_LLM_API_KEY = os.getenv("LOCAL_LLM_API_KEY", "ollama")
+
 # Таймаут одного HTTP-запроса к Gemini, секунды. Без него зависший сокет
 # (прокси-«чёрная дыра») держал вызов неограниченно: ретрай-петля _gemini_call
 # ловит только ошибки, а не молчание. Покрывает и vision-вызовы (общий клиент).

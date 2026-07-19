@@ -1230,3 +1230,91 @@ class TestBoundaryWindows:
         )
         assert out == events
         assert any("не выполнена" in w for w in warnings)
+
+
+class TestLocalLLMBackend:
+    class _FakeResp:
+        def __init__(self, content):
+            self._content = content
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"choices": [{"message": {"content": self._content}}]}
+
+    def test_gemini_call_routes_to_local(self, monkeypatch):
+        import requests
+
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+        monkeypatch.setattr(pp, "LOCAL_LLM_MODEL", "qwen3:14b")
+        monkeypatch.setattr(pp, "GEMINI_API_KEY", None)  # ключ не нужен
+        seen = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            seen.update(url=url, model=json["model"], prompt=json["messages"][0]["content"])
+            return self._FakeResp("нормальный ответ модели")
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        assert pp._gemini_call("тестовый промпт") == "нормальный ответ модели"
+        assert seen["url"].endswith("/chat/completions")
+        assert seen["model"] == "qwen3:14b"
+
+    def test_think_blocks_stripped(self, monkeypatch):
+        import requests
+
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+        monkeypatch.setattr(
+            requests, "post",
+            lambda *a, **k: self._FakeResp("<think>рассуждаю про себя</think>ответ"),
+        )
+        assert pp._gemini_call("промпт") == "ответ"
+
+    def test_local_failure_raises_after_retries(self, monkeypatch):
+        import pytest as _pytest
+        import requests
+
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+        monkeypatch.setattr(pp, "GEMINI_BACKOFF", [0, 0, 0])
+
+        def boom(*a, **k):
+            raise requests.ConnectionError("нет сервера")
+
+        monkeypatch.setattr(requests, "post", boom)
+        with _pytest.raises(pp.GeminiPolishError):
+            pp._gemini_call("промпт")
+
+    def test_vision_local_uses_data_uri(self, monkeypatch):
+        import requests
+
+        import backend.tech_vision as tv
+        monkeypatch.setattr(tv, "LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+        monkeypatch.setattr(tv, "LOCAL_LLM_VISION_MODEL", "qwen2.5vl:7b")
+        part = tv._image_part(b"12345", "image/jpeg")
+        assert part["type"] == "image_url"
+        assert part["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+        seen = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            seen.update(model=json["model"], content=json["messages"][0]["content"])
+            return TestLocalLLMBackend._FakeResp('{"0": "съемка"}')
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        out = tv._vision_generate(["текст промпта", part])
+        assert out == '{"0": "съемка"}'
+        assert seen["model"] == "qwen2.5vl:7b"
+        assert seen["content"][0] == {"type": "text", "text": "текст промпта"}
+
+    def test_vision_local_without_model_soft_off(self, monkeypatch):
+        import backend.tech_vision as tv
+        monkeypatch.setattr(tv, "LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+        monkeypatch.setattr(tv, "LOCAL_LLM_VISION_MODEL", "")
+        assert tv._vision_generate(["текст"]) is None
+
+    def test_ready_without_key_in_local_mode(self, monkeypatch):
+        import backend.postprocess as pp
+        monkeypatch.setattr(pp, "LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+        monkeypatch.setattr(pp, "_gemini_client", None)
+        assert pp._gemini_ready() is True

@@ -158,9 +158,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Ошибка при проверке FFmpeg: %s", e)
 
-    # Здоровье Gemini: раньше сбой клиента (ключ/прокси) обнаруживался только по
-    # косвенным признакам (нет техмоментов/полировки). Проверяем при старте явно.
-    if GEMINI_API_KEY and GEMINI_HEALTHCHECK:
+    # Здоровье LLM-бэкенда: раньше сбой клиента (ключ/прокси) обнаруживался
+    # только по косвенным признакам (нет техмоментов/полировки). Проверяем явно.
+    from backend.config import LOCAL_LLM_BASE_URL, LOCAL_LLM_MODEL
+    if LOCAL_LLM_BASE_URL and GEMINI_HEALTHCHECK:
+        from backend.postprocess import gemini_health_check
+        ok, reason = gemini_health_check()
+        if ok:
+            logger.info("Локальная LLM доступна (%s, модель: %s) — облачные "
+                        "API-вызовы не используются", LOCAL_LLM_BASE_URL, LOCAL_LLM_MODEL)
+        else:
+            logger.error(
+                "Локальная LLM НЕДОСТУПНА (%s): %s. Полировка, техмоменты и "
+                "правка границ работать НЕ будут. Проверьте, что сервер запущен "
+                "(например `ollama serve`) и модель скачана.",
+                LOCAL_LLM_BASE_URL, reason,
+            )
+    elif GEMINI_API_KEY and GEMINI_HEALTHCHECK:
         from backend.postprocess import gemini_health_check
         ok, reason = gemini_health_check()
         if ok:
@@ -172,7 +186,8 @@ async def lifespan(app: FastAPI):
                 "спикеров работать НЕ будут — стенограммы будут черновыми.", reason,
             )
     elif not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY не задан — полировка/техмоменты/правка границ отключены.")
+        logger.warning("Ни LOCAL_LLM_BASE_URL, ни GEMINI_API_KEY не заданы — "
+                       "полировка/техмоменты/правка границ отключены.")
 
     _backup_sqlite()
     _cleanup_old_docx()

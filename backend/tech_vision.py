@@ -18,6 +18,10 @@ from pathlib import Path
 
 from backend.config import (
     GEMINI_MODEL,
+    GEMINI_TIMEOUT_SECONDS,
+    LOCAL_LLM_API_KEY,
+    LOCAL_LLM_BASE_URL,
+    LOCAL_LLM_VISION_MODEL,
     TECH_VISION_MAX_MARKERS,
     TECH_VISION_MIN_GAP_SECONDS,
     logger,
@@ -222,13 +226,41 @@ def _encode_jpeg(png_path: str) -> tuple[bytes, str] | None:
 
 
 def _image_part(data: bytes, mime: str):
-    """Часть contents с изображением (новый SDK google-genai)."""
+    """Часть contents с изображением: genai-Part (облако) или OpenAI-словарь
+    с data-URI (локальная мультимодальная модель)."""
+    if LOCAL_LLM_BASE_URL:
+        import base64
+        b64 = base64.b64encode(data).decode("ascii")
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
     from google.genai import types
     return types.Part.from_bytes(data=data, mime_type=mime)
 
 
 def _vision_generate(contents: list) -> str | None:
-    """Мультимодальный вызов Gemini; None — клиент недоступен."""
+    """Мультимодальный вызов (Gemini или локальная LLM); None — недоступно."""
+    if LOCAL_LLM_BASE_URL:
+        if not LOCAL_LLM_VISION_MODEL:
+            # Локальный режим без мультимодальной модели: vision мягко выключен.
+            return None
+        import requests
+        message_content = [
+            part if isinstance(part, dict) else {"type": "text", "text": str(part)}
+            for part in contents
+        ]
+        resp = requests.post(
+            f"{LOCAL_LLM_BASE_URL}/chat/completions",
+            json={
+                "model": LOCAL_LLM_VISION_MODEL,
+                "messages": [{"role": "user", "content": message_content}],
+                "temperature": 0.0,
+                "stream": False,
+            },
+            headers={"Authorization": f"Bearer {LOCAL_LLM_API_KEY}"},
+            timeout=GEMINI_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        import backend.postprocess as pp
+        return pp._THINK_BLOCK_RE.sub("", resp.json()["choices"][0]["message"]["content"] or "")
     import backend.postprocess as pp
     if not pp._gemini_ready():
         return None
